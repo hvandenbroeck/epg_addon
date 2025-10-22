@@ -1,0 +1,5 @@
+{
+    "options": {
+        "ha_url": "http://supervisor/core"
+    }
+}

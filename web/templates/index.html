@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Energy Optimizer</title>
+    <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
+    <style>
+        #timeline {
+            max-width: 1200px;
+            margin: 35px auto;
+        }
+    </style>
+</head>
+<body>
+    <div id="timeline"></div>
+    <script>
+        let chart = null;
+
+        function groupIntervalsByDevice(schedule) {
+            // Returns { device: [ {start, stop}, ... ] }
+            const grouped = {};
+            schedule.forEach(item => {
+                if (!grouped[item.device]) grouped[item.device] = [];
+                grouped[item.device].push({
+                    start: new Date(item.start).getTime(),
+                    stop: new Date(item.stop).getTime()
+                });
+            });
+            return grouped;
+        }
+
+        function updateChart() {
+            fetch('api/results')
+                .then(response => response.json())
+                .then(data => {
+                    if (!Array.isArray(data) || !data.length) return;
+                    const schedule = data[0].schedule;
+                    if (!Array.isArray(schedule)) return;
+
+                    const deviceLabels = {
+                        wp: 'Heat Pump',
+                        hw: 'Hot Water',
+                        bat_charge: 'Battery Charge',
+                        bat_discharge: 'Battery Discharge'
+                    };
+                    const devices = ['wp', 'hw', 'bat_charge', 'bat_discharge'];
+
+                    const grouped = groupIntervalsByDevice(schedule);
+
+                    const series = devices.map(device => ({
+                        name: deviceLabels[device],
+                        data: (grouped[device] || []).map(interval => ({
+                            x: deviceLabels[device],
+                            y: [interval.start, interval.stop]
+                        }))
+                    }));
+
+                    // Find min/max for xaxis
+                    let minTime = Infinity, maxTime = -Infinity;
+                    schedule.forEach(item => {
+                        const start = new Date(item.start).getTime();
+                        const stop = new Date(item.stop).getTime();
+                        if (start < minTime) minTime = start;
+                        if (stop > maxTime) maxTime = stop;
+                    });
+
+                    const options = {
+                        series: series,
+                        chart: {
+                            height: 350,
+                            type: 'rangeBar'
+                        },
+                        plotOptions: {
+                            bar: {
+                                horizontal: true
+                            }
+                        },
+                        // custom tooltip to show both date and time for start and end
+                        tooltip: {
+                            custom: function(opts) {
+                                const seriesData = opts.w.config.series[opts.seriesIndex].data[opts.dataPointIndex];
+                                if (!seriesData || !seriesData.y) return '';
+                                const [startTs, endTs] = seriesData.y;
+                                const start = new Date(startTs);
+                                const end = new Date(endTs);
+                                // use toLocaleString so it includes date and time
+                                const startStr = start.toLocaleString();
+                                const endStr = end.toLocaleString();
+                                const seriesName = opts.w.config.series[opts.seriesIndex].name || '';
+                                return `<div class="apexcharts-tooltip-range" style="padding:6px;">
+                                            <div style="font-weight:600;margin-bottom:4px;">${seriesName}</div>
+                                            <div>${startStr} — ${endStr}</div>
+                                        </div>`;
+                            }
+                        },
+                        xaxis: {
+                            type: 'datetime',
+                            min: minTime - (6 * 60 * 60 * 1000),  // 6 hours before first event
+                            max: maxTime + (6 * 60 * 60 * 1000)   // 6 hours after last event
+                        },
+                        annotations: {
+                            xaxis: [{
+                                x: Date.now(),
+                                borderColor: '#FF0000',
+                                label: {
+                                    text: 'Now',
+                                    style: {
+                                        color: '#FF0000',
+                                        fontWeight: 700
+                                    }
+                                }
+                            }]
+                        }
+                    };
+
+                    if (!chart) {
+                        chart = new ApexCharts(document.querySelector("#timeline"), options);
+                        chart.render();
+                    } else {
+                        chart.updateOptions(options);
+                    }
+                });
+        }
+
+        // Update every minute
+        updateChart();
+        setInterval(updateChart, 60000);
+    </script>
+</body>
+</html>
