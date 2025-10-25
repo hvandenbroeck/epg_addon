@@ -1,7 +1,8 @@
 import logging
 import aiohttp
-from .config import device_actions
+from .devices_config import device_actions
 from .utils import ensure_list
+from .config import CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -9,14 +10,8 @@ logger = logging.getLogger(__name__)
 class Devices:
     """Manages device actions and execution."""
 
-    def __init__(self, ha_url, access_token):
-        """Initialize Devices with Home Assistant connection details.
-        
-        Args:
-            ha_url: Home Assistant base URL
-            access_token: Home Assistant authentication token
-        """
-        self.ha_url = ha_url
+    def __init__(self, access_token):
+        self.ha_url = CONFIG['options']['ha_url']
         self.headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",

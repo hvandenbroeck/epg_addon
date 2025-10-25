@@ -4,8 +4,12 @@ import argparse
 import asyncio
 import logging
 from src.optimizer import HeatpumpOptimizer
-from src.statistics_fetcher import StatisticsFetcher
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from src.statistics_loader import StatisticsLoader
+from src.weather import Weather
+from src.prediction import Prediction
+from src.HAConfig import HAEnergyDashboardFetcher
+from src.config import CONFIG
 
 # Configure logging
 logging.basicConfig(
@@ -17,25 +21,30 @@ logger = logging.getLogger(__name__)
 async def main():
     """Main function to run the optimization."""
     parser = argparse.ArgumentParser(description='Home Assistant Heat Pump Optimizer')
-    parser.add_argument('--HAUrl', required=True, help='Home Assistant URL (e.g., http://homeassistant.local:8123)')
     parser.add_argument('--token', required=True, help='Home Assistant Long-Lived Access Token')
     args = parser.parse_args()
+
+
+    # --- Run prediction at addon start (inlined) ---
+    statistics_loader = StatisticsLoader(args.token)
+    weather = Weather(args.token)
+    prediction = Prediction(statistics_loader, weather)
+    await prediction.calculateTomorrowsPowerUsage()
 
     # Create APScheduler instance
     scheduler = AsyncIOScheduler()
     scheduler.start()
 
     # Create optimizer instance with scheduler
-    logger.info(args.HAUrl + "----" + args.token)
-    optimizer = HeatpumpOptimizer(args.HAUrl, args.token, scheduler=scheduler)
-
-    # Initialize statistics fetcher and fetch last week's data
-    logger.info("Initializing StatisticsFetcher...")
-    statistics_fetcher = StatisticsFetcher(args.HAUrl, args.token)
-    await statistics_fetcher.initialize()
+    # logger.info(args.HAUrl + "----" + args.token)
+    optimizer = HeatpumpOptimizer(args.token, scheduler=scheduler)
 
     # Run initial optimization
     await optimizer.run_optimization()
+
+    # Test WS API 
+    fetcher = HAEnergyDashboardFetcher(args.token)
+    await fetcher.fetch_energy_dashboard_config()
 
     # Schedule daily optimization at 16:05
     async def scheduled_optimization():

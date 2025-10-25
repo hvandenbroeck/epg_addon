@@ -1,5 +1,6 @@
 {
     "options": {
-        "ha_url": "http://supervisor/core"
+        "ha_url": "http://supervisor/core",
+        "ha_ws_url": "ws://supervisor/core/websocket"
     }
 }

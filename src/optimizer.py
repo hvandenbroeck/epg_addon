@@ -9,18 +9,18 @@ from .devices import Devices
 from .scheduler import Scheduler
 from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge
 from .utils import slot_to_time, get_block_len, slots_to_iso_ranges, merge_sequential_timeslots
+from .config import CONFIG
 
 logger = logging.getLogger(__name__)
 
 class HeatpumpOptimizer:
-    def __init__(self, ha_url, access_token, scheduler=None):
-        """Initialize the optimizer with Home Assistant connection details and scheduler."""
-        self.ha_url = ha_url
+    def __init__(self, access_token, scheduler=None):
+        self.ha_url = CONFIG['options']['ha_url']
         self.headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
         }
-        self.devices = Devices(ha_url, access_token)
+        self.devices = Devices(access_token)
         self.scheduler_instance = Scheduler(scheduler, self.devices)
 
     async def get_state(self, entity_id):
@@ -35,7 +35,9 @@ class HeatpumpOptimizer:
     async def call_service(self, service, **service_data):
         """Call a Home Assistant service."""
         domain, service_name = service.split('/')
+        
         url = f"{self.ha_url}/api/services/{domain}/{service_name}"
+        
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=self.headers, json=service_data) as response:
                 return response.status == 200
