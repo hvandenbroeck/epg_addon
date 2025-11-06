@@ -75,6 +75,9 @@
     <div class="peak-display">
         <div class="peak-label">Current Power Peak</div>
         <div class="peak-value" id="peakValue">-- kW</div>
+        <div class="peak-label" style="margin-top: 20px;">Available Power</div>
+        <div class="peak-value" id="availablePower" style="color: #28a745;">-- kW</div>
+        <div class="peak-label" style="margin-top: 10px; font-size: 14px;">Max Peak: <span id="maxPeak">--</span> kW</div>
         <div class="peak-timestamp" id="peakTimestamp">Loading...</div>
     </div>
     <div id="timeline">
@@ -91,9 +94,21 @@
                 .then(data => {
                     const peakKw = data.peak_kw || 0;
                     const timestamp = data.timestamp || '';
+                    const maxPeakKw = data.max_peak_kw || 7.5;
+                    const availablePowerKw = data.available_power_kw || 0;
                     
                     document.getElementById('peakValue').textContent = 
                         peakKw.toFixed(2) + ' kW';
+                    
+                    document.getElementById('availablePower').textContent = 
+                        availablePowerKw.toFixed(2) + ' kW';
+                    
+                    document.getElementById('maxPeak').textContent = 
+                        maxPeakKw.toFixed(1);
+                    
+                    // Color code available power (green if positive, red if negative)
+                    const availableElement = document.getElementById('availablePower');
+                    availableElement.style.color = availablePowerKw >= 0 ? '#28a745' : '#dc3545';
                     
                     if (timestamp) {
                         const date = new Date(timestamp);
@@ -107,6 +122,8 @@
                 .catch(error => {
                     console.error('Error fetching peak:', error);
                     document.getElementById('peakValue').textContent = '-- kW';
+                    document.getElementById('availablePower').textContent = '-- kW';
+                    document.getElementById('maxPeak').textContent = '--';
                     document.getElementById('peakTimestamp').textContent = 
                         'Error loading peak data';
                 });

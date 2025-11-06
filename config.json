@@ -5,6 +5,7 @@
         "energy_consumption_entities": [
             "sensor.energy_consumption_tarif_1",
             "sensor.energy_consumption_tarif_2"
-        ]
+        ],
+        "max_peak_kW": 7.5
     }
 }

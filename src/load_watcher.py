@@ -16,6 +16,7 @@ class LoadWatcher:
             "Content-Type": "application/json",
         }
         self.energy_entities = CONFIG['options'].get('energy_consumption_entities', [])
+        self.max_peak_kw = CONFIG['options'].get('max_peak_kW', 7.5)
         self.db = TinyDB('db.json')
         
     async def get_state(self, entity_id):
@@ -83,15 +84,20 @@ class LoadWatcher:
             else:
                 logger.info("  📝 First run - no previous data to compare")
             
+            # Calculate available power
+            available_power_kw = self.max_peak_kw - current_peak_kw
+            
             # Update database with current reading and calculated peak
             self.db.upsert({
                 "id": "load_watcher",
                 "timestamp": current_reading['timestamp'],
                 "total_energy_consumption": total_energy,
-                "current_peak_kw": current_peak_kw
+                "current_peak_kw": current_peak_kw,
+                "max_peak_kw": self.max_peak_kw,
+                "available_power_kw": available_power_kw
             }, query.id == 'load_watcher')
             
-            logger.info(f"✅ Load watcher complete. Total: {total_energy:.3f} kWh, Peak: {current_peak_kw:.2f} kW")
+            logger.info(f"✅ Load watcher complete. Total: {total_energy:.3f} kWh, Peak: {current_peak_kw:.2f} kW, Available: {available_power_kw:.2f} kW")
             
         except Exception as e:
             logger.error(f"❌ Error in load watcher: {e}", exc_info=True)

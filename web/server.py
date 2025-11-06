@@ -36,12 +36,16 @@ def get_peak():
         return jsonify({
             'peak_kw': data.get('current_peak_kw', 0.0),
             'timestamp': data.get('timestamp', ''),
-            'total_energy_consumption': data.get('total_energy_consumption', 0.0)
+            'total_energy_consumption': data.get('total_energy_consumption', 0.0),
+            'max_peak_kw': data.get('max_peak_kw', 7.5),
+            'available_power_kw': data.get('available_power_kw', 0.0)
         })
     return jsonify({
         'peak_kw': 0.0,
         'timestamp': '',
-        'total_energy_consumption': 0.0
+        'total_energy_consumption': 0.0,
+        'max_peak_kw': 7.5,
+        'available_power_kw': 0.0
     })
 
 @app.route('/api/gantt')
