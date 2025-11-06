@@ -7,7 +7,7 @@ import asyncio
 
 from .devices import Devices
 from .scheduler import Scheduler
-from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge
+from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, optimize_ev
 from .utils import slot_to_time, get_block_len, slots_to_iso_ranges, merge_sequential_timeslots
 from .config import CONFIG
 
@@ -66,6 +66,7 @@ class HeatpumpOptimizer:
         BAT_CHARGE_SLOTS = 10
         BAT_DISCHARGE_BLOCK_HOURS = 1
         BAT_DISCHARGE_BLOCKS = 10
+        EV_MAX_PRICE = 0.08  # 5 cents per kWh
 
         logger.info("🔎 Starting energy optimization using Nordpool prices...")
 
@@ -98,7 +99,8 @@ class HeatpumpOptimizer:
             hw_times = optimize_hw(prices, SLOT_MINUTES, HW_BLOCK_HOURS, HW_BLOCKS, HW_MIN_GAP_HOURS, slot_to_time)
             bat_charge_times = optimize_battery(prices, SLOT_MINUTES, BAT_CHARGE_SLOTS, slot_to_time)
             bat_discharge_times = optimize_bat_discharge(prices, SLOT_MINUTES, BAT_DISCHARGE_BLOCK_HOURS, BAT_DISCHARGE_BLOCKS, slot_to_time)
-            results[label] = {"wp": wp_times, "hw": hw_times, "bat_charge": bat_charge_times, "bat_discharge": bat_discharge_times}
+            ev_times = optimize_ev(prices, SLOT_MINUTES, EV_MAX_PRICE, slot_to_time)
+            results[label] = {"wp": wp_times, "hw": hw_times, "bat_charge": bat_charge_times, "bat_discharge": bat_discharge_times, "ev": ev_times}
             logger.info(f"⚙️ Results: {json.dumps(results[label])}")
 
             # Prepare schedule entries for TinyDB

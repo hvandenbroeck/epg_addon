@@ -48,13 +48,24 @@ async def main():
 
     # Schedule daily optimization at 16:05
     async def scheduled_optimization():
+        logger.info("🕐 Starting scheduled optimization at 16:05")
         try:
             await optimizer.run_optimization()
+            logger.info("✅ Scheduled optimization completed successfully")
         except Exception as e:
-            logger.error(f"Error during scheduled optimization: {e}", exc_info=True)
+            logger.error(f"❌ Error during scheduled optimization: {e}", exc_info=True)
 
-    scheduler.add_job(scheduled_optimization, 'cron', hour=16, minute=5)
 
+    scheduler.add_job(
+        scheduled_optimization, 
+        'cron', 
+        hour=16, 
+        minute=5,
+        timezone='Europe/Brussels',  # Set your timezone
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=300  # Allow 5 min grace period if system is busy
+    )
     logger.info("Starting optimization APScheduler...")
 
     # Keep the script running

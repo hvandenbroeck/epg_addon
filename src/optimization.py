@@ -56,3 +56,9 @@ def optimize_bat_discharge(prices, slot_minutes, block_hours, n_blocks, slot_to_
     model.solve(pulp.GLPK(msg=0))
     starts = [i for i in range(len(x)) if pulp.value(x[i]) == 1]
     return [slot_to_time(i, slot_minutes) for i in starts]
+
+def optimize_ev(prices, slot_minutes, max_price, slot_to_time):
+    """Optimize EV charging by selecting all timeslots where price is below threshold."""
+    # Find all slots where price is below the threshold
+    slots = [i for i in range(len(prices)) if prices[i] <= max_price]
+    return [slot_to_time(i, slot_minutes) for i in slots]

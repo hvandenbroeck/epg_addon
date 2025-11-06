@@ -221,5 +221,23 @@ device_actions = {
                 }
             ]
         }
+    },
+    "ev": {
+        "start": {
+            "entity": [
+                {
+                    "service": "switch/turn_on",
+                    "entity_id": "switch.ev_charger"
+                }
+            ]
+        },
+        "stop": {
+            "entity": [
+                {
+                    "service": "switch/turn_off",
+                    "entity_id": "switch.ev_charger"
+                }
+            ]
+        }
     }
 }

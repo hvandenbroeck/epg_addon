@@ -4,6 +4,9 @@ import json
 from datetime import datetime, timedelta
 import logging
 from tinydb import TinyDB, Query
+import plotly.express as px
+import plotly.graph_objects as go
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +25,112 @@ def get_results():
     db = TinyDB('db.json')
     schedule_docs = db.search(Query().id == 'schedule')
     return schedule_docs
+
+@app.route('/api/gantt')
+def get_gantt():
+    """Generate and return Plotly Gantt chart as interactive HTML"""
+    db = TinyDB('db.json')
+    schedule_docs = db.search(Query().id == 'schedule')
+    
+    if not schedule_docs or not schedule_docs[0].get('schedule'):
+        fig = go.Figure()
+        fig.update_layout(title="No schedule data available")
+        return fig.to_html(include_plotlyjs=True, full_html=False)
+    
+    schedule = schedule_docs[0]['schedule']
+    
+    # Device labels and colors
+    device_labels = {
+        'wp': 'HP',  # Shortened for mobile
+        'hw': 'HW',  # Shortened for mobile
+        'bat_charge': 'Bat+',
+        'bat_discharge': 'Bat-',
+        'bat': 'Bat',
+        'ev': 'EV'
+    }
+    
+    device_colors = {
+        'HP': '#FF6B6B',
+        'HW': '#4ECDC4',
+        'Bat+': '#45B7D1',
+        'Bat-': '#FFA07A',
+        'Bat': '#95E1D3',
+        'EV': '#9B59B6'
+    }
+    
+    # Prepare data for timeline
+    df_list = []
+    for entry in schedule:
+        device = entry.get('device')
+        start = entry.get('start')
+        stop = entry.get('stop')
+        
+        if device and start and stop:
+            task_name = device_labels.get(device, device)
+            df_list.append({
+                'Task': task_name,
+                'Start': pd.to_datetime(start),
+                'Finish': pd.to_datetime(stop)
+            })
+    
+    if not df_list:
+        fig = go.Figure()
+        fig.update_layout(title="No valid schedule entries")
+        return fig.to_html(include_plotlyjs=True, full_html=False)
+    
+    df = pd.DataFrame(df_list)
+    
+    # Create timeline using Plotly Express
+    fig = px.timeline(df, x_start="Start", x_end="Finish", y="Task", color="Task",
+                      color_discrete_map=device_colors,
+                      title="Energy Optimization Schedule")
+    
+    # Add "Now" line as a shape
+    now = datetime.now()
+    fig.add_shape(
+        type="line",
+        x0=now, x1=now,
+        y0=0, y1=1,
+        yref="paper",
+        line=dict(color="red", width=2, dash="dash")
+    )
+    fig.add_annotation(
+        x=now, y=1, yref="paper",
+        text="Now",
+        showarrow=False,
+        yanchor="bottom",
+        font=dict(color="red", size=12)
+    )
+    
+    # Update layout
+    fig.update_layout(
+        xaxis_title="Time",
+        yaxis_title="",  # Remove y-axis title to save space
+        height=400,
+        showlegend=False,
+        xaxis=dict(tickformat='%Y-%m-%d %H:%M', tickangle=-45),
+        margin=dict(l=50, r=20, t=50, b=80),  # Reduced left margin significantly
+        # Mobile-friendly settings
+        autosize=True,
+        dragmode='pan',
+        modebar=dict(
+            orientation='v',
+            bgcolor='rgba(255,255,255,0.7)'
+        ),
+        font=dict(size=10)  # Smaller font for mobile
+    )
+    
+    # Configure for better mobile experience
+    config = {
+        'responsive': True,
+        'displayModeBar': True,
+        'modeBarButtonsToRemove': ['select2d', 'lasso2d', 'autoScale2d'],
+        'modeBarButtonsToAdd': ['pan2d'],
+        'scrollZoom': True,
+        'displaylogo': False
+    }
+    
+    return fig.to_html(include_plotlyjs=True, full_html=False, config=config)
 
 
 
