@@ -26,6 +26,24 @@ def get_results():
     schedule_docs = db.search(Query().id == 'schedule')
     return schedule_docs
 
+@app.route('/api/peak')
+def get_peak():
+    """Return current peak power consumption"""
+    db = TinyDB('db.json')
+    load_watcher_docs = db.search(Query().id == 'load_watcher')
+    if load_watcher_docs:
+        data = load_watcher_docs[0]
+        return jsonify({
+            'peak_kw': data.get('current_peak_kw', 0.0),
+            'timestamp': data.get('timestamp', ''),
+            'total_energy_consumption': data.get('total_energy_consumption', 0.0)
+        })
+    return jsonify({
+        'peak_kw': 0.0,
+        'timestamp': '',
+        'total_energy_consumption': 0.0
+    })
+
 @app.route('/api/gantt')
 def get_gantt():
     """Generate and return Plotly Gantt chart as interactive HTML"""

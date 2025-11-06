@@ -9,6 +9,31 @@
             padding: 20px;
             background-color: #f5f5f5;
         }
+        .peak-display {
+            max-width: 1400px;
+            margin: 0 auto 20px auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .peak-value {
+            font-size: 48px;
+            font-weight: bold;
+            color: #0066cc;
+            margin: 10px 0;
+        }
+        .peak-label {
+            font-size: 18px;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        .peak-timestamp {
+            font-size: 12px;
+            color: #999;
+            margin-top: 5px;
+        }
         #timeline {
             max-width: 1400px;
             margin: 0 auto;
@@ -47,6 +72,11 @@
     </style>
 </head>
 <body>
+    <div class="peak-display">
+        <div class="peak-label">Current Power Peak</div>
+        <div class="peak-value" id="peakValue">-- kW</div>
+        <div class="peak-timestamp" id="peakTimestamp">Loading...</div>
+    </div>
     <div id="timeline">
         <div class="loading">Loading schedule...</div>
     </div>
@@ -55,6 +85,33 @@
         <a href="download/features.csv" download>Download features.csv</a>
     </div>
     <script>
+        function updatePeak() {
+            fetch('api/peak')
+                .then(response => response.json())
+                .then(data => {
+                    const peakKw = data.peak_kw || 0;
+                    const timestamp = data.timestamp || '';
+                    
+                    document.getElementById('peakValue').textContent = 
+                        peakKw.toFixed(2) + ' kW';
+                    
+                    if (timestamp) {
+                        const date = new Date(timestamp);
+                        document.getElementById('peakTimestamp').textContent = 
+                            'Last updated: ' + date.toLocaleString();
+                    } else {
+                        document.getElementById('peakTimestamp').textContent = 
+                            'Waiting for first measurement...';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching peak:', error);
+                    document.getElementById('peakValue').textContent = '-- kW';
+                    document.getElementById('peakTimestamp').textContent = 
+                        'Error loading peak data';
+                });
+        }
+
         function updateChart() {
             fetch('api/gantt')
                 .then(response => response.text())
@@ -81,8 +138,12 @@
                 });
         }
 
-        // Update on load and every minute
+        // Update on load
+        updatePeak();
         updateChart();
+        
+        // Update peak every 30 seconds, chart every minute
+        setInterval(updatePeak, 30000);
         setInterval(updateChart, 60000);
     </script>
 </body>

@@ -1,6 +1,10 @@
 {
     "options": {
         "ha_url": "http://supervisor/core",
-        "ha_ws_url": "ws://supervisor/core/websocket"
+        "ha_ws_url": "ws://supervisor/core/websocket",
+        "energy_consumption_entities": [
+            "sensor.energy_consumption_tarif_1",
+            "sensor.energy_consumption_tarif_2"
+        ]
     }
 }

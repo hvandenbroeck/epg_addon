@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging
 from src.optimizer import HeatpumpOptimizer
+from src.load_watcher import LoadWatcher
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.statistics_loader import StatisticsLoader
 from src.weather import Weather
@@ -39,8 +40,14 @@ async def main():
     # logger.info(args.HAUrl + "----" + args.token)
     optimizer = HeatpumpOptimizer(args.token, scheduler=scheduler)
 
+    # Create load watcher instance
+    load_watcher = LoadWatcher(args.token)
+
     # Run initial optimization
     await optimizer.run_optimization()
+
+    # Run initial load watcher
+    await load_watcher.run()
 
     # Test WS API 
     fetcher = HAEnergyDashboardFetcher(args.token)
@@ -67,6 +74,22 @@ async def main():
         misfire_grace_time=300  # Allow 5 min grace period if system is busy
     )
     logger.info("Starting optimization APScheduler...")
+
+    # Schedule load watcher to run every 5 minutes on the 5-minute marks (e.g., :00, :05, :10, :15, etc.)
+    async def scheduled_load_watcher():
+        try:
+            await load_watcher.run()
+        except Exception as e:
+            logger.error(f"❌ Error during load watcher: {e}", exc_info=True)
+
+    scheduler.add_job(
+        scheduled_load_watcher,
+        'cron',
+        minute='*/5',  # Run on 5-minute marks: 0, 5, 10, 15, 20, etc.
+        coalesce=True,
+        max_instances=1
+    )
+    logger.info("Load watcher scheduled to run every 5 minutes on the 5-minute marks")
 
     # Keep the script running
     try:
