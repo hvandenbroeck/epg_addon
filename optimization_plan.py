@@ -6,6 +6,7 @@ import logging
 from src.optimizer import HeatpumpOptimizer
 from src.load_watcher import LoadWatcher
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 from src.statistics_loader import StatisticsLoader
 from src.weather import Weather
 from src.prediction import Prediction
@@ -71,12 +72,14 @@ async def main():
         timezone='Europe/Brussels',  # Set your timezone
         coalesce=True,
         max_instances=1,
-        misfire_grace_time=300  # Allow 5 min grace period if system is busy
+        misfire_grace_time=300,  # Allow 5 min grace period if system is busy
+        id='daily_optimization'
     )
-    logger.info("Starting optimization APScheduler...")
+    logger.info("Daily optimization scheduled for 16:05 Europe/Brussels")
 
     # Schedule load watcher to run every 5 minutes on the 5-minute marks (e.g., :00, :05, :10, :15, etc.)
     async def scheduled_load_watcher():
+        logger.info("⚡ Running scheduled load watcher...")
         try:
             await load_watcher.run()
         except Exception as e:
@@ -86,10 +89,18 @@ async def main():
         scheduled_load_watcher,
         'cron',
         minute='*/5',  # Run on 5-minute marks: 0, 5, 10, 15, 20, etc.
+        timezone='Europe/Brussels',  # Add timezone to match system time
         coalesce=True,
-        max_instances=1
+        max_instances=1,
+        misfire_grace_time=60,  # Allow 1 min grace period
+        id='load_watcher'
     )
-    logger.info("Load watcher scheduled to run every 5 minutes on the 5-minute marks")
+    logger.info("Load watcher scheduled to run every 5 minutes on the 5-minute marks (Europe/Brussels)")
+    
+    # Print all scheduled jobs for verification
+    logger.info("Currently scheduled jobs:")
+    for job in scheduler.get_jobs():
+        logger.info(f"  - {job.id}: next run at {job.next_run_time}")
 
     # Keep the script running
     try:
