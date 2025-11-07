@@ -21,6 +21,18 @@ class Scheduler:
         self.scheduler = scheduler
         self.devices = devices
 
+    def remove_device_jobs(self):
+        """Remove only device-related scheduled jobs (jobs with '_device_' in their ID).
+        This preserves other jobs like scheduled_optimization and scheduled_load_watcher.
+        """
+        if not self.scheduler:
+            return
+        
+        for job in self.scheduler.get_jobs():
+            if '_device_' in job.id:
+                self.scheduler.remove_job(job.id)
+                logger.debug(f"🗑️ Removed job: {job.id}")
+
     async def schedule_actions(self):
         """Schedule device actions based on TinyDB schedule using APScheduler."""
         db = TinyDB('db.json')
@@ -29,9 +41,8 @@ class Scheduler:
             logger.warning("⚠️ No schedule found in TinyDB.")
             return
 
-        # Clear all jobs in the scheduler
-        if self.scheduler:
-            self.scheduler.remove_all_jobs()
+        # Clear only device-related jobs in the scheduler
+        self.remove_device_jobs()
 
         logger.info(f"⚙️ Results-inDB2: {json.dumps(schedule_doc)}")
 
@@ -67,7 +78,7 @@ class Scheduler:
                     self.devices.execute_device_action,
                     trigger=DateTrigger(run_date=start_time),
                     args=[device, cfg.get("start", {}), "start", start_time],
-                    id=f"{device}_start_{start_time.isoformat()}",
+                    id=f"{device}_start_device_{start_time.isoformat()}",
                     replace_existing=True
                 )
                 logger.info(f"📅 Scheduled {device.upper()} START at {start_time.strftime('%Y-%m-%d %H:%M')}")
@@ -78,7 +89,7 @@ class Scheduler:
                     self.devices.execute_device_action,
                     trigger=DateTrigger(run_date=end_time),
                     args=[device, cfg.get("stop", {}), "stop", end_time],
-                    id=f"{device}_stop_{end_time.isoformat()}",
+                    id=f"{device}_stop_device_{end_time.isoformat()}",
                     replace_existing=True
                 )
                 scheduled_count += 1

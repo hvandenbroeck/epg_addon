@@ -13,6 +13,10 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
+# Load config
+with open('config.json', 'r') as f:
+    CONFIG = json.load(f)
+
 
 @app.route('/')
 def index():
@@ -31,6 +35,8 @@ def get_peak():
     """Return current peak power consumption"""
     db = TinyDB('db.json')
     load_watcher_docs = db.search(Query().id == 'load_watcher')
+    peak_calc_minutes = CONFIG.get('options', {}).get('peak_calculation_minutes', 15)
+    
     if load_watcher_docs:
         data = load_watcher_docs[0]
         return jsonify({
@@ -38,14 +44,20 @@ def get_peak():
             'timestamp': data.get('timestamp', ''),
             'total_energy_consumption': data.get('total_energy_consumption', 0.0),
             'max_peak_kw': data.get('max_peak_kw', 7.5),
-            'available_power_kw': data.get('available_power_kw', 0.0)
+            'available_power_kw': data.get('available_power_kw', 0.0),
+            'slot_start': data.get('slot_start', ''),
+            'slot_readings_count': data.get('slot_readings_count', 0),
+            'peak_calculation_minutes': peak_calc_minutes
         })
     return jsonify({
         'peak_kw': 0.0,
         'timestamp': '',
         'total_energy_consumption': 0.0,
         'max_peak_kw': 7.5,
-        'available_power_kw': 0.0
+        'available_power_kw': 0.0,
+        'slot_start': '',
+        'slot_readings_count': 0,
+        'peak_calculation_minutes': peak_calc_minutes
     })
 
 @app.route('/api/gantt')

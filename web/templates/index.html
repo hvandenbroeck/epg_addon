@@ -75,6 +75,7 @@
     <div class="peak-display">
         <div class="peak-label">Current Power Peak</div>
         <div class="peak-value" id="peakValue">-- kW</div>
+        <div class="peak-label" style="margin-top: 5px; font-size: 14px; color: #999;">Time Slot: <span id="slotInfo">--</span></div>
         <div class="peak-label" style="margin-top: 20px;">Available Power</div>
         <div class="peak-value" id="availablePower" style="color: #28a745;">-- kW</div>
         <div class="peak-label" style="margin-top: 10px; font-size: 14px;">Max Peak: <span id="maxPeak">--</span> kW</div>
@@ -96,6 +97,9 @@
                     const timestamp = data.timestamp || '';
                     const maxPeakKw = data.max_peak_kw || 7.5;
                     const availablePowerKw = data.available_power_kw || 0;
+                    const slotStart = data.slot_start || '';
+                    const slotReadingsCount = data.slot_readings_count || 0;
+                    const peakCalcMinutes = data.peak_calculation_minutes || 15;
                     
                     document.getElementById('peakValue').textContent = 
                         peakKw.toFixed(2) + ' kW';
@@ -105,6 +109,18 @@
                     
                     document.getElementById('maxPeak').textContent = 
                         maxPeakKw.toFixed(1);
+                    
+                    // Display slot information
+                    if (slotStart) {
+                        const slotStartDate = new Date(slotStart);
+                        const slotEndDate = new Date(slotStartDate.getTime() + peakCalcMinutes * 60 * 1000);
+                        const slotStartTime = slotStartDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                        const slotEndTime = slotEndDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                        document.getElementById('slotInfo').textContent = 
+                            `${slotStartTime} - ${slotEndTime} (${slotReadingsCount} readings)`;
+                    } else {
+                        document.getElementById('slotInfo').textContent = '--';
+                    }
                     
                     // Color code available power (green if positive, red if negative)
                     const availableElement = document.getElementById('availablePower');
@@ -124,6 +140,7 @@
                     document.getElementById('peakValue').textContent = '-- kW';
                     document.getElementById('availablePower').textContent = '-- kW';
                     document.getElementById('maxPeak').textContent = '--';
+                    document.getElementById('slotInfo').textContent = '--';
                     document.getElementById('peakTimestamp').textContent = 
                         'Error loading peak data';
                 });

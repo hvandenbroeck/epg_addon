@@ -6,6 +6,7 @@
             "sensor.energy_consumption_tarif_1",
             "sensor.energy_consumption_tarif_2"
         ],
-        "max_peak_kW": 7.5
+        "max_peak_kW": 7.5,
+        "peak_calculation_minutes": 15
     }
 }
