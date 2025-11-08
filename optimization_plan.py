@@ -77,7 +77,9 @@ async def main():
     )
     logger.info("Daily optimization scheduled for 16:05 Europe/Brussels")
 
-    # Schedule load watcher to run every 5 minutes on the 5-minute marks (e.g., :00, :05, :10, :15, etc.)
+    # Schedule load watcher to run every N minutes on the N-minute marks
+    load_watcher_interval = CONFIG.get("load_watcher_interval_minutes", 5)
+    
     async def scheduled_load_watcher():
         logger.info("⚡ Running scheduled load watcher...")
         try:
@@ -88,14 +90,14 @@ async def main():
     scheduler.add_job(
         scheduled_load_watcher,
         'cron',
-        minute='*/5',  # Run on 5-minute marks: 0, 5, 10, 15, 20, etc.
-        timezone='Europe/Brussels',  # Add timezone to match system time
+        minute=f'*/{load_watcher_interval}',
+        timezone='Europe/Brussels',
         coalesce=True,
         max_instances=1,
-        misfire_grace_time=60,  # Allow 1 min grace period
+        misfire_grace_time=60,
         id='load_watcher'
     )
-    logger.info("Load watcher scheduled to run every 5 minutes on the 5-minute marks (Europe/Brussels)")
+    logger.info(f"Load watcher scheduled to run every {load_watcher_interval} minutes on the {load_watcher_interval}-minute marks (Europe/Brussels)")
     
     # Print all scheduled jobs for verification
     logger.info("Currently scheduled jobs:")

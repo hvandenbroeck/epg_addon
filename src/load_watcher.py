@@ -115,7 +115,7 @@ class LoadWatcher:
                 # Calculate energy difference
                 energy_diff_kwh = latest['total_energy_consumption'] - earliest['total_energy_consumption']
                 
-                # Calculate peak in kW by extrapolating to 1 hour
+                # Calculate peak in kW by extrapolating to 1 hour to get peak in Watts
                 if time_diff_minutes > 0:
                     current_peak_kw = energy_diff_kwh * (60.0 / time_diff_minutes)
                     logger.info(f"  📊 Slot {current_slot_start.strftime('%H:%M')}-{(current_slot_start + timedelta(minutes=self.peak_calculation_minutes)).strftime('%H:%M')}")

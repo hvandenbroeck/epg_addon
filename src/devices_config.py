@@ -1,6 +1,7 @@
 # Device actions configuration
 device_actions = {
     "wp": {
+        "enable_load_management": False,
         "start": {
             "mqtt": [
                 {"topic": "ebusd/700/z2sfmode/set", "payload": "veto"},
@@ -15,6 +16,7 @@ device_actions = {
         }
     },
     "hw": {
+        "enable_load_management": False,
         "start": {
             "mqtt": [{"topic": "ebusd/700/HwcTempDesired/set", "payload": "60"}]
         },
@@ -23,6 +25,14 @@ device_actions = {
         }
     },
     "bat_charge": {
+        "enable_load_management": True,
+        "load_management": {
+            "instantaneous_load_entity": "select.device_load",
+            "instantaneous_load_entity_unit": "W",
+            "load_priority": 1,
+            "load_limiter_entity": "select.device_load_limit",
+            "load_maximum_watts": "3500"
+        },
         "start": {
             "entity": [
                 {
@@ -123,6 +133,7 @@ device_actions = {
         }
     },
     "bat_discharge": {
+        "enable_load_management": False,
         "start": {
             "entity": [
                 {
@@ -223,6 +234,14 @@ device_actions = {
         }
     },
     "ev": {
+        "enable_load_management": True,
+        "load_management": {
+            "instantaneous_load_entity": "sensor.peblar_ev_charger_vermogen",
+            "instantaneous_load_entity_unit": "W",
+            "load_priority": 2,
+            "load_limiter_entity": "select.device_load_limit",
+            "load_maximum_watts": "11000"
+        },
         "start": {
             "entity": [
                 {
