@@ -32,7 +32,7 @@ device_actions = {
             "load_priority": 1,
             "load_limiter_entity": "select.device_load_limit",
             "load_maximum_watts": "3500",
-            "charge_sign": "positive"
+            "charge_sign": "negative"
         },
         "start": {
             "entity": [
