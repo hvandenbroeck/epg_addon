@@ -28,10 +28,10 @@ async def main():
 
 
     # --- Run prediction at addon start (inlined) ---
-    statistics_loader = StatisticsLoader(args.token)
-    weather = Weather(args.token)
-    prediction = Prediction(statistics_loader, weather)
-    await prediction.calculateTomorrowsPowerUsage()
+    #statistics_loader = StatisticsLoader(args.token)
+    #weather = Weather(args.token)
+    #prediction = Prediction(statistics_loader, weather)
+    #await prediction.calculateTomorrowsPowerUsage()
 
     # Create APScheduler instance
     scheduler = AsyncIOScheduler()

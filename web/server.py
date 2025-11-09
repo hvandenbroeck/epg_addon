@@ -60,6 +60,21 @@ def get_peak():
         'peak_calculation_minutes': peak_calc_minutes
     })
 
+@app.route('/api/device_limits')
+def get_device_limits():
+    """Return current device load limits"""
+    db = TinyDB('db.json')
+    limits_docs = db.search(Query().id == 'device_limitations')
+    
+    if limits_docs:
+        return jsonify(limits_docs[0])
+    return jsonify({
+        'id': 'device_limitations',
+        'timestamp': '',
+        'available_power_watts': 0,
+        'limits': {}
+    })
+
 @app.route('/api/gantt')
 def get_gantt():
     """Generate and return Plotly Gantt chart as interactive HTML"""

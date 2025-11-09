@@ -1,0 +1,170 @@
+body {
+    font-family: Arial, sans-serif;
+    margin: 0;
+    padding: 20px;
+    background-color: #f5f5f5;
+}
+
+.peak-display {
+    max-width: 1400px;
+    margin: 0 auto 20px auto;
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    text-align: center;
+}
+
+.peak-value {
+    font-size: 48px;
+    font-weight: bold;
+    color: #0066cc;
+    margin: 10px 0;
+}
+
+.peak-label {
+    font-size: 18px;
+    color: #666;
+    margin-bottom: 5px;
+}
+
+.peak-timestamp {
+    font-size: 12px;
+    color: #999;
+    margin-top: 5px;
+}
+
+#timeline {
+    max-width: 1400px;
+    margin: 0 auto;
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.links {
+    margin: 20px auto;
+    max-width: 1400px;
+    text-align: center;
+    padding: 15px;
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.links a {
+    color: #0066cc;
+    text-decoration: none;
+    margin: 0 10px;
+    padding: 8px 15px;
+    border: 1px solid #0066cc;
+    border-radius: 4px;
+    display: inline-block;
+}
+
+.links a:hover {
+    background-color: #0066cc;
+    color: white;
+}
+
+.loading {
+    text-align: center;
+    padding: 40px;
+    color: #666;
+}
+
+.device-limits {
+    max-width: 1400px;
+    margin: 20px auto;
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.device-limits h2 {
+    margin: 0 0 20px 0;
+    color: #333;
+    font-size: 24px;
+    text-align: center;
+}
+
+.device-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 15px;
+}
+
+.device-card {
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 15px;
+    background: #f9f9f9;
+}
+
+.device-name {
+    font-size: 18px;
+    font-weight: bold;
+    color: #0066cc;
+    margin-bottom: 10px;
+}
+
+.device-stat {
+    display: flex;
+    justify-content: space-between;
+    margin: 8px 0;
+    font-size: 14px;
+}
+
+.device-stat-label {
+    color: #666;
+}
+
+.device-stat-value {
+    font-weight: bold;
+    color: #333;
+}
+
+.priority-badge {
+    display: inline-block;
+    background: #0066cc;
+    color: white;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+    margin-left: 8px;
+}
+
+.limit-bar {
+    width: 100%;
+    height: 20px;
+    background: #e0e0e0;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-top: 10px;
+    position: relative;
+}
+
+.limit-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #28a745, #20c997);
+    transition: width 0.3s ease;
+}
+
+.limit-text {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 11px;
+    font-weight: bold;
+    color: #333;
+}
+
+.no-limits {
+    text-align: center;
+    padding: 40px;
+    color: #999;
+    font-style: italic;
+}

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from tinydb import TinyDB, Query
 
 from .config import CONFIG
+from .devices_config import device_actions
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,9 @@ class LoadWatcher:
             # Calculate available power
             available_power_kw = self.max_peak_kw - current_peak_kw
             
+            # Call calculate_limits to save device limits based on available power
+            await self.calculate_limits(available_power_kw * 1000)  # Convert kW to W
+
             # Update database with current status
             self.db.upsert({
                 "id": "load_watcher",
@@ -147,3 +151,179 @@ class LoadWatcher:
             
         except Exception as e:
             logger.error(f"❌ Error in load watcher: {e}", exc_info=True)
+
+    async def calculate_limits(self, available_power_watts):
+        """Calculate and set load limits for devices based on available power.
+        
+        Args:
+            available_power_watts: Available power in watts (positive = surplus, negative = excess usage)
+        """
+        try:
+            # Check if absolute value is bigger than 100W
+            if abs(available_power_watts) <= 100:
+                logger.info(f"⚡ Available power ({available_power_watts:.0f}W) is within 100W threshold, skipping limit adjustments")
+                return
+            
+            logger.info(f"⚡ Calculating load limits with available power: {available_power_watts:.0f}W")
+            
+            # Load all devices with load_management enabled
+            load_managed_devices = []
+            for device_name, device_config in device_actions.items():
+                if device_config.get('enable_load_management', False):
+                    load_mgmt = device_config.get('load_management', {})
+                    load_managed_devices.append({
+                        'name': device_name,
+                        'priority': load_mgmt.get('load_priority', 999),
+                        'load_entity': load_mgmt.get('instantaneous_load_entity'),
+                        'load_unit': load_mgmt.get('instantaneous_load_entity_unit', 'W'),
+                        'limiter_entity': load_mgmt.get('load_limiter_entity'),
+                        'max_watts': float(load_mgmt.get('load_maximum_watts', 0)),
+                        'charge_sign': load_mgmt.get('charge_sign', 'positive')
+                    })
+            
+            if not load_managed_devices:
+                logger.info("  No devices with load management enabled")
+                return
+            
+            # Initialize limits dictionary
+            device_limits = {}
+            
+            if available_power_watts > 0:
+                # Power available - increase limits (highest priority first)
+                logger.info("  📈 Power available - increasing limits for high priority devices")
+                sorted_devices = sorted(load_managed_devices, key=lambda x: x['priority'])
+                remaining_power = available_power_watts
+                
+                for device in sorted_devices:
+                    # Get current device load
+                    state = await self.get_state(device['load_entity'])
+                    if not state or state.get('state') in ['unavailable', 'unknown', None]:
+                        logger.warning(f"    ⚠️ Could not get state for {device['name']} ({device['load_entity']})")
+                        continue
+                    
+                    try:
+                        current_load = float(state['state'])
+                    except (ValueError, TypeError):
+                        logger.warning(f"    ⚠️ Invalid load value for {device['name']}: {state.get('state')}")
+                        continue
+                    
+                    # Check if device is charging based on charge_sign
+                    is_charging = False
+                    if device['charge_sign'] == 'positive':
+                        # Positive values mean charging
+                        is_charging = current_load > 0
+                    elif device['charge_sign'] == 'negative':
+                        # Negative values mean charging
+                        is_charging = current_load < 0
+                        # Use absolute value for calculations
+                        current_load = abs(current_load)
+                    
+                    # Skip device if not charging (e.g., battery discharging)
+                    if not is_charging:
+                        logger.info(f"    ⏭️ {device['name']} (P{device['priority']}): Not charging ({state['state']}{device['load_unit']}), skipping")
+                        continue
+                    
+                    # Calculate new limit
+                    calculated_limit = current_load + remaining_power
+                    
+                    # Cap at maximum
+                    if calculated_limit > device['max_watts']:
+                        new_limit = device['max_watts']
+                        power_used = device['max_watts'] - current_load
+                        remaining_power -= power_used
+                    else:
+                        new_limit = calculated_limit
+                        remaining_power = 0
+                    
+                    device_limits[device['name']] = {
+                        'limit_watts': new_limit,
+                        'current_load_watts': current_load,
+                        'max_watts': device['max_watts'],
+                        'limiter_entity': device['limiter_entity'],
+                        'priority': device['priority']
+                    }
+                    
+                    logger.info(f"    ✓ {device['name']} (P{device['priority']}): {current_load:.0f}W → {new_limit:.0f}W (max: {device['max_watts']:.0f}W)")
+                    
+                    if remaining_power <= 0:
+                        break
+                
+                if remaining_power > 0:
+                    logger.info(f"    💡 Still {remaining_power:.0f}W available after adjusting all devices")
+            
+            else:
+                # Power excess - decrease limits (lowest priority first)
+                logger.info("  📉 Power excess - decreasing limits for low priority devices")
+                sorted_devices = sorted(load_managed_devices, key=lambda x: x['priority'], reverse=True)
+                excess_power = abs(available_power_watts)
+                
+                for device in sorted_devices:
+                    # Get current device load
+                    state = await self.get_state(device['load_entity'])
+                    if not state or state.get('state') in ['unavailable', 'unknown', None]:
+                        logger.warning(f"    ⚠️ Could not get state for {device['name']} ({device['load_entity']})")
+                        continue
+                    
+                    try:
+                        current_load = float(state['state'])
+                    except (ValueError, TypeError):
+                        logger.warning(f"    ⚠️ Invalid load value for {device['name']}: {state.get('state')}")
+                        continue
+                    
+                    # Check if device is charging based on charge_sign
+                    is_charging = False
+                    if device['charge_sign'] == 'positive':
+                        # Positive values mean charging
+                        is_charging = current_load > 0
+                    elif device['charge_sign'] == 'negative':
+                        # Negative values mean charging
+                        is_charging = current_load < 0
+                        # Use absolute value for calculations
+                        current_load = abs(current_load)
+                    
+                    # Skip device if not charging (e.g., battery discharging)
+                    if not is_charging:
+                        logger.info(f"    ⏭️ {device['name']} (P{device['priority']}): Not charging ({state['state']}{device['load_unit']}), skipping")
+                        continue
+                    
+                    # Calculate new limit
+                    calculated_limit = current_load - excess_power
+                    
+                    # Check if limit goes negative
+                    if calculated_limit < 0:
+                        new_limit = 0
+                        power_freed = current_load
+                        excess_power -= power_freed
+                    else:
+                        new_limit = calculated_limit
+                        excess_power = 0
+                    
+                    device_limits[device['name']] = {
+                        'limit_watts': new_limit,
+                        'current_load_watts': current_load,
+                        'max_watts': device['max_watts'],
+                        'limiter_entity': device['limiter_entity'],
+                        'priority': device['priority']
+                    }
+                    
+                    logger.info(f"    ✓ {device['name']} (P{device['priority']}): {current_load:.0f}W → {new_limit:.0f}W")
+                    
+                    if excess_power <= 0:
+                        break
+                
+                if excess_power > 0:
+                    logger.info(f"    ⚠️ Still {excess_power:.0f}W excess after adjusting all devices to 0")
+            
+            # Save limits to database
+            query = Query()
+            self.db.upsert({
+                'id': 'device_limitations',
+                'timestamp': datetime.now().isoformat(),
+                'available_power_watts': available_power_watts,
+                'limits': device_limits
+            }, query.id == 'device_limitations')
+            
+            logger.info(f"  💾 Saved device limitations to database ({len(device_limits)} devices)")
+            
+        except Exception as e:
+            logger.error(f"❌ Error calculating limits: {e}", exc_info=True)

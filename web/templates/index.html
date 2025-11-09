@@ -2,74 +2,7 @@
 <html>
 <head>
     <title>Energy Optimizer</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }
-        .peak-display {
-            max-width: 1400px;
-            margin: 0 auto 20px auto;
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            text-align: center;
-        }
-        .peak-value {
-            font-size: 48px;
-            font-weight: bold;
-            color: #0066cc;
-            margin: 10px 0;
-        }
-        .peak-label {
-            font-size: 18px;
-            color: #666;
-            margin-bottom: 5px;
-        }
-        .peak-timestamp {
-            font-size: 12px;
-            color: #999;
-            margin-top: 5px;
-        }
-        #timeline {
-            max-width: 1400px;
-            margin: 0 auto;
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .links {
-            margin: 20px auto;
-            max-width: 1400px;
-            text-align: center;
-            padding: 15px;
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .links a {
-            color: #0066cc;
-            text-decoration: none;
-            margin: 0 10px;
-            padding: 8px 15px;
-            border: 1px solid #0066cc;
-            border-radius: 4px;
-            display: inline-block;
-        }
-        .links a:hover {
-            background-color: #0066cc;
-            color: white;
-        }
-        .loading {
-            text-align: center;
-            padding: 40px;
-            color: #666;
-        }
-    </style>
+    <link rel="stylesheet" href="static/style.css">
 </head>
 <body>
     <div class="peak-display">
@@ -80,6 +13,12 @@
         <div class="peak-value" id="availablePower" style="color: #28a745;">-- kW</div>
         <div class="peak-label" style="margin-top: 10px; font-size: 14px;">Max Peak: <span id="maxPeak">--</span> kW</div>
         <div class="peak-timestamp" id="peakTimestamp">Loading...</div>
+    </div>
+    <div class="device-limits">
+        <h2>Device Load Limits</h2>
+        <div id="deviceLimitsContent">
+            <div class="loading">Loading device limits...</div>
+        </div>
     </div>
     <div id="timeline">
         <div class="loading">Loading schedule...</div>
@@ -146,6 +85,87 @@
                 });
         }
 
+        function updateDeviceLimits() {
+            fetch('api/device_limits')
+                .then(response => response.json())
+                .then(data => {
+                    const container = document.getElementById('deviceLimitsContent');
+                    const limits = data.limits || {};
+                    const timestamp = data.timestamp || '';
+                    const availablePowerWatts = data.available_power_watts || 0;
+                    
+                    if (Object.keys(limits).length === 0) {
+                        container.innerHTML = '<div class="no-limits">No device limits calculated yet</div>';
+                        return;
+                    }
+                    
+                    let html = '<div class="device-grid">';
+                    
+                    // Sort devices by priority
+                    const sortedDevices = Object.entries(limits).sort((a, b) => 
+                        a[1].priority - b[1].priority
+                    );
+                    
+                    sortedDevices.forEach(([deviceName, deviceData]) => {
+                        const currentLoad = deviceData.current_load_watts || 0;
+                        const limitWatts = deviceData.limit_watts || 0;
+                        const maxWatts = deviceData.max_watts || 0;
+                        const priority = deviceData.priority || 0;
+                        
+                        // Calculate percentage for visual bar
+                        const percentage = maxWatts > 0 ? (limitWatts / maxWatts * 100) : 0;
+                        
+                        // Format device name
+                        const displayName = deviceName.replace(/_/g, ' ').toUpperCase();
+                        
+                        html += `
+                            <div class="device-card">
+                                <div class="device-name">
+                                    ${displayName}
+                                    <span class="priority-badge">P${priority}</span>
+                                </div>
+                                <div class="device-stat">
+                                    <span class="device-stat-label">Current Load:</span>
+                                    <span class="device-stat-value">${currentLoad.toFixed(0)} W</span>
+                                </div>
+                                <div class="device-stat">
+                                    <span class="device-stat-label">New Limit:</span>
+                                    <span class="device-stat-value" style="color: #0066cc;">${limitWatts.toFixed(0)} W</span>
+                                </div>
+                                <div class="device-stat">
+                                    <span class="device-stat-label">Max Capacity:</span>
+                                    <span class="device-stat-value">${maxWatts.toFixed(0)} W</span>
+                                </div>
+                                <div class="limit-bar">
+                                    <div class="limit-fill" style="width: ${percentage.toFixed(1)}%"></div>
+                                    <div class="limit-text">${percentage.toFixed(0)}% of max</div>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    
+                    html += '</div>';
+                    
+                    // Add timestamp and available power info
+                    if (timestamp) {
+                        const date = new Date(timestamp);
+                        const powerStatus = availablePowerWatts >= 0 ? 
+                            `<span style="color: #28a745;">+${availablePowerWatts.toFixed(0)} W available</span>` :
+                            `<span style="color: #dc3545;">${availablePowerWatts.toFixed(0)} W excess</span>`;
+                        html += `<div style="text-align: center; margin-top: 15px; font-size: 12px; color: #999;">
+                            Last updated: ${date.toLocaleString()} | Power: ${powerStatus}
+                        </div>`;
+                    }
+                    
+                    container.innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Error fetching device limits:', error);
+                    document.getElementById('deviceLimitsContent').innerHTML = 
+                        '<div class="no-limits">Error loading device limits</div>';
+                });
+        }
+
         function updateChart() {
             fetch('api/gantt')
                 .then(response => response.text())
@@ -174,10 +194,12 @@
 
         // Update on load
         updatePeak();
+        updateDeviceLimits();
         updateChart();
         
-        // Update peak every 30 seconds, chart every minute
+        // Update peak and device limits every 30 seconds, chart every minute
         setInterval(updatePeak, 30000);
+        setInterval(updateDeviceLimits, 30000);
         setInterval(updateChart, 60000);
     </script>
 </body>

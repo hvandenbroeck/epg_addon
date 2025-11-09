@@ -27,11 +27,12 @@ device_actions = {
     "bat_charge": {
         "enable_load_management": True,
         "load_management": {
-            "instantaneous_load_entity": "select.device_load",
+            "instantaneous_load_entity": "sensor.deye_battery_power",
             "instantaneous_load_entity_unit": "W",
             "load_priority": 1,
             "load_limiter_entity": "select.device_load_limit",
-            "load_maximum_watts": "3500"
+            "load_maximum_watts": "3500",
+            "charge_sign": "positive"
         },
         "start": {
             "entity": [
@@ -240,7 +241,8 @@ device_actions = {
             "instantaneous_load_entity_unit": "W",
             "load_priority": 2,
             "load_limiter_entity": "select.device_load_limit",
-            "load_maximum_watts": "11000"
+            "load_maximum_watts": "11000",
+            "charge_sign": "positive"
         },
         "start": {
             "entity": [
