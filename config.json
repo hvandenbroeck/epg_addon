@@ -8,6 +8,7 @@
         ],
         "max_peak_kW": 7.5,
         "peak_calculation_minutes": 15,
-        "load_watcher_interval_minutes": 5 
+        "load_watcher_interval_minutes": 5,
+        "load_watcher_treshhold_power": 10
     }
 }

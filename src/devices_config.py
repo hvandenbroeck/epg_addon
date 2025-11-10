@@ -32,7 +32,22 @@ device_actions = {
             "load_priority": 1,
             "load_limiter_entity": "select.device_load_limit",
             "load_maximum_watts": "3500",
-            "charge_sign": "negative"
+            "charge_sign": "negative",
+            "apply_limit_actions": {
+                "entity": [
+                    {
+                        "service": "number/set_value",
+                        "entity_id": "number.deye_battery_charge_limit",
+                        "value": "{limit_watts}"
+                    }
+                ],
+                "mqtt": [
+                    {
+                        "topic": "deye/battery/charge_limit",
+                        "payload": "{limit_watts}"
+                    }
+                ]
+            }
         },
         "start": {
             "entity": [
@@ -242,7 +257,22 @@ device_actions = {
             "load_priority": 2,
             "load_limiter_entity": "select.device_load_limit",
             "load_maximum_watts": "11000",
-            "charge_sign": "positive"
+            "charge_sign": "positive",
+            "apply_limit_actions": {
+                "entity": [
+                    {
+                        "service": "number/set_value",
+                        "entity_id": "number.peblar_ev_charger_max_charging_current",
+                        "value": "{limit_amps}"
+                    }
+                ],
+                "mqtt": [
+                    {
+                        "topic": "ev_charger/set_limit",
+                        "payload": "{limit_watts}"
+                    }
+                ]
+            }
         },
         "start": {
             "entity": [

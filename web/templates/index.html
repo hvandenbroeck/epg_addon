@@ -111,6 +111,7 @@
                         const limitWatts = deviceData.limit_watts || 0;
                         const maxWatts = deviceData.max_watts || 0;
                         const priority = deviceData.priority || 0;
+                        const state = deviceData.state || 'Unknown';
                         
                         // Calculate percentage for visual bar
                         const percentage = maxWatts > 0 ? (limitWatts / maxWatts * 100) : 0;
@@ -118,11 +119,25 @@
                         // Format device name
                         const displayName = deviceName.replace(/_/g, ' ').toUpperCase();
                         
+                        // State badge color
+                        let stateBadgeColor = '#999';
+                        if (state === 'Not charging') {
+                            stateBadgeColor = '#6c757d';  // Gray
+                        } else if (state === 'Charging below limit') {
+                            stateBadgeColor = '#28a745';  // Green
+                        } else if (state === 'Limit enforced') {
+                            stateBadgeColor = '#ffc107';  // Yellow/Orange
+                        }
+                        
                         html += `
                             <div class="device-card">
                                 <div class="device-name">
                                     ${displayName}
                                     <span class="priority-badge">P${priority}</span>
+                                </div>
+                                <div class="device-stat">
+                                    <span class="device-stat-label">Status:</span>
+                                    <span class="device-stat-value" style="color: ${stateBadgeColor}; font-weight: bold;">${state}</span>
                                 </div>
                                 <div class="device-stat">
                                     <span class="device-stat-label">Current Load:</span>
