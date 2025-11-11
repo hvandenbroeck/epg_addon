@@ -37,7 +37,7 @@ class LoadWatcher:
         self.energy_entities = CONFIG['options'].get('energy_consumption_entities', [])
         self.max_peak_kw = CONFIG['options'].get('max_peak_kW', 7.5)
         self.peak_calculation_minutes = CONFIG['options'].get('peak_calculation_minutes', 15)
-        self.load_watcher_threshold_power = CONFIG['options'].get('load_watcher_treshhold_power', 10)
+        self.load_watcher_threshold_power = CONFIG['options'].get('load_watcher_threshold_power', 10)
         self.db = TinyDB('db.json')
         self.devices = Devices(access_token)
         

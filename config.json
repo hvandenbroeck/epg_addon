@@ -6,9 +6,10 @@
             "sensor.energy_consumption_tarif_1",
             "sensor.energy_consumption_tarif_2"
         ],
-        "max_peak_kW": 7.5,
+        "max_peak_kW": 3,
         "peak_calculation_minutes": 15,
         "load_watcher_interval_minutes": 5,
-        "load_watcher_treshhold_power": 10
+        "load_watcher_threshold_power": 10,
+        "three_phase_threshold_power": 4000
     }
 }

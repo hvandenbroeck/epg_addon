@@ -1,6 +1,8 @@
 import logging
 from tinydb import Query
 from ..devices_config import device_actions
+from ..config import CONFIG
+from ..utils import evaluate_expression
 
 logger = logging.getLogger(__name__)
 
@@ -59,63 +61,31 @@ class LimitApplier:
                 limit_watts = limit_data.get('limit_watts', 0)
                 limit_amps = limit_watts / 230  # Convert watts to amps (assuming 230V)
                 
-                # Create a copy of actions with substituted values
-                processed_actions = self._process_actions(apply_actions, limit_watts, limit_amps)
+                # Get three_phase_threshold_power from config (default to 4000 if not set)
+                three_phase_threshold = CONFIG.get('options', {}).get('three_phase_threshold_power', 4000)
+                
+                # Calculate three_phase and single_phase values
+                three_phase = 1 if limit_watts > three_phase_threshold else 0
+                single_phase = 1 if limit_watts <= three_phase_threshold else 0
+                
+                # Context for expression evaluation
+                context = {
+                    'limit_watts': limit_watts,
+                    'limit_amps': limit_amps,
+                    'three_phase': three_phase,
+                    'single_phase': single_phase
+                }
                 
                 # Execute the actions using Devices.execute_device_action
                 logger.info(f"  🎯 {device_name}: Applying limit of {limit_watts:.0f}W ({limit_amps:.1f}A)")
                 await devices_instance.execute_device_action(
                     device=device_name,
-                    actions=processed_actions,
-                    action_label=f"limit_{int(limit_watts)}W"
+                    actions=apply_actions,
+                    action_label=f"limit_{int(limit_watts)}W",
+                    context=context
                 )
             
             logger.info("✅ Device limits applied successfully")
             
         except Exception as e:
             logger.error(f"❌ Error applying device limits: {e}", exc_info=True)
-    
-    def _process_actions(self, apply_actions, limit_watts, limit_amps):
-        """Process actions by substituting placeholder values.
-        
-        Args:
-            apply_actions: Dictionary containing entity and mqtt actions
-            limit_watts: Limit value in watts
-            limit_amps: Limit value in amps
-            
-        Returns:
-            dict: Processed actions with substituted values
-        """
-        processed_actions = {}
-        
-        # Process entity actions
-        if 'entity' in apply_actions:
-            processed_actions['entity'] = []
-            for action in apply_actions['entity']:
-                processed_action = action.copy()
-                # Substitute placeholders in value field
-                if 'value' in processed_action:
-                    value_str = str(processed_action['value'])
-                    value_str = value_str.replace('{limit_watts}', str(int(limit_watts)))
-                    value_str = value_str.replace('{limit_amps}', str(int(limit_amps)))
-                    # Try to convert back to number if possible
-                    try:
-                        processed_action['value'] = float(value_str) if '.' in value_str else int(value_str)
-                    except ValueError:
-                        processed_action['value'] = value_str
-                processed_actions['entity'].append(processed_action)
-        
-        # Process MQTT actions
-        if 'mqtt' in apply_actions:
-            processed_actions['mqtt'] = []
-            for action in apply_actions['mqtt']:
-                processed_action = action.copy()
-                # Substitute placeholders in payload
-                if 'payload' in processed_action:
-                    payload_str = str(processed_action['payload'])
-                    payload_str = payload_str.replace('{limit_watts}', str(int(limit_watts)))
-                    payload_str = payload_str.replace('{limit_amps}', str(int(limit_amps)))
-                    processed_action['payload'] = payload_str
-                processed_actions['mqtt'].append(processed_action)
-        
-        return processed_actions

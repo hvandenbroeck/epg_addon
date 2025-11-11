@@ -38,13 +38,7 @@ device_actions = {
                     {
                         "service": "number/set_value",
                         "entity_id": "number.deye_battery_charge_limit",
-                        "value": "{limit_watts}"
-                    }
-                ],
-                "mqtt": [
-                    {
-                        "topic": "deye/battery/charge_limit",
-                        "payload": "{limit_watts}"
+                        "value": "{limit_watts/51.2}"
                     }
                 ]
             }
@@ -263,13 +257,22 @@ device_actions = {
                     {
                         "service": "number/set_value",
                         "entity_id": "number.peblar_ev_charger_max_charging_current",
-                        "value": "{limit_amps}"
+                        "value": "{round(limit_watts / 230, 1)}"
+                    },
+                    {
+                        "service": "select/select_option",
+                        "entity_id": "select.peblar_ev_charger_phase_mode",
+                        "option": "{three_phase}"
                     }
                 ],
                 "mqtt": [
                     {
                         "topic": "ev_charger/set_limit",
-                        "payload": "{limit_watts}"
+                        "payload": "{int(limit_watts)}"
+                    },
+                    {
+                        "topic": "ev_charger/phase_config",
+                        "payload": "{\"three_phase\": {three_phase}, \"single_phase\": {single_phase}}"
                     }
                 ]
             }
