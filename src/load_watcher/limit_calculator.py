@@ -49,7 +49,8 @@ class LimitCalculator:
                         'max_watts': float(load_mgmt.get('load_maximum_watts', 0)),
                         'charge_sign': load_mgmt.get('charge_sign', 'positive')
                     })
-            
+                    logger.info(f"  📋 Loaded device: {device_name} (priority: {load_mgmt.get('load_priority', 999)})")
+
             if not load_managed_devices:
                 logger.info("  No devices with load management enabled")
                 return

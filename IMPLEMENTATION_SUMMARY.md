@@ -11,7 +11,7 @@ Implemented support for mathematical expressions in device configuration `value`
   - Replaces placeholders (e.g., `{limit_watts}`) with context values
   - Safely evaluates mathematical expressions using AST parsing
   - Supports basic arithmetic operators: `+`, `-`, `*`, `/`, `//`, `%`, `**`
-  - Supports safe functions: `round()`, `int()`, `float()`, `abs()`, `min()`, `max()`
+  - Supports safe functions: `round()`, `int()`, `float()`, `abs()`, `min()`, `max()`, `sqrt()`
   - Returns evaluated result or original value if evaluation fails
 - Added `_eval_node(node, safe_funcs)` helper function:
   - Recursively evaluates AST nodes with only safe operations
@@ -71,6 +71,12 @@ Implemented support for mathematical expressions in device configuration `value`
 ```python
 "value": "round({limit_watts} / 230 * 0.9, 1)"
 # 3450W → 13.5A (after conversion and efficiency)
+```
+
+### Square Root
+```python
+"value": "{sqrt(limit_watts)}"
+# 10000W → 100.0
 ```
 
 ## Available Context Variables

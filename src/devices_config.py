@@ -37,8 +37,8 @@ device_actions = {
                 "entity": [
                     {
                         "service": "number/set_value",
-                        "entity_id": "number.deye_battery_charge_limit",
-                        "value": "{limit_watts/51.2}"
+                        "entity_id": "number.deye_battery_max_charge_current",
+                        "value": "{int(round((limit_watts/51.2), 0))}"
                     }
                 ]
             }
@@ -250,29 +250,14 @@ device_actions = {
             "instantaneous_load_entity_unit": "W",
             "load_priority": 2,
             "load_limiter_entity": "select.device_load_limit",
-            "load_maximum_watts": "11000",
+            "load_maximum_watts": "6000",
             "charge_sign": "positive",
             "apply_limit_actions": {
                 "entity": [
                     {
                         "service": "number/set_value",
-                        "entity_id": "number.peblar_ev_charger_max_charging_current",
-                        "value": "{round(limit_watts / 230, 1)}"
-                    },
-                    {
-                        "service": "select/select_option",
-                        "entity_id": "select.peblar_ev_charger_phase_mode",
-                        "option": "{three_phase}"
-                    }
-                ],
-                "mqtt": [
-                    {
-                        "topic": "ev_charger/set_limit",
-                        "payload": "{int(limit_watts)}"
-                    },
-                    {
-                        "topic": "ev_charger/phase_config",
-                        "payload": "{\"three_phase\": {three_phase}, \"single_phase\": {single_phase}}"
+                        "entity_id": "number.peblar_ev_charger_laadlimiet",
+                        "value": "{int(round(limit_watts / (three_phase*400*sqrt(3)+single_phase*230), 0))}"
                     }
                 ]
             }
@@ -281,7 +266,7 @@ device_actions = {
             "entity": [
                 {
                     "service": "switch/turn_on",
-                    "entity_id": "switch.ev_charger"
+                    "entity_id": "switch.peblar_ev_charger_opladen"
                 }
             ]
         },
@@ -289,7 +274,7 @@ device_actions = {
             "entity": [
                 {
                     "service": "switch/turn_off",
-                    "entity_id": "switch.ev_charger"
+                    "entity_id": "switch.peblar_ev_charger_opladen"
                 }
             ]
         }

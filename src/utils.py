@@ -3,6 +3,7 @@ import logging
 from collections import defaultdict
 import ast
 import re
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +36,14 @@ def evaluate_expression(expr, context):
     Examples:
         >>> evaluate_expression("{limit_watts / 230}", {"limit_watts": 3450})
         15.0
-        >>> evaluate_expression("round({limit_amps}, 1)", {"limit_amps": 15.217})
+        >>> evaluate_expression("{round(limit_amps, 1)}", {"limit_amps": 15.217})
         15.2
         >>> evaluate_expression("{limit_watts * 0.8}W", {"limit_watts": 1000})
         '800.0W'
         >>> evaluate_expression("{max(500, limit_watts)}", {"limit_watts": 3450})
         3450
+        >>> evaluate_expression("{sqrt(limit_watts)}", {"limit_watts": 10000})
+        100.0
     """
     if not isinstance(expr, str):
         return expr
@@ -104,6 +107,7 @@ def _evaluate_single_expression(expression, context):
             'abs': abs,
             'min': min,
             'max': max,
+            'sqrt': math.sqrt,
         }
         
         # Evaluate the AST with only safe operations

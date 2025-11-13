@@ -14,7 +14,7 @@ The device configuration now supports mathematical expressions in `value` and `p
 
 ### Mathematical Operations
 - Basic arithmetic: `+`, `-`, `*`, `/`, `//` (floor division), `%` (modulo), `**` (power)
-- Functions: `round()`, `int()`, `float()`, `abs()`, `min()`, `max()`
+- Functions: `round()`, `int()`, `float()`, `abs()`, `min()`, `max()`, `sqrt()`
 
 ## Examples
 
@@ -64,6 +64,12 @@ The device configuration now supports mathematical expressions in `value` and `p
 ```python
 "payload": "Power: {limit_watts}W, Current: {round(limit_watts / 230, 1)}A"
 # If limit_watts = 3450, result = "Power: 3450W, Current: 15.0A"
+```
+
+### Example 9: Square Root
+```python
+"value": "{sqrt(limit_watts)}"
+# If limit_watts = 10000, result = 100.0
 ```
 
 ## Usage in Device Configuration

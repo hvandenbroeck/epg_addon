@@ -78,8 +78,8 @@ async def main():
     logger.info("Daily optimization scheduled for 16:05 Europe/Brussels")
 
     # Schedule load watcher to run every N minutes on the N-minute marks
-    load_watcher_interval = CONFIG.get("load_watcher_interval_minutes", 5)
-    
+    load_watcher_interval = CONFIG["options"].get("load_watcher_interval_minutes", 5)
+
     async def scheduled_load_watcher():
         logger.info("⚡ Running scheduled load watcher...")
         try:

@@ -38,6 +38,7 @@
 | `abs(x)` | Absolute value | `{abs(-limit_watts)}` → 3450 |
 | `min(a, b)` | Minimum value | `{min(limit_watts, 3000)}` → 3000 |
 | `max(a, b)` | Maximum value | `{max(limit_watts, 2000)}` → 3450 |
+| `sqrt(x)` | Square root | `{sqrt(limit_watts)}` → 100.0 |
 
 ## Common Patterns
 
@@ -114,3 +115,8 @@
 - Invalid expressions fall back to the original string
 - Only safe mathematical operations are allowed
 - No arbitrary code execution is possible
+
+### Square root
+```python
+"value": "{sqrt(limit_watts)}"
+```

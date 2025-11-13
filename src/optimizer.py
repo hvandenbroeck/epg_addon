@@ -66,7 +66,7 @@ class HeatpumpOptimizer:
         BAT_CHARGE_SLOTS = 10
         BAT_DISCHARGE_BLOCK_HOURS = 1
         BAT_DISCHARGE_BLOCKS = 10
-        EV_MAX_PRICE = 0.08  # 5 cents per kWh
+        EV_MAX_PRICE = 0.1  # 10 cents per kWh
 
         logger.info("🔎 Starting energy optimization using Nordpool prices...")
 
