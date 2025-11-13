@@ -200,7 +200,7 @@ class LimitCalculator:
             )
             
             # If device is not charging, set limit to max and skip power allocation
-            if not is_charging:
+            if (not is_charging or charging_power <= 0):
                 logger.info(f"    ⏭️ {device['name']} (P{device['priority']}): Not charging ({state['state']}{device['load_unit']}), setting to max")
                 device_limits[device['name']] = {
                     'limit_watts': device['max_watts'],

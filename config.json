@@ -10,6 +10,7 @@
         "peak_calculation_minutes": 15,
         "load_watcher_interval_minutes": 1,
         "load_watcher_threshold_power": 10,
-        "three_phase_threshold_power": 4000
+        "phase_switch_threshold_power": 4000,
+        "phase_switch_delay_minutes": 5
     }
 }

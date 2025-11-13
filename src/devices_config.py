@@ -33,14 +33,17 @@ device_actions = {
             "load_limiter_entity": "select.device_load_limit",
             "load_maximum_watts": "3500",
             "charge_sign": "negative",
+            "automated_phase_switching": False,
             "apply_limit_actions": {
-                "entity": [
-                    {
-                        "service": "number/set_value",
-                        "entity_id": "number.deye_battery_max_charge_current",
-                        "value": "{int(round((limit_watts/51.2), 0))}"
-                    }
-                ]
+                "apply_limit": {
+                    "entity": [
+                        {
+                            "service": "number/set_value",
+                            "entity_id": "number.deye_battery_max_charge_current",
+                            "value": "{int(round((limit_watts/51.2), 0))}"
+                        }
+                    ]
+                }
             }
         },
         "start": {
@@ -252,14 +255,33 @@ device_actions = {
             "load_limiter_entity": "select.device_load_limit",
             "load_maximum_watts": "6000",
             "charge_sign": "positive",
+            "automated_phase_switching": True,
             "apply_limit_actions": {
-                "entity": [
-                    {
-                        "service": "number/set_value",
-                        "entity_id": "number.peblar_ev_charger_laadlimiet",
-                        "value": "{int(round(limit_watts / (three_phase*400*sqrt(3)+single_phase*230), 0))}"
-                    }
-                ]
+                "switch_to_single_phase": {
+                    "entity": [
+                        {
+                            "service": "switch/turn_on",
+                            "entity_id": "switch.peblar_ev_charger_dwing_enkelvoudige_fase_af"
+                        }
+                    ]
+                },
+                "switch_to_three_phase": {
+                    "entity": [
+                        {
+                            "service": "switch/turn_off",
+                            "entity_id": "switch.peblar_ev_charger_dwing_enkelvoudige_fase_af"
+                        }
+                    ]
+                },
+                "apply_limit": {
+                    "entity": [
+                        {
+                            "service": "number/set_value",
+                            "entity_id": "number.peblar_ev_charger_laadlimiet",
+                            "value": "{int(round(limit_watts / (three_phase*400*sqrt(3)+single_phase*230), 0))}"
+                        }
+                    ]
+                }
             }
         },
         "start": {
