@@ -10,6 +10,7 @@ from .scheduler import Scheduler
 from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, optimize_ev
 from .utils import slot_to_time, get_block_len, slots_to_iso_ranges, merge_sequential_timeslots
 from .config import CONFIG
+from .price_fetcher import EntsoeePriceFetcher
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,11 @@ class HeatpumpOptimizer:
         }
         self.devices = Devices(access_token)
         self.scheduler_instance = Scheduler(scheduler, self.devices)
+        
+        # Initialize ENTSO-E price fetcher
+        entsoe_token = CONFIG['options'].get('entsoe_api_token', '')
+        entsoe_country = CONFIG['options'].get('entsoe_country_code', 'BE')
+        self.price_fetcher = EntsoeePriceFetcher(entsoe_token, entsoe_country) if entsoe_token else None
 
     async def get_state(self, entity_id):
         """Get the state of an entity from Home Assistant."""
@@ -42,19 +48,8 @@ class HeatpumpOptimizer:
             async with session.post(url, headers=self.headers, json=service_data) as response:
                 return response.status == 200
 
-    def _extract_prices(self, raw_prices, slot_minutes):
-        """Extract and normalize price data."""
-        if isinstance(raw_prices[0], dict):
-            prices = [float(item.get("value")) for item in raw_prices if "value" in item]
-        else:
-            prices = [float(v) for v in raw_prices]
-        if len(prices) == 24:
-            prices = [p for p in prices for _ in range(int(60 / slot_minutes))]
-        return prices
-
     async def run_optimization(self):
         """Main optimization logic."""
-        NORDPOOL_SENSOR = "sensor.nordpool"
         SLOT_MINUTES = 15
 
         # Configurable blocks
@@ -68,26 +63,18 @@ class HeatpumpOptimizer:
         BAT_DISCHARGE_BLOCKS = 10
         EV_MAX_PRICE = 0.1  # 10 cents per kWh
 
-        logger.info("🔎 Starting energy optimization using Nordpool prices...")
+        logger.info("🔎 Starting energy optimization using ENTSO-E prices...")
 
-        state = await self.get_state(NORDPOOL_SENSOR)
-        if not state or "attributes" not in state:
-            logger.error(f"⚠️ No attributes found for {NORDPOOL_SENSOR}")
+        # Check if price fetcher is configured
+        if not self.price_fetcher:
+            logger.error("⚠️ ENTSO-E price fetcher not configured. Please set entsoe_api_token in config.json")
             return
 
-        attrs = state["attributes"]
-        price_sets = {}
-        for label, keys in [("today", ["raw_today", "today"]), ("tomorrow", ["raw_tomorrow", "tomorrow"])]:
-            raw_prices = None
-            for k in keys:
-                raw_prices = attrs.get(k)
-                if raw_prices:
-                    break
-            if raw_prices:
-                price_sets[label] = self._extract_prices(raw_prices, SLOT_MINUTES)
-
+        # Fetch prices from ENTSO-E
+        price_sets = self.price_fetcher.get_prices()
+        
         if not price_sets:
-            logger.error("⚠️ No valid price data for today or tomorrow.")
+            logger.error("⚠️ Failed to fetch price data from ENTSO-E")
             return
 
         results = {}
