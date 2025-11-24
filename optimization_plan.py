@@ -7,10 +7,7 @@ from src.optimizer import HeatpumpOptimizer
 from src.load_watcher import LoadWatcher
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
-from src.statistics_loader import StatisticsLoader
-from src.weather import Weather
-from src.prediction import Prediction
-from src.HAConfig import HAEnergyDashboardFetcher
+from src.forecasting import StatisticsLoader, Weather, Prediction, HAEnergyDashboardFetcher
 from src.config import CONFIG
 
 # Configure logging

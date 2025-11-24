@@ -2,7 +2,7 @@ import aiohttp
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from .HAConfig import HAEnergyDashboardFetcher
-from .config import CONFIG
+from ..config import CONFIG
 
 class StatisticsLoader:
     """

@@ -2,7 +2,7 @@ import aiohttp
 import pandas as pd
 import logging
 from datetime import datetime, timedelta, timezone
-from .config import CONFIG
+from ..config import CONFIG
 
 logger = logging.getLogger(__name__)
 

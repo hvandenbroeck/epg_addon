@@ -82,6 +82,7 @@ class HeatpumpOptimizer:
         iso_times = []
         for label, prices in price_sets.items():
             logger.info(f"⚙️ Optimizing for {label}...")
+            
             wp_times = optimize_wp(prices, SLOT_MINUTES, WP_BLOCK_HOURS, WP_BLOCKS, slot_to_time)
             hw_times = optimize_hw(prices, SLOT_MINUTES, HW_BLOCK_HOURS, HW_BLOCKS, HW_MIN_GAP_HOURS, slot_to_time)
             bat_charge_times = optimize_battery(prices, SLOT_MINUTES, BAT_CHARGE_SLOTS, slot_to_time)

@@ -3,7 +3,7 @@ import websockets
 import json
 import logging
 from urllib.parse import urlparse
-from .config import CONFIG
+from ..config import CONFIG
 
 class HAEnergyDashboardFetcher:
     def __init__(self, access_token):
