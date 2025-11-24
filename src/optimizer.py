@@ -99,8 +99,8 @@ class HeatpumpOptimizer:
         iso_times_merged = merge_sequential_timeslots(iso_times)
 
         # Save schedule to TinyDB
-        db = TinyDB('db.json')
-        db.upsert({"id": "schedule", "schedule": iso_times_merged}, Query().id == "schedule")
+        with TinyDB('db.json') as db:
+            db.upsert({"id": "schedule", "schedule": iso_times_merged}, Query().id == "schedule")
         logger.info(f"✅ Optimization complete. Schedule saved to TinyDB.")
         # Schedule actions from database
         await self.scheduler_instance.schedule_actions()

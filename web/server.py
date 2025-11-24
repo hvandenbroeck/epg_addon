@@ -26,15 +26,15 @@ def index():
 @app.route('/api/results')
 def get_results():
     """Return optimizer results as JSON"""
-    db = TinyDB('db.json')
-    schedule_docs = db.search(Query().id == 'schedule')
+    with TinyDB('db.json') as db:
+        schedule_docs = db.search(Query().id == 'schedule')
     return schedule_docs
 
 @app.route('/api/peak')
 def get_peak():
     """Return current peak power consumption"""
-    db = TinyDB('db.json')
-    load_watcher_docs = db.search(Query().id == 'load_watcher')
+    with TinyDB('db.json') as db:
+        load_watcher_docs = db.search(Query().id == 'load_watcher')
     peak_calc_minutes = CONFIG.get('options', {}).get('peak_calculation_minutes', 15)
     
     if load_watcher_docs:
@@ -63,8 +63,8 @@ def get_peak():
 @app.route('/api/device_limits')
 def get_device_limits():
     """Return current device load limits"""
-    db = TinyDB('db.json')
-    limits_docs = db.search(Query().id == 'device_limitations')
+    with TinyDB('db.json') as db:
+        limits_docs = db.search(Query().id == 'device_limitations')
     
     if limits_docs:
         return jsonify(limits_docs[0])
@@ -78,8 +78,8 @@ def get_device_limits():
 @app.route('/api/gantt')
 def get_gantt():
     """Generate and return Plotly Gantt chart as interactive HTML"""
-    db = TinyDB('db.json')
-    schedule_docs = db.search(Query().id == 'schedule')
+    with TinyDB('db.json') as db:
+        schedule_docs = db.search(Query().id == 'schedule')
     
     if not schedule_docs or not schedule_docs[0].get('schedule'):
         fig = go.Figure()

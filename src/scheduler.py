@@ -35,8 +35,9 @@ class Scheduler:
 
     async def schedule_actions(self):
         """Schedule device actions based on TinyDB schedule using APScheduler."""
-        db = TinyDB('db.json')
-        schedule_doc = db.get(Query().id == "schedule")
+        with TinyDB('db.json') as db:
+            schedule_doc = db.get(Query().id == "schedule")
+        
         if not schedule_doc or "schedule" not in schedule_doc:
             logger.warning("⚠️ No schedule found in TinyDB.")
             return

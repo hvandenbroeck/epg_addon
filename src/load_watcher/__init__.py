@@ -100,6 +100,12 @@ class LoadWatcher:
             
         except Exception as e:
             logger.error(f"❌ Error in load watcher: {e}", exc_info=True)
+    
+    def close(self):
+        """Close the TinyDB database connection."""
+        if hasattr(self, 'db') and self.db:
+            self.db.close()
+            logger.debug("TinyDB connection closed")
 
 
 # Export the main class

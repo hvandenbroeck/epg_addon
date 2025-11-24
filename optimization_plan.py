@@ -28,10 +28,10 @@ async def main():
 
 
     # --- Run prediction at addon start (inlined) ---
-    #statistics_loader = StatisticsLoader(args.token)
-    #weather = Weather(args.token)
-    #prediction = Prediction(statistics_loader, weather)
-    #await prediction.calculateTomorrowsPowerUsage()
+    statistics_loader = StatisticsLoader(args.token)
+    weather = Weather(args.token)
+    prediction = Prediction(statistics_loader, weather)
+    await prediction.calculateTomorrowsPowerUsage()
 
     # Create APScheduler instance
     scheduler = AsyncIOScheduler()
@@ -110,6 +110,11 @@ async def main():
             await asyncio.sleep(60)
     except Exception as e:
         logger.error(f"Error in main loop: {e}", exc_info=True)
+    finally:
+        # Cleanup on shutdown
+        logger.info("Cleaning up resources...")
+        load_watcher.close()
+        scheduler.shutdown(wait=False)
 
 if __name__ == "__main__":
     try:
