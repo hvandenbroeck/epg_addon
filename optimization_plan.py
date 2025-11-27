@@ -7,7 +7,7 @@ from src.optimizer import HeatpumpOptimizer
 from src.load_watcher import LoadWatcher
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
-from src.forecasting import StatisticsLoader, Weather, Prediction, HAEnergyDashboardFetcher
+from src.forecasting import StatisticsLoader, Weather, Prediction, HAEnergyDashboardFetcher, PriceHistoryManager
 from src.config import CONFIG
 
 # Configure logging
@@ -27,7 +27,13 @@ async def main():
     # --- Run prediction at addon start (inlined) ---
     statistics_loader = StatisticsLoader(args.token)
     weather = Weather(args.token)
-    prediction = Prediction(statistics_loader, weather)
+    
+    # Initialize price history manager if ENTSO-E API is configured
+    entsoe_token = CONFIG['options'].get('entsoe_api_token', '')
+    entsoe_country = CONFIG['options'].get('entsoe_country_code', 'BE')
+    price_history_manager = PriceHistoryManager(entsoe_token, entsoe_country) if entsoe_token else None
+    
+    prediction = Prediction(statistics_loader, weather, price_history_manager)
     await prediction.calculateTomorrowsPowerUsage()
 
     # Create APScheduler instance

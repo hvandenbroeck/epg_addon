@@ -15,9 +15,12 @@ class StatisticsLoader:
             "Content-Type": "application/json",
         }
 
-    async def fetch_statistics(self):
+    async def fetch_statistics(self, days_back=14):
         """
-        Fetches statistics for the past 14 days and returns a pandas DataFrame.
+        Fetches statistics for the specified time period and returns a pandas DataFrame.
+        
+        Args:
+            days_back: Number of days of historical data to fetch (default: 14)
         """
 
         # First, fetch energy dashboard config to identify relevant entities
@@ -34,7 +37,7 @@ class StatisticsLoader:
         
 
         end_dt = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-        start_dt = end_dt - timedelta(days=365)
+        start_dt = end_dt - timedelta(days=days_back)
         payload = {
             "start_time": start_dt.isoformat(),
             "end_time": end_dt.isoformat(),
@@ -140,4 +143,4 @@ class StatisticsLoader:
                     entities["battery_discharge"].append(sensor_discharge)
                 if sensor_charge:
                     entities["battery_charge"].append(sensor_charge)
-        return entities   
+        return entities

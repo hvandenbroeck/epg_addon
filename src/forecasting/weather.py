@@ -44,12 +44,12 @@ class Weather:
         
         logger.info(f"Location fetched successfully: lat={self.lat}, lon={self.lon}")
 
-    async def getTomorrowsTemperature(self):
+    async def getTomorrowsHourlyWeather(self):
         """
-        Returns a dict with tomorrow's daily mean temperature (in Celsius) and sunshine duration (in seconds) from Open-Meteo.
-        Returns: {'temperature': float, 'sunshine_duration': float}
+        Returns a DataFrame with tomorrow's hourly weather forecast.
+        Columns: 'timestamp' (datetime), 'hour' (int), 'temperature' (Celsius), 'cloud_cover' (%)
         """
-        logger.info("Fetching tomorrow's daily mean temperature and sunshine duration forecast")
+        logger.info("Fetching tomorrow's hourly weather forecast")
         # Ensure location is fetched
         await self._fetch_location()
 
@@ -58,74 +58,88 @@ class Weather:
         start_date = tomorrow.isoformat()
         end_date = tomorrow.isoformat()
         
-        logger.debug(f"Querying Open-Meteo daily forecast for date: {start_date}")
+        logger.debug(f"Querying Open-Meteo hourly forecast for date: {start_date}")
         openmeteo_url = (
             f"https://api.open-meteo.com/v1/forecast?"
             f"latitude={self.lat}&longitude={self.lon}"
-            f"&daily=temperature_2m_mean,sunshine_duration"
+            f"&hourly=temperature_2m,cloud_cover"
             f"&start_date={start_date}&end_date={end_date}"
-            f"&timezone=UTC"
+            f"&timezone=auto"
         )
         
         async with aiohttp.ClientSession() as session:
             async with session.get(openmeteo_url) as resp:
                 if resp.status != 200:
-                    logger.error(f"Failed to get Open-Meteo daily forecast: HTTP {resp.status}")
-                    raise Exception(f"Failed to get Open-Meteo daily forecast: {resp.status}")
+                    logger.error(f"Failed to get Open-Meteo hourly forecast: HTTP {resp.status}")
+                    raise Exception(f"Failed to get Open-Meteo hourly forecast: {resp.status}")
                 forecast = await resp.json()
 
-        # Extract tomorrow's daily mean temperature and sunshine duration
-        temperatures = forecast["daily"]["temperature_2m_mean"]
-        sunshine_durations = forecast["daily"]["sunshine_duration"]
-        logger.info(f"Successfully fetched tomorrow's forecast - temperature: {temperatures[0] if temperatures else 'N/A'}, sunshine duration: {sunshine_durations[0] if sunshine_durations else 'N/A'}s")
+        # Extract hourly data
+        times = forecast["hourly"]["time"]
+        temperatures = forecast["hourly"]["temperature_2m"]
+        cloud_cover = forecast["hourly"]["cloud_cover"]
         
-        if temperatures and sunshine_durations:
-            return {'temperature': temperatures[0], 'sunshine_duration': sunshine_durations[0]}
-        else:
-            return {}
+        df = pd.DataFrame({
+            'timestamp': pd.to_datetime(times),
+            'temperature': temperatures,
+            'cloud_cover': cloud_cover
+        })
+        df['hour'] = df['timestamp'].dt.hour
+        
+        logger.info(f"Successfully fetched {len(df)} hours of tomorrow's weather forecast")
+        return df
 
-    async def getHistoricalTemperature(self):
+    async def getHistoricalHourlyWeather(self, days_back=365):
         """
-        Returns a DataFrame with historical daily average temperatures and sunshine duration from the last year.
-        Columns: 'date' (datetime.date), 'temperature' (Celsius), 'sunshine_duration' (seconds)
+        Returns a DataFrame with historical hourly weather data.
+        Columns: 'timestamp', 'hour', 'date', 'temperature' (Celsius), 'cloud_cover' (%)
+        
+        Args:
+            days_back: Number of days of historical data to retrieve
         """
-        logger.info("Fetching historical daily temperature and sunshine duration data for the last year")
+        logger.info(f"Fetching historical hourly weather data for the last {days_back} days")
         # Ensure location is fetched
         await self._fetch_location()
         
-        # Calculate date range for last year
+        # Calculate date range
         end_date = datetime.now(timezone.utc).date()
-        start_date = end_date - timedelta(days=365)
+        start_date = end_date - timedelta(days=days_back)
         
-        logger.debug(f"Querying Open-Meteo archive from {start_date} to {end_date} (daily)")
-        # Query Open-Meteo historical API for daily temperature and sunshine duration
+        logger.debug(f"Querying Open-Meteo archive from {start_date} to {end_date} (hourly)")
+        # Query Open-Meteo historical API for hourly weather
         openmeteo_url = (
             f"https://archive-api.open-meteo.com/v1/archive?"
             f"latitude={self.lat}&longitude={self.lon}"
             f"&start_date={start_date.isoformat()}&end_date={end_date.isoformat()}"
-            f"&daily=temperature_2m_mean,sunshine_duration"
-            f"&timezone=UTC"
+            f"&hourly=temperature_2m,cloud_cover"
+            f"&timezone=auto"
         )
-        
+
+        logger.info(f"Openmeteo url: {openmeteo_url}")
+
         async with aiohttp.ClientSession() as session:
             async with session.get(openmeteo_url) as resp:
                 if resp.status != 200:
-                    logger.error(f"Failed to get Open-Meteo historical data: HTTP {resp.status}")
-                    raise Exception(f"Failed to get Open-Meteo historical data: {resp.status}")
+                    logger.error(f"Failed to get Open-Meteo historical hourly data: HTTP {resp.status}")
+                    raise Exception(f"Failed to get Open-Meteo historical hourly data: {resp.status}")
                 data = await resp.json()
         
-        # Extract daily data and create DataFrame
-        dates = data["daily"]["time"]
-        temperatures = data["daily"]["temperature_2m_mean"]
-        sunshine_durations = data["daily"]["sunshine_duration"]
+        # Extract hourly data and create DataFrame
+        times = data["hourly"]["time"]
+        temperatures = data["hourly"]["temperature_2m"]
+        cloud_cover = data["hourly"]["cloud_cover"]
         
-        logger.debug(f"Received {len(dates)} daily historical data points")
+        logger.debug(f"Received {len(times)} hourly historical data points")
+        
         # Convert to DataFrame
         df = pd.DataFrame({
-            'date': pd.to_datetime(dates).date,
+            'timestamp': pd.to_datetime(times),
             'temperature': temperatures,
-            'sunshine_duration': sunshine_durations
+            'cloud_cover': cloud_cover
         })
+        df['hour'] = df['timestamp'].dt.hour
+        df['date'] = df['timestamp'].dt.date
+        df['dayofweek'] = df['timestamp'].dt.dayofweek
         
-        logger.info(f"Successfully created DataFrame with {len(df)} daily rows")
+        logger.info(f"Successfully created DataFrame with {len(df)} hourly rows")
         return df
