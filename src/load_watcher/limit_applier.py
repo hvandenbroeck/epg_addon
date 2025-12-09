@@ -75,14 +75,6 @@ class LimitApplier:
                 three_phase = 1 if limit_watts > phase_switch_threshold else 0
                 single_phase = 1 if limit_watts <= phase_switch_threshold else 0
                 
-                # Context for expression evaluation
-                context = {
-                    'limit_watts': limit_watts,
-                    'limit_amps': limit_amps,
-                    'three_phase': three_phase,
-                    'single_phase': single_phase
-                }
-                
                 # Handle automated phase switching if enabled
                 automated_phase_switching = load_mgmt.get('automated_phase_switching', False)
                 
@@ -107,6 +99,9 @@ class LimitApplier:
                                 if time_since_switch < phase_switch_delay_minutes:
                                     can_switch = False
                                     logger.info(f"  ⏳ {device_name}: Delay active - {time_since_switch:.1f}/{phase_switch_delay_minutes} min since switch to single phase")
+                                    # Update context to reflect current phase, not target phase
+                                    three_phase = 0
+                                    single_phase = 1
                         
                         if can_switch:
                             # Execute phase switch action
@@ -137,6 +132,14 @@ class LimitApplier:
                                     # Update phase state in limit_data
                                     limit_data['current_phase'] = 'three'
                                     limits_updated = True
+                
+                # Context for expression evaluation (updated after phase logic)
+                context = {
+                    'limit_watts': limit_watts,
+                    'limit_amps': limit_amps,
+                    'three_phase': three_phase,
+                    'single_phase': single_phase
+                }
                 
                 # Apply the limit itself
                 # Handle both new structure (with apply_limit subaction) and old structure (direct actions)

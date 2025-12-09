@@ -34,6 +34,7 @@ class LimitCalculator:
                 return
             
             logger.info(f"⚡ Calculating load limits with available power: {available_power_watts:.0f}W")
+            logger.debug(f"  Threshold power: {self.load_watcher_threshold_power}W")
             
             # Load all devices with load_management enabled
             load_managed_devices = []
@@ -93,6 +94,7 @@ class LimitCalculator:
         """
         logger.info("  📈 Power available - increasing limits for high priority devices")
         sorted_devices = sorted(load_managed_devices, key=lambda x: x['priority'])
+        logger.debug(f"    Processing {len(sorted_devices)} devices in priority order: {[d['name'] for d in sorted_devices]}")
         remaining_power = available_power_watts
         device_limits = {}
         
@@ -129,23 +131,20 @@ class LimitCalculator:
             
             # Calculate new limit
             calculated_limit = charging_power + remaining_power
-            
-            # Determine state
-            device_state = 'Charging below limit'
+            logger.debug(f"    [available calc] {device['name']}: charging={charging_power:.0f}W, remaining={remaining_power:.0f}W, calculated_limit={calculated_limit:.0f}W, max={device['max_watts']:.0f}W")
             
             # Cap at maximum
             if calculated_limit > device['max_watts']:
                 new_limit = device['max_watts']
                 power_used = device['max_watts'] - charging_power
                 remaining_power -= power_used
-                if charging_power >= device['max_watts'] * 0.95:  # If already at or near max
-                    device_state = 'Charging below limit'
-                else:
-                    device_state = 'Limit enforced'
+                device_state = 'Limit: device limit'
+                logger.debug(f"    [available decision] {device['name']}: limit capped at max ({new_limit:.0f}W), used {power_used:.0f}W, remaining {remaining_power:.0f}W")
             else:
                 new_limit = calculated_limit
                 remaining_power = 0
-                device_state = 'Limit enforced'
+                device_state = 'Limit: available power'
+                logger.debug(f"    [available decision] {device['name']}: set to {new_limit:.0f}W, consumed all remaining power")
             
             device_limits[device['name']] = {
                 'limit_watts': new_limit,
@@ -178,6 +177,7 @@ class LimitCalculator:
         """
         logger.info("  📉 Power excess - decreasing limits for low priority devices")
         sorted_devices = sorted(load_managed_devices, key=lambda x: x['priority'], reverse=True)
+        logger.debug(f"    Processing {len(sorted_devices)} devices in reverse priority order: {[d['name'] for d in sorted_devices]}")
         excess_power = abs(available_power_watts)
         device_limits = {}
         
@@ -214,6 +214,7 @@ class LimitCalculator:
             
             # Calculate new limit
             calculated_limit = charging_power - excess_power
+            logger.debug(f"    [excess calc] {device['name']}: charging={charging_power:.0f}W, excess={excess_power:.0f}W, calculated_limit={calculated_limit:.0f}W")
             
             # Determine state
             device_state = 'Charging below limit'
@@ -223,14 +224,13 @@ class LimitCalculator:
                 new_limit = 0
                 power_freed = charging_power
                 excess_power -= power_freed
-                device_state = 'Limit enforced'
+                device_state = 'Limit: available power'
+                logger.debug(f"    [excess decision] {device['name']}: limit would be negative, clamping to 0, freed {power_freed:.0f}W, remaining excess {excess_power:.0f}W")
             else:
                 new_limit = calculated_limit
                 excess_power = 0
-                if new_limit < charging_power * 0.95:  # Limit is significantly reducing the load
-                    device_state = 'Limit enforced'
-                else:
-                    device_state = 'Charging below limit'
+                device_state = 'Limit: available power'
+                logger.debug(f"    [excess decision] {device['name']}: set to {new_limit:.0f}W, no excess remaining")
             
             device_limits[device['name']] = {
                 'limit_watts': new_limit,
@@ -269,9 +269,11 @@ class LimitCalculator:
             # Positive values mean charging
             charging_power = current_load
             is_charging = charging_power > self.load_watcher_threshold_power
+            logger.debug(f"      [charge_sign=positive] {device['name']}: load={current_load:.0f}W, threshold={self.load_watcher_threshold_power}W, charging={is_charging}")
         elif device['charge_sign'] == 'negative':
             # Negative values mean charging
             charging_power = abs(current_load)
             is_charging = current_load < -self.load_watcher_threshold_power
+            logger.debug(f"      [charge_sign=negative] {device['name']}: load={current_load:.0f}W, threshold={-self.load_watcher_threshold_power}W, charging={is_charging}")
         
         return is_charging, charging_power

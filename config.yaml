@@ -1,6 +1,6 @@
 name: "EPG Add-on"
 description: "Energy Plan Generator"
-version: "1.0.1"
+version: "1.0.2"
 slug: "epg_addon"
 init: false
 homeassistant_api: true
