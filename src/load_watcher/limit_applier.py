@@ -82,7 +82,7 @@ class LimitApplier:
                     # Get current phase state from limit_data
                     current_phase = limit_data.get('current_phase', 'three')
                     last_switch_to_single = limit_data.get('last_switch_to_single_timestamp')
-                    
+
                     # Determine target phase based on limit
                     target_phase = 'single' if limit_watts < phase_switch_threshold else 'three'
                     
@@ -92,7 +92,7 @@ class LimitApplier:
                         
                         # If switching from single to three, check delay
                         if current_phase == 'single' and target_phase == 'three':
-                            if last_switch_to_single:
+                            if last_switch_to_single: #is not yet set, this condition will be false
                                 last_switch_time = datetime.fromisoformat(last_switch_to_single)
                                 time_since_switch = (current_time - last_switch_time).total_seconds() / 60
                                 

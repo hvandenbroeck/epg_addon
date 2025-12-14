@@ -3,6 +3,8 @@
 import argparse
 import asyncio
 import logging
+from logging.handlers import RotatingFileHandler
+import os
 from src.optimizer import HeatpumpOptimizer
 from src.load_watcher import LoadWatcher
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -10,11 +12,31 @@ from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 from src.forecasting import StatisticsLoader, Weather, Prediction, HAEnergyDashboardFetcher, PriceHistoryManager
 from src.config import CONFIG
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+# Configure logging with both file and console output
+log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+log_dir = '/data/logs'
+os.makedirs(log_dir, exist_ok=True)
+
+# Root logger configuration
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.DEBUG)
+
+# File handler (rotating, keeps 10 files of 10MB each = 100MB total history)
+file_handler = RotatingFileHandler(
+    f'{log_dir}/epg_addon.log',
+    maxBytes=10*1024*1024,  # 10MB per file
+    backupCount=10          # Keep 10 backup files
 )
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter(log_format))
+root_logger.addHandler(file_handler)
+
+# Console handler (stdout)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.DEBUG)
+console_handler.setFormatter(logging.Formatter(log_format))
+root_logger.addHandler(console_handler)
+
 logger = logging.getLogger(__name__)
 
 async def main():

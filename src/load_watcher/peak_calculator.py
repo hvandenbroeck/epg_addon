@@ -76,7 +76,30 @@ class PeakCalculator:
             else:
                 logger.warning("  ⚠️ Time difference is zero, cannot calculate peak")
         elif len(slot_readings) == 1:
-            logger.info(f"  📝 Only 1 reading in current {self.peak_calculation_minutes}-min slot, need at least 2 to calculate peak")
+            # Try to find the latest reading before the current slot
+            first_in_slot = slot_readings[0]
+            first_in_slot_time = datetime.fromisoformat(first_in_slot['timestamp'])
+            # Filter readings before the current slot start
+            previous_readings = [r for r in readings if datetime.fromisoformat(r['timestamp']) < current_slot_start]
+            if previous_readings:
+                # Get the latest previous reading
+                previous_reading = max(previous_readings, key=lambda x: x['timestamp'])
+                previous_time = datetime.fromisoformat(previous_reading['timestamp'])
+                # Calculate time difference in minutes
+                time_diff_seconds = (first_in_slot_time - previous_time).total_seconds()
+                time_diff_minutes = time_diff_seconds / 60.0
+                # Calculate energy difference
+                energy_diff_kwh = first_in_slot['total_energy_consumption'] - previous_reading['total_energy_consumption']
+                # Calculate peak in kW by extrapolating to 1 hour
+                if time_diff_minutes > 0:
+                    current_peak_kw = energy_diff_kwh * (60.0 / time_diff_minutes)
+                    logger.info(f"  📊 Slot {current_slot_start.strftime('%H:%M')}-{(current_slot_start + timedelta(minutes=self.peak_calculation_minutes)).strftime('%H:%M')}")
+                    logger.info(f"  📊 Energy diff (using previous slot): {energy_diff_kwh:.3f} kWh over {time_diff_minutes:.1f} min (2 readings)")
+                    logger.info(f"  ⚡ Current peak: {current_peak_kw:.2f} kW")
+                else:
+                    logger.warning("  ⚠️ Time difference is zero, cannot calculate peak (previous slot)")
+            else:
+                logger.info(f"  📝 Only 1 reading in current {self.peak_calculation_minutes}-min slot and no previous reading available, need at least 2 to calculate peak")
         else:
             logger.info(f"  📝 No readings in current {self.peak_calculation_minutes}-min slot yet")
         

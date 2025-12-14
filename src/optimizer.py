@@ -61,7 +61,7 @@ class HeatpumpOptimizer:
         BAT_CHARGE_SLOTS = 10
         BAT_DISCHARGE_BLOCK_HOURS = 1
         BAT_DISCHARGE_BLOCKS = 10
-        EV_MAX_PRICE = 0.10  # 10 cents per kWh
+        EV_MAX_PRICE = 0.06  # 6 cents per kWh
 
         logger.info("🔎 Starting energy optimization using ENTSO-E prices...")
 

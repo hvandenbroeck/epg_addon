@@ -19,5 +19,7 @@ ingress_port: 8099  # Add this
 webui: "http://[HOST]:[PORT:8099]"
 panel_icon: "mdi:chart-timeline"
 panel_title: "Energy Optimizer"
+volumes:
+  - /data/logs:/data/logs
 options:
   ha_url: "http://supervisor/core"
