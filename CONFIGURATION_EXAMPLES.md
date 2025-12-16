@@ -2,6 +2,17 @@
 
 **Note:** Only content within curly brackets `{}` is evaluated as an expression. Variables within brackets don't need their own brackets.
 
+## State Verification & Retry
+
+The addon automatically verifies device states and retries failed commands:
+- **Post-action**: Checks every 30s for 3 minutes after each command
+- **Periodic**: Checks all devices every 5 minutes
+
+**Verification fields:**
+- MQTT: `topic_get` (read topic), `payload_check` (expected value)
+- Entity: `value_check` (expected state), `state_attribute` (check attribute instead of state)
+- Switch services (`turn_on`/`turn_off`) auto-infer expected state ("on"/"off")
+
 ## Example 1: Battery Charger with Efficiency Calculation
 
 If your battery charger has 90% efficiency, you can automatically account for this:
@@ -23,9 +34,9 @@ If your battery charger has 90% efficiency, you can automatically account for th
 }
 ```
 
-## Example 2: EV Charger with Voltage Conversion
+## Example 2: EV Charger with Switch Verification
 
-Convert power limit (watts) to current (amps) for the charger:
+Convert power limit (watts) to current (amps). Switch verification is automatic:
 
 ```python
 "ev": {
@@ -36,68 +47,117 @@ Convert power limit (watts) to current (amps) for the charger:
                 {
                     "service": "number/set_value",
                     "entity_id": "number.ev_charger_max_charging_current",
-                    "value": "{round(limit_watts / 230, 1)}"  # Convert W to A, round to 0.1A
-                }
-            ],
-            "mqtt": [
-                {
-                    "topic": "ev_charger/set_limit",
-                    "payload": "{int(limit_watts)}"  # Send as integer watts
-                },
-                {
-                    "topic": "ev_charger/status",
-                    "payload": "Charging at {limit_watts}W ({round(limit_watts / 230, 1)}A)"
+                    "value": "{round(limit_watts / 230, 1)}"
                 }
             ]
         }
+    },
+    "start": {
+        "entity": [
+            {
+                "service": "switch/turn_on",
+                "entity_id": "switch.ev_charger"
+                # Auto-verifies state = "on"
+            }
+        ]
+    },
+    "stop": {
+        "entity": [
+            {
+                "service": "switch/turn_off",
+                "entity_id": "switch.ev_charger"
+                # Auto-verifies state = "off"
+            }
+        ]
     }
 }
 ```
 
-## Example 3: Multi-Phase Device Configuration
+## Example 3: Heat Pump with MQTT Verification
 
-Automatically adjust for three-phase vs single-phase operation:
-
-```python
-"device": {
-    "enable_load_management": True,
-    "load_management": {
-        "apply_limit_actions": {
-            "entity": [
-                {
-                    "service": "number/set_value",
-                    "entity_id": "number.device_current_limit",
-                    # Divide by 3 for three-phase, keep full for single-phase
-                    "value": "{round(limit_watts / 230 / (3 if three_phase else 1), 1)}"
-                }
-            ]
-        }
-    }
-}
-```
-
-## Example 4: Heat Pump with Temperature Adjustment
-
-Calculate temperature setpoint based on available power:
+Control via MQTT with explicit verification topics:
 
 ```python
 "wp": {
-    "enable_load_management": True,
-    "load_management": {
-        "apply_limit_actions": {
-            "mqtt": [
-                {
-                    "topic": "heatpump/target_temp/set",
-                    # Base temp 20°C + 2°C per 1000W available
-                    "payload": "{round(20 + limit_watts / 1000 * 2, 1)}"
-                }
-            ]
-        }
+    "start": {
+        "mqtt": [
+            {
+                "topic": "ebusd/700/z2sfmode/set",
+                "topic_get": "ebusd/700/z2sfmode/get",  # Topic to verify state
+                "payload": "veto"
+            },
+            {
+                "topic": "ebusd/700/z2quickvetotemp/set",
+                "topic_get": "ebusd/700/z2quickvetotemp/get",
+                "payload": "22"
+            }
+        ]
+    },
+    "stop": {
+        "mqtt": [
+            {
+                "topic": "ebusd/700/z2sfmode/set",
+                "topic_get": "ebusd/700/z2sfmode/get",
+                "payload": "auto"
+            },
+            {
+                "topic": "ebusd/700/z2quickvetotemp/set",
+                "topic_get": "ebusd/700/z2quickvetotemp/get",
+                "payload": "20"
+            }
+        ]
     }
 }
 ```
 
-## Example 5: Device with Minimum and Maximum Limits
+## Example 4: Select Entity with Verification
+
+For select entities, verification uses the `option` value automatically:
+
+```python
+"bat_charge": {
+    "start": {
+        "entity": [
+            {
+                "service": "select/select_option",
+                "entity_id": "select.deye_prog1_charge",
+                "option": "Allow Grid"
+                # Auto-verifies state = "Allow Grid"
+            }
+        ]
+    },
+    "stop": {
+        "entity": [
+            {
+                "service": "select/select_option",
+                "entity_id": "select.deye_prog1_charge",
+                "option": "No Grid or Gen"
+            }
+        ]
+    }
+}
+```
+
+## Example 5: Number Entity with Custom Verification
+
+Use `value_check` when the returned state differs from the set value:
+
+```python
+"device": {
+    "start": {
+        "entity": [
+            {
+                "service": "number/set_value",
+                "entity_id": "number.device_capacity",
+                "value": 80,
+                "value_check": "80.0"  # If device returns string with decimal
+            }
+        ]
+    }
+}
+```
+
+## Example 6: Device with Minimum and Maximum Limits
 
 Ensure the calculated value stays within device limits:
 
@@ -119,7 +179,7 @@ Ensure the calculated value stays within device limits:
 }
 ```
 
-## Example 6: Percentage-Based Control
+## Example 7: Percentage-Based Control
 
 Convert absolute watts to percentage of device capacity:
 
@@ -141,7 +201,7 @@ Convert absolute watts to percentage of device capacity:
 }
 ```
 
-## Example 7: Combined MQTT Payload with JSON
+## Example 8: Combined MQTT Payload with JSON
 
 Create complex payloads with calculations:
 

@@ -7,6 +7,8 @@ from logging.handlers import RotatingFileHandler
 import os
 from src.optimizer import HeatpumpOptimizer
 from src.load_watcher import LoadWatcher
+from src.device_verifier import DeviceVerifier
+from src.devices import Devices
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 from src.forecasting import StatisticsLoader, Weather, Prediction, HAEnergyDashboardFetcher, PriceHistoryManager
@@ -66,6 +68,10 @@ async def main():
     # logger.info(args.HAUrl + "----" + args.token)
     optimizer = HeatpumpOptimizer(args.token, scheduler=scheduler)
 
+    # Create device verifier and link it to devices
+    device_verifier = DeviceVerifier(optimizer.devices, scheduler)
+    Devices.set_verifier(device_verifier)
+
     # Create load watcher instance
     load_watcher = LoadWatcher(args.token)
 
@@ -123,6 +129,28 @@ async def main():
         id='load_watcher'
     )
     logger.info(f"Load watcher scheduled to run every {load_watcher_interval} minutes on the {load_watcher_interval}-minute marks (Europe/Brussels)")
+
+    # Schedule device verification - periodic check every 5 minutes
+    async def scheduled_periodic_verification():
+        logger.info("🔍 Running scheduled periodic device verification...")
+        try:
+            await device_verifier.run_periodic_verification()
+        except Exception as e:
+            logger.error(f"❌ Error during periodic verification: {e}", exc_info=True)
+
+    scheduler.add_job(
+        scheduled_periodic_verification,
+        'cron',
+        minute='*/5',
+        timezone='Europe/Brussels',
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=60,
+        id='periodic_device_verification'
+    )
+    logger.info("Periodic device verification scheduled to run every 5 minutes (Europe/Brussels)")
+    # Note: Post-action verification jobs are scheduled dynamically by DeviceVerifier
+    # when device actions are executed (6 checks over 3 minutes per action)
     
     # Print all scheduled jobs for verification
     logger.info("Currently scheduled jobs:")

@@ -1,27 +1,36 @@
 # Device actions configuration
+# 
+# Verification fields:
+# - For MQTT actions: 
+#   - topic_get: MQTT topic to read current value (optional, derived from topic by replacing /set with /get if not specified)
+#   - payload_check: Value to check against (optional, defaults to payload value)
+# - For entity actions:
+#   - value_check: Value to verify against entity state (optional, defaults to value/option)
+#   - state_attribute: Attribute to check instead of state (optional)
+#
 device_actions = {
     "wp": {
         "enable_load_management": False,
         "start": {
             "mqtt": [
-                {"topic": "ebusd/700/z2sfmode/set", "payload": "veto"},
-                {"topic": "ebusd/700/z2quickvetotemp/set", "payload": "22"}
+                {"topic": "ebusd/700/z2sfmode/set", "topic_get": "ebusd/700/z2sfmode/get", "payload": "veto"},
+                {"topic": "ebusd/700/z2quickvetotemp/set", "topic_get": "ebusd/700/z2quickvetotemp/get", "payload": "22"}
             ]
         },
         "stop": {
             "mqtt": [
-                {"topic": "ebusd/700/z2sfmode/set", "payload": "auto"},
-                {"topic": "ebusd/700/z2quickvetotemp/set", "payload": "20"}
+                {"topic": "ebusd/700/z2sfmode/set", "topic_get": "ebusd/700/z2sfmode/get", "payload": "auto"},
+                {"topic": "ebusd/700/z2quickvetotemp/set", "topic_get": "ebusd/700/z2quickvetotemp/get", "payload": "20"}
             ]
         }
     },
     "hw": {
         "enable_load_management": False,
         "start": {
-            "mqtt": [{"topic": "ebusd/700/HwcTempDesired/set", "payload": "60"}]
+            "mqtt": [{"topic": "ebusd/700/HwcTempDesired/set", "topic_get": "ebusd/700/HwcTempDesired/get", "payload": "60"}]
         },
         "stop": {
-            "mqtt": [{"topic": "ebusd/700/HwcTempDesired/set", "payload": "50"}]
+            "mqtt": [{"topic": "ebusd/700/HwcTempDesired/set", "topic_get": "ebusd/700/HwcTempDesired/get", "payload": "50"}]
         }
     },
     "bat_charge": {

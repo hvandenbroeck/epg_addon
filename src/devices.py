@@ -10,6 +10,9 @@ logger = logging.getLogger(__name__)
 class Devices:
     """Manages device actions and execution."""
 
+    # Class-level reference to verifier (set externally)
+    _verifier = None
+
     def __init__(self, access_token):
         self.ha_url = CONFIG['options']['ha_url']
         self.headers = {
@@ -17,6 +20,15 @@ class Devices:
             "Content-Type": "application/json",
         }
         self.device_actions = device_actions
+
+    @classmethod
+    def set_verifier(cls, verifier):
+        """Set the device verifier instance for action tracking.
+        
+        Args:
+            verifier: DeviceVerifier instance
+        """
+        cls._verifier = verifier
 
     async def call_service(self, service, **service_data):
         """Call a Home Assistant service.
@@ -34,7 +46,7 @@ class Devices:
             async with session.post(url, headers=self.headers, json=service_data) as response:
                 return response.status == 200
 
-    async def execute_device_action(self, device, actions, action_label, scheduled_time=None, context=None):
+    async def execute_device_action(self, device, actions, action_label, scheduled_time=None, context=None, skip_verification=False):
         """Execute MQTT and entity actions for a device.
         
         Args:
@@ -43,6 +55,7 @@ class Devices:
             action_label: Label for the action ('start' or 'stop')
             scheduled_time: Optional datetime when action was scheduled
             context: Optional dictionary for expression evaluation (e.g., {'limit_watts': 3500})
+            skip_verification: If True, don't register for post-action verification (used by retry logic)
         """
         time_info = f" at {scheduled_time}" if scheduled_time else ""
         logger.info(f"🔄 Executing {device.upper()} {action_label.upper()}{time_info}")
@@ -80,6 +93,10 @@ class Devices:
                     logger.info(f"🏠 Entity service call: {service}({service_data})")
                 except Exception as e:
                     logger.error(f"❌ Failed to call service {service}: {e}")
+
+        # Register action with verifier for post-action verification
+        if self._verifier and action_label in ("start", "stop") and not skip_verification:
+            self._verifier.register_action(device, action_label, context)
 
     def get_device_config(self, device):
         """Get configuration for a specific device.
