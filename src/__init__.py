@@ -1,4 +1,4 @@
-from .devices_config import device_actions
+from .devices_config import devices_config
 from .optimizer import HeatpumpOptimizer
 from .forecasting import Prediction
 from .device_verifier import DeviceVerifier

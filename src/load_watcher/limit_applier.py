@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timedelta
 from tinydb import Query
-from ..devices_config import device_actions
+from ..devices_config import devices_config
 from ..config import CONFIG
 from ..utils import evaluate_expression
 
@@ -55,15 +55,19 @@ class LimitApplier:
             # Iterate through each device that has a calculated limit
             for device_name, limit_data in device_limits.items():
                 # Get device configuration
-                device_config = device_actions.get(device_name)
-                if not device_config:
-                    logger.warning(f"  ⚠️ Device '{device_name}' not found in device_actions")
+                device = devices_config.get_device_by_name(device_name)
+                if not device:
+                    logger.warning(f"  ⚠️ Device '{device_name}' not found in devices_config")
                     continue
                 
                 # Check if device has apply_limit_actions configured under load_management
-                load_mgmt = device_config.get('load_management', {})
-                apply_actions = load_mgmt.get('apply_limit_actions')
-                if not apply_actions:
+                load_mgmt = device.load_management
+                if not load_mgmt or not load_mgmt.apply_limit_actions:
+                    logger.info(f"  ⏭️ {device_name}: No apply_limit_actions configured, skipping")
+                    continue
+                    
+                apply_actions = load_mgmt.apply_limit_actions
+                if not apply_actions.apply_limit:
                     logger.info(f"  ⏭️ {device_name}: No apply_limit_actions configured, skipping")
                     continue
                 
@@ -76,7 +80,7 @@ class LimitApplier:
                 single_phase = 1 if limit_watts <= phase_switch_threshold else 0
                 
                 # Handle automated phase switching if enabled
-                automated_phase_switching = load_mgmt.get('automated_phase_switching', False)
+                automated_phase_switching = load_mgmt.automated_phase_switching
                 
                 if automated_phase_switching:
                     # Get current phase state from limit_data
@@ -106,12 +110,12 @@ class LimitApplier:
                         if can_switch:
                             # Execute phase switch action
                             if target_phase == 'single':
-                                switch_actions = apply_actions.get('switch_to_single_phase')
+                                switch_actions = apply_actions.switch_to_single_phase
                                 if switch_actions:
                                     logger.info(f"  🔄 {device_name}: Switching to SINGLE phase (limit: {limit_watts:.0f}W < {phase_switch_threshold}W)")
                                     await devices_instance.execute_device_action(
-                                        device=device_name,
-                                        actions=switch_actions,
+                                        device_name=device_name,
+                                        actions=switch_actions.model_dump(exclude_none=True),
                                         action_label="switch_to_single_phase",
                                         context=context
                                     )
@@ -120,12 +124,12 @@ class LimitApplier:
                                     limit_data['last_switch_to_single_timestamp'] = current_time.isoformat()
                                     limits_updated = True
                             else:
-                                switch_actions = apply_actions.get('switch_to_three_phase')
+                                switch_actions = apply_actions.switch_to_three_phase
                                 if switch_actions:
                                     logger.info(f"  🔄 {device_name}: Switching to THREE phase (limit: {limit_watts:.0f}W >= {phase_switch_threshold}W)")
                                     await devices_instance.execute_device_action(
-                                        device=device_name,
-                                        actions=switch_actions,
+                                        device_name=device_name,
+                                        actions=switch_actions.model_dump(exclude_none=True),
                                         action_label="switch_to_three_phase",
                                         context=context
                                     )
@@ -142,17 +146,17 @@ class LimitApplier:
                 }
                 
                 # Apply the limit itself
-                # Handle both new structure (with apply_limit subaction) and old structure (direct actions)
-                limit_actions = apply_actions.get('apply_limit', apply_actions)
+                limit_actions = apply_actions.apply_limit
                 
-                # Execute the actions using Devices.execute_device_action
-                logger.info(f"  🎯 {device_name}: Applying limit of {limit_watts:.0f}W ({limit_amps:.1f}A)")
-                await devices_instance.execute_device_action(
-                    device=device_name,
-                    actions=limit_actions,
-                    action_label=f"limit_{int(limit_watts)}W",
-                    context=context
-                )
+                if limit_actions:
+                    # Execute the actions using Devices.execute_device_action
+                    logger.info(f"  🎯 {device_name}: Applying limit of {limit_watts:.0f}W ({limit_amps:.1f}A)")
+                    await devices_instance.execute_device_action(
+                        device_name=device_name,
+                        actions=limit_actions.model_dump(exclude_none=True),
+                        action_label=f"limit_{int(limit_watts)}W",
+                        context=context
+                    )
             
             # Update database if phase states changed
             if limits_updated:

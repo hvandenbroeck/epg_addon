@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime
 from tinydb import Query
-from ..devices_config import device_actions
+from ..devices_config import devices_config
 
 logger = logging.getLogger(__name__)
 
@@ -43,13 +43,17 @@ class LimitCalculator:
             
             # Initialize limits dictionary with all load-managed devices
             device_limits = {}
-            for device_name, device_config in device_actions.items():
-                if not device_config.get('enable_load_management', False):
+            for device in devices_config.devices:
+                if not device.enable_load_management:
+                    continue
+                
+                device_name = device.name
+                load_mgmt = device.load_management
+                if not load_mgmt:
                     continue
                     
-                load_mgmt = device_config.get('load_management', {})
-                max_watts = float(load_mgmt.get('load_maximum_watts', 0))
-                priority = load_mgmt.get('load_priority', 999)
+                max_watts = float(load_mgmt.load_maximum_watts)
+                priority = load_mgmt.load_priority
                 
                 logger.info(f"  📋 Loaded device: {device_name} (priority: {priority})")
                 
@@ -64,11 +68,11 @@ class LimitCalculator:
                         'limit_watts': max_watts,
                         'current_load_watts': 0,
                         'max_watts': max_watts,
-                        'limiter_entity': load_mgmt.get('load_limiter_entity'),
+                        'limiter_entity': load_mgmt.load_limiter_entity,
                         'priority': priority,
-                        'load_entity': load_mgmt.get('instantaneous_load_entity'),
-                        'load_unit': load_mgmt.get('instantaneous_load_entity_unit', 'W'),
-                        'charge_sign': load_mgmt.get('charge_sign', 'positive'),
+                        'load_entity': load_mgmt.instantaneous_load_entity,
+                        'load_unit': load_mgmt.instantaneous_load_entity_unit,
+                        'charge_sign': load_mgmt.charge_sign,
                         'state': 'Default limit'
                     }
                     logger.debug(f"  🆕 {device_name}: Initialized with default limit ({max_watts:.0f}W)")

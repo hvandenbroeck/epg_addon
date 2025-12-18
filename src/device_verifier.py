@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from tinydb import TinyDB, Query
 
-from .devices_config import device_actions
+from .devices_config import devices_config
 from .utils import ensure_list, evaluate_expression
 from .config import CONFIG
 
@@ -41,8 +41,8 @@ class DeviceVerifier:
             "Authorization": f"Bearer {devices_instance.headers['Authorization'].split(' ')[1]}",
             "Content-Type": "application/json",
         }
-        self.device_actions = device_actions
-        # Track pending verifications: {device: {action_label, end_time, verification_count}}
+        self.devices_config = devices_config
+        # Track pending verifications: {device_name: {action_label, end_time, verification_count}}
         self._pending_verifications = {}
 
     async def get_entity_state(self, entity_id: str) -> Optional[Dict[str, Any]]:
@@ -221,30 +221,31 @@ class DeviceVerifier:
         """Verify all actions for a device are in the expected state.
         
         Args:
-            device: Device identifier (e.g., 'wp', 'hw', 'bat_charge')
+            device: Device name (e.g., 'wp', 'hw', 'ev1')
             action_label: Action to verify ('start' or 'stop')
             context: Optional context for expression evaluation
             
         Returns:
             bool: True if all verifications passed, False if any failed
         """
-        device_config = self.device_actions.get(device)
-        if not device_config:
+        device_obj = self.devices_config.get_device_by_name(device)
+        if not device_obj:
             logger.warning(f"No config found for device '{device}'")
             return True
         
-        action_config = device_config.get(action_label, {})
+        # Get the action (start or stop)
+        action_set = device_obj.start if action_label == "start" else device_obj.stop
         all_passed = True
         
         # Verify MQTT actions
-        mqtt_actions = ensure_list(action_config.get("mqtt", []))
-        for mqtt_config in mqtt_actions:
+        for mqtt_action in action_set.mqtt:
+            mqtt_config = mqtt_action.model_dump(exclude_none=True)
             if not await self.verify_mqtt_action(mqtt_config, context):
                 all_passed = False
         
         # Verify entity actions
-        entity_actions = ensure_list(action_config.get("entity", []))
-        for entity_config in entity_actions:
+        for entity_action in action_set.entity:
+            entity_config = entity_action.model_dump(exclude_none=True)
             if not await self.verify_entity_action(entity_config, context):
                 all_passed = False
         

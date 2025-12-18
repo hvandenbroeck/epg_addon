@@ -1,6 +1,6 @@
 import logging
 import aiohttp
-from .devices_config import device_actions
+from .devices_config import devices_config
 from .utils import ensure_list, evaluate_expression
 from .config import CONFIG
 
@@ -19,7 +19,7 @@ class Devices:
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
         }
-        self.device_actions = device_actions
+        self.devices_config = devices_config
 
     @classmethod
     def set_verifier(cls, verifier):
@@ -46,11 +46,33 @@ class Devices:
             async with session.post(url, headers=self.headers, json=service_data) as response:
                 return response.status == 200
 
-    async def execute_device_action(self, device, actions, action_label, scheduled_time=None, context=None, skip_verification=False):
+    def get_device(self, device_name):
+        """Get device configuration by name.
+        
+        Args:
+            device_name: Name of the device
+            
+        Returns:
+            Device object or None if not found
+        """
+        return self.devices_config.get_device_by_name(device_name)
+    
+    def get_devices_by_type(self, device_type):
+        """Get all devices of a specific type.
+        
+        Args:
+            device_type: Type of device ('wp', 'hw', 'bat_charge', 'bat_discharge', 'ev')
+            
+        Returns:
+            List of Device objects
+        """
+        return self.devices_config.get_devices_by_type(device_type)
+    
+    async def execute_device_action(self, device_name, actions, action_label, scheduled_time=None, context=None, skip_verification=False):
         """Execute MQTT and entity actions for a device.
         
         Args:
-            device: Device identifier (e.g., 'wp', 'hw', 'bat')
+            device_name: Device name (unique identifier, e.g., 'wp', 'hw', 'ev1', 'ev2')
             actions: Dictionary containing mqtt and entity actions
             action_label: Label for the action ('start' or 'stop')
             scheduled_time: Optional datetime when action was scheduled
@@ -58,7 +80,7 @@ class Devices:
             skip_verification: If True, don't register for post-action verification (used by retry logic)
         """
         time_info = f" at {scheduled_time}" if scheduled_time else ""
-        logger.info(f"🔄 Executing {device.upper()} {action_label.upper()}{time_info}")
+        logger.info(f"🔄 Executing {device_name.upper()} {action_label.upper()}{time_info}")
         
         # Default context if not provided
         if context is None:
@@ -73,7 +95,7 @@ class Devices:
                 # Evaluate expressions in payload
                 evaluated_payload = evaluate_expression(payload, context)
                 await self.call_service("mqtt/publish", topic=topic, payload=evaluated_payload)
-                logger.info(f"📡 MQTT {action_label.upper()} for {device}: {topic} → {evaluated_payload}")
+                logger.info(f"📡 MQTT {action_label.upper()} for {device_name}: {topic} → {evaluated_payload}")
 
         # Handle entity actions
         entity_actions = ensure_list(actions.get("entity", []))
@@ -96,15 +118,15 @@ class Devices:
 
         # Register action with verifier for post-action verification
         if self._verifier and action_label in ("start", "stop") and not skip_verification:
-            self._verifier.register_action(device, action_label, context)
+            self._verifier.register_action(device_name, action_label, context)
 
-    def get_device_config(self, device):
+    def get_device_config(self, device_name):
         """Get configuration for a specific device.
         
         Args:
-            device: Device identifier
+            device_name: Device name/identifier
             
         Returns:
-            dict: Device configuration or None if not found
+            Device: Device object or None if not found
         """
-        return self.device_actions.get(device)
+        return self.devices_config.get_device_by_name(device_name)

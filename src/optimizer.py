@@ -11,6 +11,7 @@ from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_b
 from .utils import slot_to_time, slots_to_iso_ranges, merge_sequential_timeslots, time_to_slot
 from .config import CONFIG
 from .price_fetcher import EntsoeePriceFetcher
+from .devices_config import devices_config
 
 logger = logging.getLogger(__name__)
 
@@ -178,14 +179,26 @@ class HeatpumpOptimizer:
         HW_MAX_GAP_HOURS = 12   # Maximum gap between runs
         HW_MIN_DAILY_HOURS = 2  # Minimum runtime per day
 
-        # Battery configuration - unchanged
-        BAT_CHARGE_SLOTS = 10
-        BAT_DISCHARGE_BLOCK_HOURS = 1
-        BAT_DISCHARGE_BLOCKS = 8
+        # Battery configuration - percentage-based
+        BAT_CHARGE_TIME_PCT = CONFIG['options'].get('battery_charge_time_percentage', 0.25)
+        BAT_DISCHARGE_TIME_PCT = CONFIG['options'].get('battery_discharge_time_percentage', 0.25)
         
-        EV_MAX_PRICE = 0.06  # 6 cents per kWh
+        # Battery optimization parameters (new)
+        BAT_MIN_PRICE_DIFFERENTIAL = CONFIG['options'].get('battery_min_price_differential', 0.05)
+        BAT_ROUND_TRIP_EFFICIENCY = CONFIG['options'].get('battery_round_trip_efficiency', 0.90)
+        BAT_CAPACITY_KWH = CONFIG['options'].get('battery_capacity_kwh', 10.0)
+        
+        # Calculate cycle cost per kWh
+        # cycle_cost_eur is the total cost per complete charge/discharge cycle
+        # We divide by capacity to get cost per kWh cycled
+        BAT_CYCLE_COST_TOTAL = CONFIG['options'].get('battery_cycle_cost_eur', 0.02)
+        BAT_CYCLE_COST_PER_KWH = BAT_CYCLE_COST_TOTAL / BAT_CAPACITY_KWH if BAT_CAPACITY_KWH > 0 else 0.0
+        
+        EV_MAX_PRICE = 0.02  # 6 cents per kWh
 
         logger.info("🔎 Starting energy optimization using ENTSO-E prices (rolling horizon)...")
+        logger.info(f"🔋 Battery optimization settings: min_differential={BAT_MIN_PRICE_DIFFERENTIAL:.3f} EUR/kWh, "
+                   f"efficiency={BAT_ROUND_TRIP_EFFICIENCY:.1%}, cycle_cost={BAT_CYCLE_COST_PER_KWH:.4f} EUR/kWh")
 
         # Check if price fetcher is configured
         if not self.price_fetcher:
@@ -213,93 +226,128 @@ class HeatpumpOptimizer:
 
         results = {}
         
-        # ===== HEAT PUMP OPTIMIZATION =====
-        wp_initial_gap = self._calculate_initial_gap('wp', horizon_start, slot_minutes, WP_BLOCK_HOURS)
-        wp_locked_slots = self._get_locked_slots('wp', horizon_start, lock_end_datetime, slot_minutes, WP_BLOCK_HOURS)
-        
-        wp_times = optimize_wp(
-            prices=prices,
-            slot_minutes=slot_minutes,
-            block_hours=WP_BLOCK_HOURS,
-            min_gap_hours=WP_MIN_GAP_HOURS,
-            max_gap_hours=WP_MAX_GAP_HOURS,
-            min_daily_hours=WP_MIN_DAILY_HOURS,
-            locked_slots=wp_locked_slots,
-            initial_gap_slots=wp_initial_gap,
-            horizon_start_datetime=horizon_start,
-            slot_to_time=slot_to_time
-        )
-        results['wp'] = wp_times
-        
-        # Calculate last run end and save state for WP
-        if wp_times:
-            # Convert time strings back to slot indices and find the last one
-            wp_slot_indices = [time_to_slot(t, slot_minutes) for t in wp_times]
-            last_wp_slot = max(wp_slot_indices)
-            last_wp_end = horizon_start + timedelta(minutes=(last_wp_slot + int(WP_BLOCK_HOURS * 60 / slot_minutes)) * slot_minutes)
-            wp_scheduled_starts = [horizon_start + timedelta(minutes=idx * slot_minutes) for idx in wp_slot_indices]
-            self._save_device_state('wp', last_wp_end, wp_scheduled_starts)
+        # ===== HEAT PUMP OPTIMIZATION (iterate over all WP devices) =====
+        wp_devices = devices_config.get_devices_by_type('wp')
+        for wp_device in wp_devices:
+            device_name = wp_device.name
+            wp_initial_gap = self._calculate_initial_gap(device_name, horizon_start, slot_minutes, WP_BLOCK_HOURS)
+            wp_locked_slots = self._get_locked_slots(device_name, horizon_start, lock_end_datetime, slot_minutes, WP_BLOCK_HOURS)
+            
+            wp_times = optimize_wp(
+                prices=prices,
+                slot_minutes=slot_minutes,
+                block_hours=WP_BLOCK_HOURS,
+                min_gap_hours=WP_MIN_GAP_HOURS,
+                max_gap_hours=WP_MAX_GAP_HOURS,
+                min_daily_hours=WP_MIN_DAILY_HOURS,
+                locked_slots=wp_locked_slots,
+                initial_gap_slots=wp_initial_gap,
+                horizon_start_datetime=horizon_start,
+                slot_to_time=slot_to_time
+            )
+            results[device_name] = wp_times
+            
+            # Calculate last run end and save state for this WP device
+            if wp_times:
+                wp_slot_indices = [time_to_slot(t, slot_minutes) for t in wp_times]
+                last_wp_slot = max(wp_slot_indices)
+                last_wp_end = horizon_start + timedelta(minutes=(last_wp_slot + int(WP_BLOCK_HOURS * 60 / slot_minutes)) * slot_minutes)
+                wp_scheduled_starts = [horizon_start + timedelta(minutes=idx * slot_minutes) for idx in wp_slot_indices]
+                self._save_device_state(device_name, last_wp_end, wp_scheduled_starts)
 
-        # ===== HOT WATER OPTIMIZATION =====
-        hw_initial_gap = self._calculate_initial_gap('hw', horizon_start, slot_minutes, HW_BLOCK_HOURS)
-        hw_locked_slots = self._get_locked_slots('hw', horizon_start, lock_end_datetime, slot_minutes, HW_BLOCK_HOURS)
-        
-        hw_times = optimize_hw(
-            prices=prices,
-            slot_minutes=slot_minutes,
-            block_hours=HW_BLOCK_HOURS,
-            min_gap_hours=HW_MIN_GAP_HOURS,
-            max_gap_hours=HW_MAX_GAP_HOURS,
-            min_daily_hours=HW_MIN_DAILY_HOURS,
-            locked_slots=hw_locked_slots,
-            initial_gap_slots=hw_initial_gap,
-            horizon_start_datetime=horizon_start,
-            slot_to_time=slot_to_time
-        )
-        results['hw'] = hw_times
-        
-        # Calculate last run end and save state for HW
-        if hw_times:
-            hw_slot_indices = [time_to_slot(t, slot_minutes) for t in hw_times]
-            last_hw_slot = max(hw_slot_indices)
-            last_hw_end = horizon_start + timedelta(minutes=(last_hw_slot + int(HW_BLOCK_HOURS * 60 / slot_minutes)) * slot_minutes)
-            hw_scheduled_starts = [horizon_start + timedelta(minutes=idx * slot_minutes) for idx in hw_slot_indices]
-            self._save_device_state('hw', last_hw_end, hw_scheduled_starts)
+        # ===== HOT WATER OPTIMIZATION (iterate over all HW devices) =====
+        hw_devices = devices_config.get_devices_by_type('hw')
+        for hw_device in hw_devices:
+            device_name = hw_device.name
+            hw_initial_gap = self._calculate_initial_gap(device_name, horizon_start, slot_minutes, HW_BLOCK_HOURS)
+            hw_locked_slots = self._get_locked_slots(device_name, horizon_start, lock_end_datetime, slot_minutes, HW_BLOCK_HOURS)
+            
+            hw_times = optimize_hw(
+                prices=prices,
+                slot_minutes=slot_minutes,
+                block_hours=HW_BLOCK_HOURS,
+                min_gap_hours=HW_MIN_GAP_HOURS,
+                max_gap_hours=HW_MAX_GAP_HOURS,
+                min_daily_hours=HW_MIN_DAILY_HOURS,
+                locked_slots=hw_locked_slots,
+                initial_gap_slots=hw_initial_gap,
+                horizon_start_datetime=horizon_start,
+                slot_to_time=slot_to_time
+            )
+            results[device_name] = hw_times
+            
+            # Calculate last run end and save state for this HW device
+            if hw_times:
+                hw_slot_indices = [time_to_slot(t, slot_minutes) for t in hw_times]
+                last_hw_slot = max(hw_slot_indices)
+                last_hw_end = horizon_start + timedelta(minutes=(last_hw_slot + int(HW_BLOCK_HOURS * 60 / slot_minutes)) * slot_minutes)
+                hw_scheduled_starts = [horizon_start + timedelta(minutes=idx * slot_minutes) for idx in hw_slot_indices]
+                self._save_device_state(device_name, last_hw_end, hw_scheduled_starts)
 
-        # ===== BATTERY OPTIMIZATION =====
-        # Use full horizon prices for battery optimization
-        bat_charge_times = optimize_battery(prices, slot_minutes, min(BAT_CHARGE_SLOTS, len(prices)), slot_to_time)
-        bat_discharge_times = optimize_bat_discharge(prices, slot_minutes, BAT_DISCHARGE_BLOCK_HOURS, min(BAT_DISCHARGE_BLOCKS, len(prices) // int(BAT_DISCHARGE_BLOCK_HOURS * 60 / slot_minutes)), slot_to_time)
+        # ===== BATTERY CHARGE OPTIMIZATION (iterate over all bat_charge devices) =====
+        bat_charge_devices = devices_config.get_devices_by_type('bat_charge')
+        for bat_device in bat_charge_devices:
+            device_name = bat_device.name
+            bat_charge_times = optimize_battery(
+                prices=prices,
+                slot_minutes=slot_minutes,
+                charge_time_percentage=BAT_CHARGE_TIME_PCT,
+                slot_to_time=slot_to_time,
+                min_price_differential=BAT_MIN_PRICE_DIFFERENTIAL,
+                round_trip_efficiency=BAT_ROUND_TRIP_EFFICIENCY,
+                cycle_cost_per_kwh=BAT_CYCLE_COST_PER_KWH,
+                capacity_kwh=BAT_CAPACITY_KWH
+            )
+            results[device_name] = bat_charge_times
         
-        results['bat_charge'] = bat_charge_times
-        results['bat_discharge'] = bat_discharge_times
+        # ===== BATTERY DISCHARGE OPTIMIZATION (iterate over all bat_discharge devices) =====
+        bat_discharge_devices = devices_config.get_devices_by_type('bat_discharge')
+        for bat_device in bat_discharge_devices:
+            device_name = bat_device.name
+            bat_discharge_times = optimize_bat_discharge(
+                prices=prices,
+                slot_minutes=slot_minutes,
+                discharge_time_percentage=BAT_DISCHARGE_TIME_PCT,
+                slot_to_time=slot_to_time,
+                min_price_differential=BAT_MIN_PRICE_DIFFERENTIAL,
+                round_trip_efficiency=BAT_ROUND_TRIP_EFFICIENCY,
+                cycle_cost_per_kwh=BAT_CYCLE_COST_PER_KWH,
+                capacity_kwh=BAT_CAPACITY_KWH
+            )
+            results[device_name] = bat_discharge_times
 
-        # ===== EV OPTIMIZATION =====
-        # Use full horizon prices for EV optimization
-        ev_times = optimize_ev(prices, slot_minutes, EV_MAX_PRICE, slot_to_time)
-        results['ev'] = ev_times
+        # ===== EV OPTIMIZATION (iterate over all EV devices) =====
+        ev_devices = devices_config.get_devices_by_type('ev')
+        for ev_device in ev_devices:
+            device_name = ev_device.name
+            ev_times = optimize_ev(prices, slot_minutes, EV_MAX_PRICE, slot_to_time)
+            results[device_name] = ev_times
 
         logger.info(f"⚙️ Optimization Results: {json.dumps(results)}")
 
         # Convert results to ISO time ranges for scheduling
-        # Map device names to their block durations in minutes
-        device_block_minutes = {
-            'wp': int(WP_BLOCK_HOURS * 60),
-            'hw': int(HW_BLOCK_HOURS * 60),
-            'bat_charge': slot_minutes,  # Single slot
-            'bat_discharge': int(BAT_DISCHARGE_BLOCK_HOURS * 60),
-            'ev': slot_minutes,  # Single slot
-        }
+        # Build device_block_minutes dynamically based on device type
+        device_block_minutes = {}
+        for device in devices_config.devices:
+            if device.type == 'wp':
+                device_block_minutes[device.name] = int(WP_BLOCK_HOURS * 60)
+            elif device.type == 'hw':
+                device_block_minutes[device.name] = int(HW_BLOCK_HOURS * 60)
+            elif device.type == 'bat_charge':
+                device_block_minutes[device.name] = slot_minutes  # Single slot
+            elif device.type == 'bat_discharge':
+                device_block_minutes[device.name] = slot_minutes  # Single slot
+            elif device.type == 'ev':
+                device_block_minutes[device.name] = slot_minutes  # Single slot
         
         iso_times = []
         
-        # All devices use horizon_start as base for time calculations
-        for device in ['wp', 'hw', 'bat_charge', 'bat_discharge', 'ev']:
-            times = results.get(device, [])
+        # Process all devices in results
+        for device_name, times in results.items():
             if times:
                 iso_times.append(slots_to_iso_ranges(
-                    times, device, horizon_start.date(), horizon_start,
-                    block_minutes=device_block_minutes[device]
+                    times, device_name, horizon_start.date(), horizon_start,
+                    block_minutes=device_block_minutes.get(device_name, slot_minutes)
                 ))
 
         iso_times_merged = merge_sequential_timeslots(iso_times)

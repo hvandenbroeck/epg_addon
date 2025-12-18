@@ -7,7 +7,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y jq glpk-utils && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-RUN pip install homeassistant requests apscheduler pulp flask flask-cors tinydb pandas lightgbm numpy scikit-learn websockets plotly entsoe-py
+RUN pip install homeassistant requests apscheduler pulp flask flask-cors tinydb pandas lightgbm numpy scikit-learn websockets plotly entsoe-py pydantic pydantic-settings
 
 # Copy source files
 COPY src /app/src

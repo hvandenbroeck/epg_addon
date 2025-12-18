@@ -246,30 +246,148 @@ def optimize_hw(
     return [slot_to_time(i, slot_minutes) for i in starts]
 
 
-def optimize_battery(prices, slot_minutes, n_slots_to_use, slot_to_time):
-    """Optimize battery charging periods."""
-    model = pulp.LpProblem("BAT_Optimization", pulp.LpMinimize)
-    z = [pulp.LpVariable(f"z_{i}", cat="Binary") for i in range(len(prices))]
-    model += pulp.lpSum([prices[i] * z[i] for i in range(len(prices))])
-    model += pulp.lpSum(z) == n_slots_to_use
-    model.solve(pulp.GLPK(msg=0))
-    slots = [i for i in range(len(prices)) if pulp.value(z[i]) == 1]
-    return [slot_to_time(i, slot_minutes) for i in slots]
+def optimize_battery(prices, slot_minutes, charge_time_percentage, slot_to_time, 
+                     min_price_differential=0.0, round_trip_efficiency=0.90, 
+                     cycle_cost_per_kwh=0.0, capacity_kwh=10.0):
+    """
+    Optimize battery charging periods with price differential threshold and cycle costs.
+    
+    Args:
+        prices: List of prices per slot
+        slot_minutes: Duration of each slot in minutes
+        charge_time_percentage: Percentage of horizon time to use for charging (0.0-1.0)
+        slot_to_time: Function to convert slot index to time
+        min_price_differential: Minimum price difference (discharge - charge) to justify cycling (EUR/kWh)
+        round_trip_efficiency: Battery round-trip efficiency (default 0.90 = 90%)
+        cycle_cost_per_kwh: Cost per kWh due to battery degradation (EUR/kWh)
+        capacity_kwh: Battery capacity in kWh
+        
+    Returns:
+        List of start times for battery charging
+    """
+    if not prices or charge_time_percentage <= 0:
+        return []
+    
+    # Calculate number of slots based on percentage
+    n_slots_to_use = max(1, int(len(prices) * charge_time_percentage))
+    
+    if n_slots_to_use <= 0:
+        return []
+    
+    # Calculate the effective cost threshold
+    # We should only charge if we can discharge at a profitable price
+    # Effective cost = charge_price / efficiency + cycle_cost
+    # We need: discharge_price > (charge_price / efficiency + cycle_cost)
+    # Rearranged: discharge_price - charge_price/efficiency > cycle_cost
+    
+    # Find potential discharge prices (top prices in the horizon)
+    sorted_prices = sorted(prices, reverse=True)
+    if n_slots_to_use >= len(sorted_prices):
+        # If we want to use more slots than available, use best available
+        avg_discharge_price = sum(sorted_prices[:min(len(sorted_prices), n_slots_to_use)]) / min(len(sorted_prices), n_slots_to_use)
+    else:
+        avg_discharge_price = sum(sorted_prices[:n_slots_to_use]) / n_slots_to_use
+    
+    # Calculate minimum charge price threshold
+    # charge_price should be such that: avg_discharge_price - charge_price >= min_price_differential
+    # And accounting for efficiency loss: avg_discharge_price - charge_price/efficiency >= cycle_cost
+    # Combined: charge_price <= min(
+    #   avg_discharge_price - min_price_differential,
+    #   (avg_discharge_price - cycle_cost) * efficiency
+    # )
+    
+    threshold_from_differential = avg_discharge_price - min_price_differential
+    threshold_from_cycle_cost = (avg_discharge_price - cycle_cost_per_kwh) * round_trip_efficiency
+    max_charge_price = min(threshold_from_differential, threshold_from_cycle_cost)
+    
+    logger.info(f"🔋 Battery charge optimization: avg_discharge_price={avg_discharge_price:.3f}, "
+                f"max_charge_price={max_charge_price:.3f} (differential threshold={threshold_from_differential:.3f}, "
+                f"cycle cost threshold={threshold_from_cycle_cost:.3f})")
+    
+    # Filter slots based on price threshold and select cheapest ones
+    eligible_slots = [(i, prices[i]) for i in range(len(prices)) if prices[i] <= max_charge_price]
+    
+    if not eligible_slots:
+        logger.warning(f"⚠️ No slots meet the price threshold for battery charging (max_charge_price={max_charge_price:.3f})")
+        return []
+    
+    # Sort by price and take the cheapest n_slots_to_use
+    eligible_slots.sort(key=lambda x: x[1])
+    selected_slots = [slot for slot, _ in eligible_slots[:n_slots_to_use]]
+    
+    # Calculate expected profit
+    if selected_slots:
+        avg_charge_price = sum(prices[i] for i in selected_slots) / len(selected_slots)
+        gross_revenue = avg_discharge_price - avg_charge_price
+        net_revenue = gross_revenue * round_trip_efficiency - cycle_cost_per_kwh
+        logger.info(f"💰 Battery charge profit estimate: gross={gross_revenue:.3f} EUR/kWh, "
+                   f"net={net_revenue:.3f} EUR/kWh (after {(1-round_trip_efficiency)*100:.1f}% loss + cycle cost)")
+    
+    return [slot_to_time(i, slot_minutes) for i in sorted(selected_slots)]
 
 
-def optimize_bat_discharge(prices, slot_minutes, block_hours, n_blocks, slot_to_time):
-    """Optimize battery discharge periods to maximize revenue by selecting highest price periods."""
-    block_len = int(block_hours * 60 / slot_minutes)
-    window_costs = [sum(prices[i:i + block_len]) for i in range(len(prices) - block_len + 1)]
-    model = pulp.LpProblem("BAT_DISCHARGE_Optimization", pulp.LpMaximize)
-    x = [pulp.LpVariable(f"x_{i}", cat="Binary") for i in range(len(window_costs))]
-    model += pulp.lpSum([window_costs[i] * x[i] for i in range(len(x))])
-    model += pulp.lpSum(x) == n_blocks
-    for i in range(len(prices)):
-        model += pulp.lpSum([x[j] for j in range(max(0, i - block_len + 1), min(i + 1, len(window_costs)))]) <= 1
-    model.solve(pulp.GLPK(msg=0))
-    starts = [i for i in range(len(x)) if pulp.value(x[i]) == 1]
-    return [slot_to_time(i, slot_minutes) for i in starts]
+def optimize_bat_discharge(prices, slot_minutes, discharge_time_percentage, slot_to_time,
+                           min_price_differential=0.0, round_trip_efficiency=0.90,
+                           cycle_cost_per_kwh=0.0, capacity_kwh=10.0):
+    """
+    Optimize battery discharge periods with price differential threshold and cycle costs.
+    
+    Args:
+        prices: List of prices per slot
+        slot_minutes: Duration of each slot in minutes
+        discharge_time_percentage: Percentage of horizon time to use for discharging (0.0-1.0)
+        slot_to_time: Function to convert slot index to time
+        min_price_differential: Minimum price difference (discharge - charge) to justify cycling (EUR/kWh)
+        round_trip_efficiency: Battery round-trip efficiency (default 0.90 = 90%)
+        cycle_cost_per_kwh: Cost per kWh due to battery degradation (EUR/kWh)
+        capacity_kwh: Battery capacity in kWh
+        
+    Returns:
+        List of start times for battery discharge
+    """
+    if not prices or discharge_time_percentage <= 0:
+        return []
+    
+    # Calculate number of discharge slots based on percentage (single slots, no blocks)
+    n_slots_to_use = max(1, int(len(prices) * discharge_time_percentage))
+    
+    if n_slots_to_use <= 0:
+        return []
+    
+    # Calculate minimum discharge price threshold
+    # Find potential charge prices (bottom prices in the horizon)
+    sorted_prices = sorted(prices)
+    charge_slots = n_slots_to_use  # Match charge and discharge slot counts
+    avg_charge_price = sum(sorted_prices[:charge_slots]) / charge_slots if charge_slots > 0 else sorted_prices[0]
+    
+    # Minimum discharge price per slot:
+    # discharge_price >= charge_price/efficiency + cycle_cost + min_price_differential
+    min_discharge_price = avg_charge_price / round_trip_efficiency + cycle_cost_per_kwh + min_price_differential
+    
+    logger.info(f"🔋 Battery discharge optimization: avg_charge_price={avg_charge_price:.3f}, "
+                f"min_discharge_price={min_discharge_price:.3f}")
+    
+    # Filter slots based on threshold
+    eligible_slots = [(i, prices[i]) for i in range(len(prices)) if prices[i] >= min_discharge_price]
+    
+    if not eligible_slots:
+        logger.warning(f"⚠️ No slots meet the price threshold for battery discharge (min={min_discharge_price:.3f})")
+        return []
+    
+    # Sort by price and take the highest n_slots_to_use
+    eligible_slots.sort(key=lambda x: x[1], reverse=True)
+    selected_slots = [slot for slot, _ in eligible_slots[:n_slots_to_use]]
+    
+    # Calculate expected profit
+    if selected_slots:
+        avg_discharge_price = sum(prices[i] for i in selected_slots) / len(selected_slots)
+        gross_revenue = avg_discharge_price - avg_charge_price
+        net_revenue = gross_revenue - (avg_charge_price * (1/round_trip_efficiency - 1)) - cycle_cost_per_kwh
+        logger.info(f"💰 Battery discharge profit estimate: gross={gross_revenue:.3f} EUR/kWh, "
+                   f"net={net_revenue:.3f} EUR/kWh")
+    
+    return [slot_to_time(i, slot_minutes) for i in sorted(selected_slots)]
+    return [slot_to_time(i, slot_minutes) for i in sorted(selected_slots)]
 
 
 def optimize_ev(prices, slot_minutes, max_price, slot_to_time):
