@@ -169,38 +169,46 @@ def slot_to_time(index, slot_minutes):
     minutes = (index * slot_minutes) % 60
     return f"{hours:02d}:{minutes:02d}"
 
-def get_block_len(device):
-    """Get block length in minutes for each device type."""
-    if device == "wp":
-        return 2 * 60
-    if device == "hw":
-        return 1 * 60
-    if device == "bat_charge":
-        return 15
-    if device == "bat_discharge":
-        return 1 * 60
-    return 15
+
+def time_to_slot(time_str, slot_minutes):
+    """Convert time string (HH:MM) to slot index."""
+    hours, minutes = map(int, time_str.split(":"))
+    total_minutes = hours * 60 + minutes
+    return total_minutes // slot_minutes
+
 
 from datetime import datetime, timedelta
 
-def slots_to_iso_ranges(times, device, target_date):
-    """Return list of (start_iso, stop_iso) for each time slot without merging."""
+def slots_to_iso_ranges(times, device, target_date, horizon_start=None, block_minutes=60):
+    """Return list of (start_iso, stop_iso) for each time slot without merging.
+    
+    Args:
+        times: List of time strings (HH:MM format)
+        device: Device name
+        target_date: Date to use for the slots
+        horizon_start: Optional datetime for horizon-based scheduling (for WP/HW)
+                      When provided, time strings are interpreted relative to horizon_start
+        block_minutes: Duration of each block in minutes (default 60)
+    """
     if not times:
         return []
 
-    block_len = get_block_len(device)
-
-    # parse and sort times robustly (so result is in chronological order)
     def _to_dt(t):
         hour, minute = map(int, t.split(":"))
-        return datetime.combine(target_date, datetime.min.time()) + timedelta(hours=hour, minutes=minute)
+        if horizon_start:
+            # For horizon-based scheduling, calculate slot index and add to horizon_start
+            total_minutes = hour * 60 + minute
+            return horizon_start + timedelta(minutes=total_minutes)
+        else:
+            # Traditional: combine with target_date
+            return datetime.combine(target_date, datetime.min.time()) + timedelta(hours=hour, minutes=minute)
 
     slots = sorted(times, key=_to_dt)
 
     ranges = []
     for t in slots:
         start = _to_dt(t)
-        stop = start + timedelta(minutes=block_len)
+        stop = start + timedelta(minutes=block_minutes)
         ranges.append({ "device": device,
                         "start": start.isoformat(),
                         "stop": stop.isoformat() })

@@ -289,7 +289,9 @@ class DeviceVerifier:
         self._pending_verifications[device] = {
             "action_label": action_label,
             "job_ids": job_ids,
-            "context": context
+            "context": context,
+            "end_time": now + timedelta(minutes=3),
+            "checks_scheduled": 6
         }
         
         logger.info(f"📋 Scheduled 6 verification checks for {device} {action_label} over next 3 minutes")
@@ -355,6 +357,10 @@ class DeviceVerifier:
         
         now = datetime.now()
         
+        # Group schedule entries by device and determine expected state
+        # A device should be "start" if ANY of its slots is currently active
+        device_states: Dict[str, str] = {}  # device -> expected action ("start" or "stop")
+        
         for entry in schedule_doc["schedule"]:
             device = entry.get("device")
             start_str = entry.get("start")
@@ -374,19 +380,19 @@ class DeviceVerifier:
             if not device_config:
                 continue
             
-            # Determine expected state based on current time
+            # Check if this slot is currently active
             if start_time <= now < end_time:
-                # Device should be in 'start' state
-                expected_action = "start"
-            elif now >= end_time or now < start_time:
-                # Device should be in 'stop' state (before start or after end)
-                # Only verify if we're past the end time (device was running and should be stopped)
-                if now >= end_time:
-                    expected_action = "stop"
-                else:
-                    # Before start time, don't verify
-                    continue
-            else:
+                # Device should be running - this takes priority
+                device_states[device] = "start"
+            elif device not in device_states:
+                # Device has a schedule entry but no active slot yet
+                # Default to "stop" - device should be off outside scheduled windows
+                device_states[device] = "stop"
+        
+        # Now verify each device's expected state
+        for device, expected_action in device_states.items():
+            device_config = self.device_actions.get(device)
+            if not device_config:
                 continue
             
             # Verify device state
@@ -409,9 +415,11 @@ class DeviceVerifier:
         """
         status = {}
         for device, verification in self._pending_verifications.items():
+            remaining_jobs = len(verification.get("job_ids", []))
+            end_time = verification.get("end_time", datetime.now())
             status[device] = {
                 "action": verification["action_label"],
-                "remaining_time": (verification["end_time"] - datetime.now()).total_seconds(),
-                "verification_count": verification["verification_count"]
+                "remaining_time": max(0, (end_time - datetime.now()).total_seconds()),
+                "remaining_checks": remaining_jobs
             }
         return status
