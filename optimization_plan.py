@@ -130,25 +130,28 @@ async def main():
     )
     logger.info(f"Load watcher scheduled to run every {load_watcher_interval} minutes on the {load_watcher_interval}-minute marks (Europe/Brussels)")
 
-    # Schedule device verification - periodic check every 5 minutes
-    async def scheduled_periodic_verification():
-        logger.info("🔍 Running scheduled periodic device verification...")
-        try:
-            await device_verifier.run_periodic_verification()
-        except Exception as e:
-            logger.error(f"❌ Error during periodic verification: {e}", exc_info=True)
+    # Schedule device verification - periodic check every 5 minutes if enabled in config
+    if CONFIG["options"].get("periodic_verification_enabled", True):
+        async def scheduled_periodic_verification():
+            logger.info("🔍 Running scheduled periodic device verification...")
+            try:
+                await device_verifier.run_periodic_verification()
+            except Exception as e:
+                logger.error(f"❌ Error during periodic verification: {e}", exc_info=True)
 
-    scheduler.add_job(
-        scheduled_periodic_verification,
-        'cron',
-        minute='*/5',
-        timezone='Europe/Brussels',
-        coalesce=True,
-        max_instances=1,
-        misfire_grace_time=60,
-        id='periodic_device_verification'
-    )
-    logger.info("Periodic device verification scheduled to run every 5 minutes (Europe/Brussels)")
+        scheduler.add_job(
+            scheduled_periodic_verification,
+            'cron',
+            minute='*/5',
+            timezone='Europe/Brussels',
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=60,
+            id='periodic_device_verification'
+        )
+        logger.info("Periodic device verification scheduled to run every 5 minutes (Europe/Brussels)")
+    else:
+        logger.info("Periodic device verification is DISABLED by config.")
     # Note: Post-action verification jobs are scheduled dynamically by DeviceVerifier
     # when device actions are executed (6 checks over 3 minutes per action)
     
