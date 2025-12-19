@@ -1,26 +1,29 @@
 # Battery Optimization Features
 
-This document describes the enhanced battery optimization features that improve cost savings by considering price differentials and battery degradation costs.
+This document describes the battery optimization features that use historical price percentiles to determine optimal charge and discharge thresholds.
 
 ## Features Implemented
 
-### 1. Price Differential Threshold
+### 1. Historical Percentile-Based Thresholds
 
-The optimizer now ensures that battery charge/discharge cycles only occur when the price difference justifies the operation. This prevents cycling when the price spread is too small to cover efficiency losses.
+The optimizer analyzes historical electricity prices to determine smart thresholds for battery operations:
 
-**How it works:**
-- Before charging, the optimizer checks if future discharge prices are high enough to justify charging at current prices
-- Takes into account round-trip efficiency losses (typically 10-15%)
-- Only schedules charging when: `discharge_price - charge_price >= min_price_differential`
-
-### 2. Cycle Cost Consideration
-
-Battery degradation costs are now factored into the optimization decision. Each charge/discharge cycle reduces battery lifespan, and this cost is accounted for.
+- **Maximum Charge Price**: Derived from the Xth percentile of historical prices (default: 30th percentile)
+- **Minimum Discharge Price**: Derived from the Yth percentile of historical prices (default: 70th percentile)
 
 **How it works:**
-- Calculates cost per kWh based on total battery replacement cost and warranty cycles
-- Adds this cost to the optimization objective
-- Prevents cycling when the profit margin doesn't cover degradation costs
+- At each optimization run (typically daily at 16:00), the system fetches price history from the cache
+- Calculates the configured percentiles from the last N days of data (default: 14 days)
+- Uses these thresholds to filter which time slots are eligible for charging/discharging
+- Only charges when current prices are below the max charge threshold
+- Only discharges when current prices are above the min discharge threshold
+
+### 2. Adaptive Thresholds
+
+The percentile-based approach automatically adapts to market conditions:
+- During periods of high volatility, thresholds adjust accordingly
+- During stable periods, thresholds become tighter
+- No manual tuning required for different seasons or market conditions
 
 ## Configuration Parameters
 
@@ -29,12 +32,11 @@ Add these parameters to your `config.json` under the `options` section:
 ```json
 {
   "options": {
-    "battery_min_price_differential": 0.05,
-    "battery_round_trip_efficiency": 0.90,
-    "battery_cycle_cost_eur": 0.02,
-    "battery_capacity_kwh": 10.24,
     "battery_charge_time_percentage": 0.25,
-    "battery_discharge_time_percentage": 0.25
+    "battery_discharge_time_percentage": 0.25,
+    "battery_price_history_days": 14,
+    "battery_charge_percentile": 30,
+    "battery_discharge_percentile": 70
   }
 }
 ```
@@ -43,167 +45,127 @@ Add these parameters to your `config.json` under the `options` section:
 
 | Parameter | Description | Default | Example Values |
 |-----------|-------------|---------|----------------|
-| `battery_min_price_differential` | Minimum price difference (EUR/kWh) between charge and discharge to justify cycling | 0.05 | 0.03-0.10 |
-| `battery_round_trip_efficiency` | Battery round-trip efficiency (0.0-1.0) | 0.90 | 0.85-0.95 |
-| `battery_cycle_cost_eur` | Total cost per complete charge/discharge cycle (EUR) | 0.02 | 0.01-0.05 |
-| `battery_capacity_kwh` | Battery capacity in kWh | 10.0 | 5.0-20.0 |
 | `battery_charge_time_percentage` | Percentage of horizon time to use for charging (0.0-1.0) | 0.25 | 0.15-0.35 |
 | `battery_discharge_time_percentage` | Percentage of horizon time to use for discharging (0.0-1.0) | 0.25 | 0.15-0.35 |
+| `battery_price_history_days` | Number of days of price history to analyze | 14 | 7-30 |
+| `battery_charge_percentile` | Percentile threshold for max charge price (lower = more selective) | 30 | 20-40 |
+| `battery_discharge_percentile` | Percentile threshold for min discharge price (higher = more selective) | 70 | 60-80 |
 
-### Calculating Cycle Cost
+### Understanding Percentiles
 
-To calculate appropriate `battery_cycle_cost_eur`:
-
-```
-cycle_cost = battery_cost / warranty_cycles
-
-Example:
-- Battery cost: 8,000 EUR
-- Warranty cycles: 6,000
-- Cycle cost: 8,000 / 6,000 = 1.33 EUR per cycle
-
-For partial cycles (e.g., 50% DoD):
-- Partial cycle cost: 1.33 * 0.5 = 0.67 EUR
-```
-
-The optimizer automatically converts this to cost per kWh: `cycle_cost_per_kwh = cycle_cost / capacity_kwh`
+- **30th percentile** means only 30% of historical prices were lower - you're charging in the cheapest 30% of times
+- **70th percentile** means only 30% of historical prices were higher - you're discharging in the most expensive 30% of times
 
 ## How It Works
 
-### Percentage-Based Slot Selection
+### Percentile Calculation
 
-Instead of using fixed slot counts, the optimizer now uses **percentages** of the total price horizon:
+At each optimization run:
+1. Fetches price data from the last N days (uses local cache first)
+2. Calculates the configured percentiles
+3. These become the thresholds for charge/discharge decisions
 
-**Example with 48-hour horizon (192 slots):**
-- `battery_charge_time_percentage: 0.25` → Uses 48 cheapest slots (25% of 192)
-- `battery_discharge_time_percentage: 0.25` → Uses 48 most expensive slots (25% of 192)
+**Example with 14 days of data:**
+- Historical prices range from 0.05 to 0.35 EUR/kWh
+- 30th percentile = 0.12 EUR/kWh → max_charge_price
+- 70th percentile = 0.25 EUR/kWh → min_discharge_price
+- Result: Only charge below 0.12, only discharge above 0.25
 
-This approach **automatically adapts** to different horizon lengths and ensures balanced charge/discharge patterns.
-
-### Slot Pairing Logic
+### Slot Selection
 
 **Charge Optimization:**
-1. Calculates how many slots to use: `n_charge = total_slots × charge_percentage`
-2. Identifies potential discharge opportunities (top N most expensive slots)
-3. Calculates average expected discharge price from those slots
-4. Determines maximum acceptable charge price based on thresholds
-5. Selects the N cheapest slots that meet the criteria
+1. Filter slots where `price <= max_charge_price` (30th percentile)
+2. From eligible slots, select the cheapest `n_slots_to_use`
+3. `n_slots_to_use = total_horizon_slots × charge_time_percentage`
 
 **Discharge Optimization:**
-1. Calculates how many slots to use: `n_discharge = total_slots × discharge_percentage`
-2. Identifies potential charge opportunities (bottom N cheapest slots)
-3. Calculates average expected charge price from those slots
-4. Determines minimum profitable discharge price based on thresholds
-5. Selects the N most expensive slots that meet the criteria
-
-**Key Point:** The percentages are applied to **the same horizon**, so charge and discharge decisions consider the same set of available prices. This creates an implicit pairing where:
-- Charge slots are selected knowing what the top 25% discharge prices look like
-- Discharge slots are selected knowing what the bottom 25% charge prices look like
+1. Filter slots where `price >= min_discharge_price` (70th percentile)
+2. From eligible slots, select the most expensive `n_slots_to_use`
+3. `n_slots_to_use = total_horizon_slots × discharge_time_percentage`
 
 ## Logging
 
-The optimizer logs detailed information about battery decisions:
+The optimizer logs detailed information about price thresholds:
 
 ```
-🔋 Battery charge optimization: avg_discharge_price=0.250, max_charge_price=0.180
-💰 Battery charge profit estimate: gross=0.070 EUR/kWh, net=0.041 EUR/kWh
+📊 Calculating price percentiles from last 14 days (charge=30th, discharge=70th)
+📈 Price statistics (last 14 days): min=0.0450, max=0.3500, mean=0.1850, median=0.1750 EUR/kWh
+🔋 Battery thresholds: max_charge_price=0.1200 EUR/kWh (30th percentile), min_discharge_price=0.2500 EUR/kWh (70th percentile)
+🔋 Battery charge: selected 48 slots (avg=0.0850, range=0.0450-0.1200 EUR/kWh)
+🔋 Battery discharge: selected 48 slots (avg=0.2900, range=0.2500-0.3500 EUR/kWh)
 ```
-
-- **gross**: Price difference before accounting for losses
-- **net**: Actual profit after efficiency losses and cycle costs
-
-## Expected Impact
-
-### Benefits
-
-1. **Prevents Unprofitable Cycling**: Won't charge/discharge when price spread is too small
-2. **Protects Battery Lifespan**: Factors in degradation costs
-3. **Increases Net Savings**: Focuses on high-profit opportunities
-4. **More Conservative**: Better long-term economics
-
-### Typical Scenarios
-
-**Before:**
-- Charged at 0.18 EUR/kWh, discharged at 0.20 EUR/kWh
-- Gross profit: 0.02 EUR/kWh
-- After 10% efficiency loss: -0.00 EUR/kWh (loss!)
-
-**After:**
-- Requires minimum 0.05 EUR/kWh differential
-- Only charges at 0.15 EUR/kWh or less
-- Discharges at 0.25 EUR/kWh or more
-- Net profit: 0.07 EUR/kWh after all costs
 
 ## Tuning Recommendations
 
-### Conservative (Protect Battery, Less Cycling)
+### Conservative (Less Cycling, Higher Margins)
 ```json
 {
-  "battery_min_price_differential": 0.10,
-  "battery_cycle_cost_eur": 0.05,
+  "battery_charge_percentile": 20,
+  "battery_discharge_percentile": 80,
   "battery_charge_time_percentage": 0.15,
   "battery_discharge_time_percentage": 0.15
 }
 ```
-- Uses only 15% cheapest/most expensive slots
-- Requires 0.10 EUR/kWh spread
-- Fewer but highly profitable cycles
-- Longer battery life
+- Only charges in the cheapest 20% of historical prices
+- Only discharges in the most expensive 20%
+- Fewer cycles but with better margins
 
-### Aggressive (Maximize Usage, More Cycling)
+### Aggressive (More Cycling)
 ```json
 {
-  "battery_min_price_differential": 0.03,
-  "battery_cycle_cost_eur": 0.01,
+  "battery_charge_percentile": 40,
+  "battery_discharge_percentile": 60,
   "battery_charge_time_percentage": 0.35,
   "battery_discharge_time_percentage": 0.35
 }
 ```
-- Uses 35% of slots
-- Lower profit threshold
+- Charges whenever prices are below median-ish (40th percentile)
+- Discharges whenever prices are above median-ish (60th percentile)
 - More frequent cycling
-- Faster battery degradation
 
 ### Balanced (Recommended)
 ```json
 {
-  "battery_min_price_differential": 0.05,
-  "battery_cycle_cost_eur": 0.02,
+  "battery_charge_percentile": 30,
+  "battery_discharge_percentile": 70,
   "battery_charge_time_percentage": 0.25,
   "battery_discharge_time_percentage": 0.25
 }
 ```
-- Good balance between usage and lifespan
-- Reasonable profit margins (25% of horizon)
+- Good balance between usage and selectivity
+- 40% price spread between charge and discharge thresholds
 - Sustainable cycling pattern
 
-## Monitoring
+## Fallback Behavior
 
-Track these metrics to evaluate performance:
-
-1. **Cycle Count**: Number of charge/discharge cycles per week
-2. **Average Profit**: Net EUR/kWh per cycle
-3. **Missed Opportunities**: Days with high spreads but no cycling
-4. **Wasted Capacity**: Cycles with minimal profit
-
-You can review these in the optimization logs and adjust parameters accordingly.
+If historical price data is unavailable:
+- The optimizer falls back to using the current horizon's 30th and 70th percentile
+- A warning is logged but optimization continues
+- This ensures the system remains operational even without full history
 
 ## Troubleshooting
 
 ### Battery Never Charges
-- Check if `min_price_differential` is too high
-- Verify price data is available and correct
-- Ensure `battery_capacity_kwh` matches your actual battery
+- Check if `battery_charge_percentile` is too low
+- Verify price history data exists (check logs for "Retrieved X hourly price records")
+- Current prices may be unusually high compared to history
 
-### Too Much Cycling
-- Increase `min_price_differential` (e.g., from 0.05 to 0.08)
-- Increase `battery_cycle_cost_eur`
-- Check if `battery_round_trip_efficiency` is accurate
+### Battery Never Discharges
+- Check if `battery_discharge_percentile` is too high
+- Current prices may be unusually low compared to history
+- Consider increasing `battery_discharge_time_percentage`
 
-### Low Profitability
-- Review actual efficiency vs configured value
-- Check if cycle cost calculation is correct
-- Consider increasing `min_price_differential`
+### Want More/Less Cycling
+- Adjust percentiles: lower charge / higher discharge = more selective
+- Adjust time percentages: higher = more slots selected from eligible pool
+
+## Price History Cache
+
+Historical prices are stored in `/data/price_history.json`:
+- Automatically fetched from ENTSO-E API when missing
+- Cache is checked before each API call to minimize requests
+- Old data (>400 days) is automatically cleaned up
+- Data is stored hourly regardless of original resolution
 
 ## Future Enhancements
 

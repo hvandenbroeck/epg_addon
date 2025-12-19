@@ -196,20 +196,17 @@ def optimize_hw(
 
 
 def optimize_battery(prices, slot_minutes, charge_time_percentage, slot_to_time, 
-                     min_price_differential=0.0, round_trip_efficiency=0.90, 
-                     cycle_cost_per_kwh=0.0, capacity_kwh=10.0):
+                     max_charge_price=None):
     """
-    Optimize battery charging periods with price differential threshold and cycle costs.
+    Optimize battery charging periods using percentile-based price thresholds.
     
     Args:
         prices: List of prices per slot
         slot_minutes: Duration of each slot in minutes
         charge_time_percentage: Percentage of horizon time to use for charging (0.0-1.0)
         slot_to_time: Function to convert slot index to time
-        min_price_differential: Minimum price difference (discharge - charge) to justify cycling (EUR/kWh)
-        round_trip_efficiency: Battery round-trip efficiency (default 0.90 = 90%)
-        cycle_cost_per_kwh: Cost per kWh due to battery degradation (EUR/kWh)
-        capacity_kwh: Battery capacity in kWh
+        max_charge_price: Maximum price threshold for charging (from historical percentile).
+                         If None, uses fallback based on horizon prices.
         
     Returns:
         List of start times for battery charging
@@ -223,73 +220,49 @@ def optimize_battery(prices, slot_minutes, charge_time_percentage, slot_to_time,
     if n_slots_to_use <= 0:
         return []
     
-    # Calculate the effective cost threshold
-    # We should only charge if we can discharge at a profitable price
-    # Effective cost = charge_price / efficiency + cycle_cost
-    # We need: discharge_price > (charge_price / efficiency + cycle_cost)
-    # Rearranged: discharge_price - charge_price/efficiency > cycle_cost
-    
-    # Find potential discharge prices (top prices in the horizon)
-    sorted_prices = sorted(prices, reverse=True)
-    if n_slots_to_use >= len(sorted_prices):
-        # If we want to use more slots than available, use best available
-        avg_discharge_price = sum(sorted_prices[:min(len(sorted_prices), n_slots_to_use)]) / min(len(sorted_prices), n_slots_to_use)
+    # Use provided max_charge_price or calculate fallback from current horizon
+    if max_charge_price is None:
+        # Fallback: use 30th percentile of current horizon prices
+        import numpy as np
+        max_charge_price = float(np.percentile(prices, 30))
+        logger.info(f"🔋 Battery charge: using fallback threshold {max_charge_price:.4f} EUR/kWh (30th percentile of horizon)")
     else:
-        avg_discharge_price = sum(sorted_prices[:n_slots_to_use]) / n_slots_to_use
+        logger.info(f"🔋 Battery charge: using historical threshold {max_charge_price:.4f} EUR/kWh")
     
-    # Calculate minimum charge price threshold
-    # charge_price should be such that: avg_discharge_price - charge_price >= min_price_differential
-    # And accounting for efficiency loss: avg_discharge_price - charge_price/efficiency >= cycle_cost
-    # Combined: charge_price <= min(
-    #   avg_discharge_price - min_price_differential,
-    #   (avg_discharge_price - cycle_cost) * efficiency
-    # )
-    
-    threshold_from_differential = avg_discharge_price - min_price_differential
-    threshold_from_cycle_cost = (avg_discharge_price - cycle_cost_per_kwh) * round_trip_efficiency
-    max_charge_price = min(threshold_from_differential, threshold_from_cycle_cost)
-    
-    logger.info(f"🔋 Battery charge optimization: avg_discharge_price={avg_discharge_price:.3f}, "
-                f"max_charge_price={max_charge_price:.3f} (differential threshold={threshold_from_differential:.3f}, "
-                f"cycle cost threshold={threshold_from_cycle_cost:.3f})")
-    
-    # Filter slots based on price threshold and select cheapest ones
+    # Filter slots that are below the max charge price threshold
     eligible_slots = [(i, prices[i]) for i in range(len(prices)) if prices[i] <= max_charge_price]
     
     if not eligible_slots:
-        logger.warning(f"⚠️ No slots meet the price threshold for battery charging (max_charge_price={max_charge_price:.3f})")
+        logger.warning(f"⚠️ No slots below max_charge_price={max_charge_price:.4f} EUR/kWh")
         return []
     
     # Sort by price and take the cheapest n_slots_to_use
     eligible_slots.sort(key=lambda x: x[1])
     selected_slots = [slot for slot, _ in eligible_slots[:n_slots_to_use]]
     
-    # Calculate expected profit
+    # Log selection info
     if selected_slots:
         avg_charge_price = sum(prices[i] for i in selected_slots) / len(selected_slots)
-        gross_revenue = avg_discharge_price - avg_charge_price
-        net_revenue = gross_revenue * round_trip_efficiency - cycle_cost_per_kwh
-        logger.info(f"💰 Battery charge profit estimate: gross={gross_revenue:.3f} EUR/kWh, "
-                   f"net={net_revenue:.3f} EUR/kWh (after {(1-round_trip_efficiency)*100:.1f}% loss + cycle cost)")
+        min_price = min(prices[i] for i in selected_slots)
+        max_selected_price = max(prices[i] for i in selected_slots)
+        logger.info(f"💰 Battery charge: selected {len(selected_slots)} slots "
+                   f"(avg={avg_charge_price:.4f}, range={min_price:.4f}-{max_selected_price:.4f} EUR/kWh)")
     
     return [slot_to_time(i, slot_minutes) for i in sorted(selected_slots)]
 
 
 def optimize_bat_discharge(prices, slot_minutes, discharge_time_percentage, slot_to_time,
-                           min_price_differential=0.0, round_trip_efficiency=0.90,
-                           cycle_cost_per_kwh=0.0, capacity_kwh=10.0):
+                           min_discharge_price=None):
     """
-    Optimize battery discharge periods with price differential threshold and cycle costs.
+    Optimize battery discharge periods using percentile-based price thresholds.
     
     Args:
         prices: List of prices per slot
         slot_minutes: Duration of each slot in minutes
         discharge_time_percentage: Percentage of horizon time to use for discharging (0.0-1.0)
         slot_to_time: Function to convert slot index to time
-        min_price_differential: Minimum price difference (discharge - charge) to justify cycling (EUR/kWh)
-        round_trip_efficiency: Battery round-trip efficiency (default 0.90 = 90%)
-        cycle_cost_per_kwh: Cost per kWh due to battery degradation (EUR/kWh)
-        capacity_kwh: Battery capacity in kWh
+        min_discharge_price: Minimum price threshold for discharging (from historical percentile).
+                            If None, uses fallback based on horizon prices.
         
     Returns:
         List of start times for battery discharge
@@ -297,45 +270,40 @@ def optimize_bat_discharge(prices, slot_minutes, discharge_time_percentage, slot
     if not prices or discharge_time_percentage <= 0:
         return []
     
-    # Calculate number of discharge slots based on percentage (single slots, no blocks)
+    # Calculate number of discharge slots based on percentage
     n_slots_to_use = max(1, int(len(prices) * discharge_time_percentage))
     
     if n_slots_to_use <= 0:
         return []
     
-    # Calculate minimum discharge price threshold
-    # Find potential charge prices (bottom prices in the horizon)
-    sorted_prices = sorted(prices)
-    charge_slots = n_slots_to_use  # Match charge and discharge slot counts
-    avg_charge_price = sum(sorted_prices[:charge_slots]) / charge_slots if charge_slots > 0 else sorted_prices[0]
+    # Use provided min_discharge_price or calculate fallback from current horizon
+    if min_discharge_price is None:
+        # Fallback: use 70th percentile of current horizon prices
+        import numpy as np
+        min_discharge_price = float(np.percentile(prices, 70))
+        logger.info(f"🔋 Battery discharge: using fallback threshold {min_discharge_price:.4f} EUR/kWh (70th percentile of horizon)")
+    else:
+        logger.info(f"🔋 Battery discharge: using historical threshold {min_discharge_price:.4f} EUR/kWh")
     
-    # Minimum discharge price per slot:
-    # discharge_price >= charge_price/efficiency + cycle_cost + min_price_differential
-    min_discharge_price = avg_charge_price / round_trip_efficiency + cycle_cost_per_kwh + min_price_differential
-    
-    logger.info(f"🔋 Battery discharge optimization: avg_charge_price={avg_charge_price:.3f}, "
-                f"min_discharge_price={min_discharge_price:.3f}")
-    
-    # Filter slots based on threshold
+    # Filter slots that are above the min discharge price threshold
     eligible_slots = [(i, prices[i]) for i in range(len(prices)) if prices[i] >= min_discharge_price]
     
     if not eligible_slots:
-        logger.warning(f"⚠️ No slots meet the price threshold for battery discharge (min={min_discharge_price:.3f})")
+        logger.warning(f"⚠️ No slots above min_discharge_price={min_discharge_price:.4f} EUR/kWh")
         return []
     
-    # Sort by price and take the highest n_slots_to_use
+    # Sort by price descending and take the highest n_slots_to_use
     eligible_slots.sort(key=lambda x: x[1], reverse=True)
     selected_slots = [slot for slot, _ in eligible_slots[:n_slots_to_use]]
     
-    # Calculate expected profit
+    # Log selection info
     if selected_slots:
         avg_discharge_price = sum(prices[i] for i in selected_slots) / len(selected_slots)
-        gross_revenue = avg_discharge_price - avg_charge_price
-        net_revenue = gross_revenue - (avg_charge_price * (1/round_trip_efficiency - 1)) - cycle_cost_per_kwh
-        logger.info(f"💰 Battery discharge profit estimate: gross={gross_revenue:.3f} EUR/kWh, "
-                   f"net={net_revenue:.3f} EUR/kWh")
+        min_selected_price = min(prices[i] for i in selected_slots)
+        max_price = max(prices[i] for i in selected_slots)
+        logger.info(f"💰 Battery discharge: selected {len(selected_slots)} slots "
+                   f"(avg={avg_discharge_price:.4f}, range={min_selected_price:.4f}-{max_price:.4f} EUR/kWh)")
     
-    return [slot_to_time(i, slot_minutes) for i in sorted(selected_slots)]
     return [slot_to_time(i, slot_minutes) for i in sorted(selected_slots)]
 
 

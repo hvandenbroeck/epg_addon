@@ -237,3 +237,58 @@ class PriceHistoryManager:
         
         logger.info(f"✅ Retrieved {len(df)} hourly price records from database")
         return df
+    async def get_price_percentiles(self, days_back=14, charge_percentile=30, discharge_percentile=70):
+        """Calculate price percentiles from historical data for battery thresholds.
+        
+        Uses cached data first, then fetches missing data from API if needed.
+        
+        Args:
+            days_back: Number of days of historical data to analyze (default 14)
+            charge_percentile: Percentile for max charge price (default 30 = only charge below 30th percentile)
+            discharge_percentile: Percentile for min discharge price (default 70 = only discharge above 70th percentile)
+            
+        Returns:
+            dict with 'max_charge_price' and 'min_discharge_price' in EUR/kWh,
+            or None if insufficient data
+        """
+        import numpy as np
+        
+        logger.info(f"📊 Calculating price percentiles from last {days_back} days (charge={charge_percentile}th, discharge={discharge_percentile}th)")
+        
+        # Fetch historical prices (uses cache first)
+        df = await self.fetch_historical_prices(days_back=days_back)
+        
+        if df.empty or len(df) < 24:  # Need at least 1 day of data
+            logger.warning(f"⚠️ Insufficient price data for percentile calculation: {len(df)} records")
+            return None
+        
+        prices = df['price'].values
+        
+        # Calculate percentiles
+        max_charge_price = float(np.percentile(prices, charge_percentile))
+        min_discharge_price = float(np.percentile(prices, discharge_percentile))
+        
+        # Log statistics
+        price_min = float(np.min(prices))
+        price_max = float(np.max(prices))
+        price_mean = float(np.mean(prices))
+        price_median = float(np.median(prices))
+        
+        logger.info(f"📈 Price statistics (last {days_back} days): "
+                   f"min={price_min:.4f}, max={price_max:.4f}, "
+                   f"mean={price_mean:.4f}, median={price_median:.4f} EUR/kWh")
+        logger.info(f"🔋 Battery thresholds: max_charge_price={max_charge_price:.4f} EUR/kWh ({charge_percentile}th percentile), "
+                   f"min_discharge_price={min_discharge_price:.4f} EUR/kWh ({discharge_percentile}th percentile)")
+        
+        return {
+            'max_charge_price': max_charge_price,
+            'min_discharge_price': min_discharge_price,
+            'price_stats': {
+                'min': price_min,
+                'max': price_max,
+                'mean': price_mean,
+                'median': price_median,
+                'days_analyzed': days_back,
+                'data_points': len(prices)
+            }
+        }

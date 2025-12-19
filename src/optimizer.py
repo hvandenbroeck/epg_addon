@@ -12,6 +12,7 @@ from .utils import slot_to_time, slots_to_iso_ranges, merge_sequential_timeslots
 from .config import CONFIG
 from .price_fetcher import EntsoeePriceFetcher
 from .devices_config import devices_config
+from .forecasting.price_history import PriceHistoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,9 @@ class HeatpumpOptimizer:
         entsoe_token = CONFIG['options'].get('entsoe_api_token', '')
         entsoe_country = CONFIG['options'].get('entsoe_country_code', 'BE')
         self.price_fetcher = EntsoeePriceFetcher(entsoe_token, entsoe_country) if entsoe_token else None
+        
+        # Initialize Price History Manager for percentile calculations
+        self.price_history_manager = PriceHistoryManager(entsoe_token, entsoe_country) if entsoe_token else None
 
     async def get_state(self, entity_id):
         """Get the state of an entity from Home Assistant."""
@@ -181,22 +185,18 @@ class HeatpumpOptimizer:
         BAT_CHARGE_TIME_PCT = CONFIG['options'].get('battery_charge_time_percentage', 0.25)
         BAT_DISCHARGE_TIME_PCT = CONFIG['options'].get('battery_discharge_time_percentage', 0.25)
         
-        # Battery optimization parameters (new)
-        BAT_MIN_PRICE_DIFFERENTIAL = CONFIG['options'].get('battery_min_price_differential', 0.05)
-        BAT_ROUND_TRIP_EFFICIENCY = CONFIG['options'].get('battery_round_trip_efficiency', 0.90)
-        BAT_CAPACITY_KWH = CONFIG['options'].get('battery_capacity_kwh', 10.0)
-        
-        # Calculate cycle cost per kWh
-        # cycle_cost_eur is the total cost per complete charge/discharge cycle
-        # We divide by capacity to get cost per kWh cycled
-        BAT_CYCLE_COST_TOTAL = CONFIG['options'].get('battery_cycle_cost_eur', 0.02)
-        BAT_CYCLE_COST_PER_KWH = BAT_CYCLE_COST_TOTAL / BAT_CAPACITY_KWH if BAT_CAPACITY_KWH > 0 else 0.0
-        
+        # Battery percentile configuration (for dynamic price thresholds)
+        BAT_PRICE_HISTORY_DAYS = CONFIG['options'].get('battery_price_history_days', 14)
+        BAT_CHARGE_PERCENTILE = CONFIG['options'].get('battery_charge_percentile', 30)
+        BAT_DISCHARGE_PERCENTILE = CONFIG['options'].get('battery_discharge_percentile', 70)
+
         EV_MAX_PRICE = 0.02  # 6 cents per kWh
 
         logger.info("🔎 Starting energy optimization using ENTSO-E prices (rolling horizon)...")
-        logger.info(f"🔋 Battery optimization settings: min_differential={BAT_MIN_PRICE_DIFFERENTIAL:.3f} EUR/kWh, "
-                   f"efficiency={BAT_ROUND_TRIP_EFFICIENCY:.1%}, cycle_cost={BAT_CYCLE_COST_PER_KWH:.4f} EUR/kWh")
+        logger.info(f"🔋 Battery optimization settings: charge_pct={BAT_CHARGE_TIME_PCT:.0%}, "
+                   f"discharge_pct={BAT_DISCHARGE_TIME_PCT:.0%}, "
+                   f"history_days={BAT_PRICE_HISTORY_DAYS}, "
+                   f"charge_percentile={BAT_CHARGE_PERCENTILE}, discharge_percentile={BAT_DISCHARGE_PERCENTILE}")
 
         # Check if price fetcher is configured
         if not self.price_fetcher:
@@ -221,6 +221,29 @@ class HeatpumpOptimizer:
         
         logger.info(f"📊 Horizon: {horizon_start} to {horizon_end} ({len(prices)} slots)")
         logger.info(f"🔒 Lock window: until {lock_end_datetime} (slot {lock_end_slot})")
+
+        # ===== CALCULATE BATTERY PRICE THRESHOLDS FROM HISTORICAL DATA =====
+        max_charge_price = None
+        min_discharge_price = None
+        
+        if self.price_history_manager:
+            try:
+                percentiles = await self.price_history_manager.get_price_percentiles(
+                    days_back=BAT_PRICE_HISTORY_DAYS,
+                    charge_percentile=BAT_CHARGE_PERCENTILE,
+                    discharge_percentile=BAT_DISCHARGE_PERCENTILE
+                )
+                if percentiles:
+                    max_charge_price = percentiles['max_charge_price']
+                    min_discharge_price = percentiles['min_discharge_price']
+                    logger.info(f"✅ Using historical percentile thresholds: "
+                               f"max_charge={max_charge_price:.4f}, min_discharge={min_discharge_price:.4f} EUR/kWh")
+                else:
+                    logger.warning("⚠️ Could not calculate price percentiles, battery optimization will use fallback")
+            except Exception as e:
+                logger.error(f"❌ Error calculating price percentiles: {e}")
+        else:
+            logger.warning("⚠️ Price history manager not configured, battery optimization will use fallback")
 
         results = {}
         
@@ -289,10 +312,7 @@ class HeatpumpOptimizer:
                 slot_minutes=slot_minutes,
                 charge_time_percentage=BAT_CHARGE_TIME_PCT,
                 slot_to_time=slot_to_time,
-                min_price_differential=BAT_MIN_PRICE_DIFFERENTIAL,
-                round_trip_efficiency=BAT_ROUND_TRIP_EFFICIENCY,
-                cycle_cost_per_kwh=BAT_CYCLE_COST_PER_KWH,
-                capacity_kwh=BAT_CAPACITY_KWH
+                max_charge_price=max_charge_price
             )
             results[device_name] = bat_charge_times
         
@@ -305,10 +325,7 @@ class HeatpumpOptimizer:
                 slot_minutes=slot_minutes,
                 discharge_time_percentage=BAT_DISCHARGE_TIME_PCT,
                 slot_to_time=slot_to_time,
-                min_price_differential=BAT_MIN_PRICE_DIFFERENTIAL,
-                round_trip_efficiency=BAT_ROUND_TRIP_EFFICIENCY,
-                cycle_cost_per_kwh=BAT_CYCLE_COST_PER_KWH,
-                capacity_kwh=BAT_CAPACITY_KWH
+                min_discharge_price=min_discharge_price
             )
             results[device_name] = bat_discharge_times
 
