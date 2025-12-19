@@ -11,7 +11,6 @@ def optimize_thermal_device(
     block_hours,
     min_gap_hours,
     max_gap_hours,
-    min_daily_hours,
     locked_slots,
     initial_gap_slots,
     horizon_start_datetime,
@@ -24,7 +23,6 @@ def optimize_thermal_device(
     - Minimum run time (block_hours) - device runs at least this long each time
     - Minimum gap between runs (min_gap_hours) - prevents rapid cycling
     - Maximum gap between runs (max_gap_hours) - ensures device runs regularly
-    - Minimum daily runtime - ensures sufficient operation per calendar day
     - Support for locked slots (already scheduled/executed)
     - Initial gap state from previous schedule
     
@@ -34,7 +32,6 @@ def optimize_thermal_device(
         block_hours: Minimum runtime in hours when device turns on
         min_gap_hours: Minimum hours between end of one run and start of next
         max_gap_hours: Maximum hours allowed without running (pause limit)
-        min_daily_hours: Minimum hours the device must run per calendar day
         locked_slots: Set of slot indices that are locked (already scheduled/executed)
         initial_gap_slots: Number of slots since last run at start of horizon
         horizon_start_datetime: datetime when the horizon starts (for day boundary calc)
@@ -50,8 +47,6 @@ def optimize_thermal_device(
     block_len = int(block_hours * 60 / slot_minutes)  # slots per block
     min_gap_slots = int(min_gap_hours * 60 / slot_minutes)
     max_gap_slots = int(max_gap_hours * 60 / slot_minutes)
-    slots_per_day = int(24 * 60 / slot_minutes)
-    min_daily_slots = int(min_daily_hours * 60 / slot_minutes)
     
     # Window size for "max gap" constraint: if max_gap is 6 hours, we can't have
     # 7 consecutive hours off, so window = max_gap_slots + block_len
@@ -126,49 +121,7 @@ def optimize_thermal_device(
         if active_starts:
             model += pulp.lpSum([x[i] for i in active_starts if i in x]) >= 1
     
-    # Constraint 4: Minimum daily runtime
-    # Calculate which slots belong to which calendar day
-    current_date = horizon_start_datetime.date()
-    day_boundaries = []  # List of (day_start_slot, day_end_slot, date)
-    
-    slot = 0
-    while slot < n_slots:
-        day_start = slot
-        # Calculate slots until midnight
-        current_datetime = horizon_start_datetime + timedelta(minutes=slot * slot_minutes)
-        next_midnight = datetime.combine(current_datetime.date() + timedelta(days=1), datetime.min.time())
-        slots_until_midnight = int((next_midnight - current_datetime).total_seconds() / 60 / slot_minutes)
-        day_end = min(slot + slots_until_midnight, n_slots)
-        day_boundaries.append((day_start, day_end, current_datetime.date()))
-        slot = day_end
-    
-    # Add minimum daily runtime constraints
-    for day_start, day_end, date in day_boundaries:
-        # Count running slots in this day
-        # A slot t is running if any x[j] is 1 where j covers t
-        # To count total running slots, we sum block_len * x[i] for starts in this day
-        # But we need to be careful about blocks that span day boundaries
-        
-        # Simpler approach: require minimum number of block starts such that
-        # total runtime >= min_daily_hours
-        # Each start contributes block_hours of runtime
-        day_slots = day_end - day_start
-        available_hours = day_slots * slot_minutes / 60
-        
-        # Only enforce if the day has enough hours to meet minimum
-        if available_hours >= min_daily_hours:
-            # Starts that contribute to this day (start within the day or overlap into it)
-            contributing_starts = [i for i in valid_starts 
-                                 if i < day_end and i + block_len > day_start]
-            if contributing_starts:
-                min_blocks_needed = max(1, int(min_daily_hours / block_hours))
-                # Count starts that begin within this day (simpler accounting)
-                day_starts = [i for i in valid_starts if day_start <= i < day_end]
-                if day_starts:
-                    model += pulp.lpSum([x[i] for i in day_starts if i in x]) >= min_blocks_needed
-                    logger.debug(f"Day {date}: min {min_blocks_needed} blocks from slots {day_start}-{day_end}")
-    
-    # Constraint 5: Respect locked slots
+    # Constraint 4: Respect locked slots
     # If a slot is locked, the corresponding x must be 1
     for locked_start in locked_slots:
         if locked_start in x:
@@ -196,7 +149,6 @@ def optimize_wp(
     block_hours,
     min_gap_hours,
     max_gap_hours,
-    min_daily_hours,
     locked_slots,
     initial_gap_slots,
     horizon_start_datetime,
@@ -209,7 +161,6 @@ def optimize_wp(
         block_hours=block_hours,
         min_gap_hours=min_gap_hours,
         max_gap_hours=max_gap_hours,
-        min_daily_hours=min_daily_hours,
         locked_slots=locked_slots,
         initial_gap_slots=initial_gap_slots,
         horizon_start_datetime=horizon_start_datetime,
@@ -224,7 +175,6 @@ def optimize_hw(
     block_hours,
     min_gap_hours,
     max_gap_hours,
-    min_daily_hours,
     locked_slots,
     initial_gap_slots,
     horizon_start_datetime,
@@ -237,7 +187,6 @@ def optimize_hw(
         block_hours=block_hours,
         min_gap_hours=min_gap_hours,
         max_gap_hours=max_gap_hours,
-        min_daily_hours=min_daily_hours,
         locked_slots=locked_slots,
         initial_gap_slots=initial_gap_slots,
         horizon_start_datetime=horizon_start_datetime,

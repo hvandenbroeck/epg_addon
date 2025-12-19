@@ -171,13 +171,11 @@ class HeatpumpOptimizer:
         WP_BLOCK_HOURS = 1      # Minimum runtime when turned on
         WP_MIN_GAP_HOURS = 3    # Minimum gap between runs (prevent rapid cycling)
         WP_MAX_GAP_HOURS = 8    # Maximum gap between runs (must run at least every 6 hours)
-        WP_MIN_DAILY_HOURS = 4  # Minimum runtime per day
 
         # Hot Water (HW) configuration - NEW sliding window approach
         HW_BLOCK_HOURS = 1      # Minimum runtime when turned on
         HW_MIN_GAP_HOURS = 6    # Minimum gap between runs
         HW_MAX_GAP_HOURS = 12   # Maximum gap between runs
-        HW_MIN_DAILY_HOURS = 2  # Minimum runtime per day
 
         # Battery configuration - percentage-based
         BAT_CHARGE_TIME_PCT = CONFIG['options'].get('battery_charge_time_percentage', 0.25)
@@ -239,7 +237,6 @@ class HeatpumpOptimizer:
                 block_hours=WP_BLOCK_HOURS,
                 min_gap_hours=WP_MIN_GAP_HOURS,
                 max_gap_hours=WP_MAX_GAP_HOURS,
-                min_daily_hours=WP_MIN_DAILY_HOURS,
                 locked_slots=wp_locked_slots,
                 initial_gap_slots=wp_initial_gap,
                 horizon_start_datetime=horizon_start,
@@ -268,7 +265,6 @@ class HeatpumpOptimizer:
                 block_hours=HW_BLOCK_HOURS,
                 min_gap_hours=HW_MIN_GAP_HOURS,
                 max_gap_hours=HW_MAX_GAP_HOURS,
-                min_daily_hours=HW_MIN_DAILY_HOURS,
                 locked_slots=hw_locked_slots,
                 initial_gap_slots=hw_initial_gap,
                 horizon_start_datetime=horizon_start,

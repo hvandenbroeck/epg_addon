@@ -78,7 +78,7 @@ class Scheduler:
                 self.scheduler.add_job(
                     self.devices.execute_device_action,
                     trigger=DateTrigger(run_date=start_time),
-                    args=[device, cfg.get("start", {}), "start", start_time],
+                    args=[device, cfg.start.model_dump(exclude_none=True), "start", start_time],
                     id=f"{device}_start_device_{start_time.isoformat()}",
                     replace_existing=True
                 )
@@ -89,7 +89,7 @@ class Scheduler:
                 self.scheduler.add_job(
                     self.devices.execute_device_action,
                     trigger=DateTrigger(run_date=end_time),
-                    args=[device, cfg.get("stop", {}), "stop", end_time],
+                    args=[device, cfg.stop.model_dump(exclude_none=True), "stop", end_time],
                     id=f"{device}_stop_device_{end_time.isoformat()}",
                     replace_existing=True
                 )

@@ -327,10 +327,12 @@ class DeviceVerifier:
         
         if not is_correct:
             logger.warning(f"⚠️ Device {device} not in expected {action_label} state, retrying action...")
-            device_config = self.device_actions.get(device, {})
-            action_config = device_config.get(action_label, {})
-            # Execute without re-registering to avoid infinite loop
-            await self.devices.execute_device_action(device, action_config, action_label, context=context, skip_verification=True)
+            device_obj = self.devices_config.get_device_by_name(device)
+            if device_obj:
+                action_set = device_obj.start if action_label == "start" else device_obj.stop
+                action_config = action_set.model_dump(exclude_none=True)
+                # Execute without re-registering to avoid infinite loop
+                await self.devices.execute_device_action(device, action_config, action_label, context=context, skip_verification=True)
         else:
             logger.info(f"✅ Device {device} verified in correct {action_label} state (check #{check_number}), cancelling remaining checks")
             # Cancel remaining verification jobs for this device
@@ -377,8 +379,8 @@ class DeviceVerifier:
                 logger.error(f"Invalid datetime in schedule entry: {e}")
                 continue
             
-            device_config = self.device_actions.get(device)
-            if not device_config:
+            device_obj = self.devices_config.get_device_by_name(device)
+            if not device_obj:
                 continue
             
             # Check if this slot is currently active
@@ -392,8 +394,8 @@ class DeviceVerifier:
         
         # Now verify each device's expected state
         for device, expected_action in device_states.items():
-            device_config = self.device_actions.get(device)
-            if not device_config:
+            device_obj = self.devices_config.get_device_by_name(device)
+            if not device_obj:
                 continue
             
             # Verify device state
@@ -401,7 +403,8 @@ class DeviceVerifier:
             
             if not is_correct:
                 logger.warning(f"⚠️ Device {device} not in expected {expected_action} state during periodic check, executing action...")
-                action_config = device_config.get(expected_action, {})
+                action_set = device_obj.start if expected_action == "start" else device_obj.stop
+                action_config = action_set.model_dump(exclude_none=True)
                 await self.devices.execute_device_action(device, action_config, expected_action)
                 # Register for post-action verification
                 self.register_action(device, expected_action)
