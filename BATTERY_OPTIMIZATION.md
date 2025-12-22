@@ -25,6 +25,19 @@ The percentile-based approach automatically adapts to market conditions:
 - During stable periods, thresholds become tighter
 - No manual tuning required for different seasons or market conditions
 
+### 3. Price Difference Arbitrage
+
+The optimizer also identifies arbitrage opportunities based on absolute price differences:
+
+- **Charge Arbitrage**: Mark any slot as eligible for charging if there's a future slot that's more expensive by at least the configured threshold (default: 0.10 EUR/kWh)
+- **Discharge Arbitrage**: Mark any slot as eligible for discharging if it's more expensive than any past slot by at least the configured threshold
+
+**How it works:**
+- This logic runs **in addition to** the percentile-based filtering
+- Identifies profitable arbitrage opportunities across the optimization horizon
+- Expands the pool of eligible slots beyond just percentile thresholds
+- The final slot selection still respects the time percentage limits
+
 ## Configuration Parameters
 
 Add these parameters to your `config.json` under the `options` section:
@@ -36,7 +49,8 @@ Add these parameters to your `config.json` under the `options` section:
     "battery_discharge_time_percentage": 0.25,
     "battery_price_history_days": 14,
     "battery_charge_percentile": 30,
-    "battery_discharge_percentile": 70
+    "battery_discharge_percentile": 70,
+    "battery_price_difference_threshold": 0.10
   }
 }
 ```
@@ -50,6 +64,7 @@ Add these parameters to your `config.json` under the `options` section:
 | `battery_price_history_days` | Number of days of price history to analyze | 14 | 7-30 |
 | `battery_charge_percentile` | Percentile threshold for max charge price (lower = more selective) | 30 | 20-40 |
 | `battery_discharge_percentile` | Percentile threshold for min discharge price (higher = more selective) | 70 | 60-80 |
+| `battery_price_difference_threshold` | Minimum price difference (EUR/kWh) to trigger arbitrage opportunities | 0.10 | 0.05-0.20 |
 
 ### Understanding Percentiles
 
@@ -75,13 +90,19 @@ At each optimization run:
 
 **Charge Optimization:**
 1. Filter slots where `price <= max_charge_price` (30th percentile)
-2. From eligible slots, select the cheapest `n_slots_to_use`
-3. `n_slots_to_use = total_horizon_slots × charge_time_percentage`
+2. **Additionally**, mark slots as eligible if any future slot is `>= current_price + price_difference_threshold`
+3. From all eligible slots, select the cheapest `n_slots_to_use`
+4. `n_slots_to_use = total_horizon_slots × charge_time_percentage`
 
 **Discharge Optimization:**
 1. Filter slots where `price >= min_discharge_price` (70th percentile)
-2. From eligible slots, select the most expensive `n_slots_to_use`
-3. `n_slots_to_use = total_horizon_slots × discharge_time_percentage`
+2. **Additionally**, mark slots as eligible if they are `>= any_past_price + price_difference_threshold`
+3. From all eligible slots, select the most expensive `n_slots_to_use`
+4. `n_slots_to_use = total_horizon_slots × discharge_time_percentage`
+
+**Example:** With `price_difference_threshold = 0.10` EUR/kWh:
+- A slot at 0.15 EUR/kWh becomes a charge candidate if any future slot is ≥ 0.25 EUR/kWh
+- A slot at 0.30 EUR/kWh becomes a discharge candidate if any past slot was ≤ 0.20 EUR/kWh
 
 ## Logging
 
@@ -103,11 +124,13 @@ The optimizer logs detailed information about price thresholds:
   "battery_charge_percentile": 20,
   "battery_discharge_percentile": 80,
   "battery_charge_time_percentage": 0.15,
-  "battery_discharge_time_percentage": 0.15
+  "battery_discharge_time_percentage": 0.15,
+  "battery_price_difference_threshold": 0.15
 }
 ```
 - Only charges in the cheapest 20% of historical prices
 - Only discharges in the most expensive 20%
+- Higher price difference threshold (15 cents) for more selective arbitrage
 - Fewer cycles but with better margins
 
 ### Aggressive (More Cycling)
@@ -116,11 +139,13 @@ The optimizer logs detailed information about price thresholds:
   "battery_charge_percentile": 40,
   "battery_discharge_percentile": 60,
   "battery_charge_time_percentage": 0.35,
-  "battery_discharge_time_percentage": 0.35
+  "battery_discharge_time_percentage": 0.35,
+  "battery_price_difference_threshold": 0.05
 }
 ```
 - Charges whenever prices are below median-ish (40th percentile)
 - Discharges whenever prices are above median-ish (60th percentile)
+- Lower price difference threshold (5 cents) captures more arbitrage opportunities
 - More frequent cycling
 
 ### Balanced (Recommended)
@@ -129,11 +154,13 @@ The optimizer logs detailed information about price thresholds:
   "battery_charge_percentile": 30,
   "battery_discharge_percentile": 70,
   "battery_charge_time_percentage": 0.25,
-  "battery_discharge_time_percentage": 0.25
+  "battery_discharge_time_percentage": 0.25,
+  "battery_price_difference_threshold": 0.10
 }
 ```
 - Good balance between usage and selectivity
 - 40% price spread between charge and discharge thresholds
+- 10 cent price difference threshold for arbitrage opportunities
 - Sustainable cycling pattern
 
 ## Fallback Behavior

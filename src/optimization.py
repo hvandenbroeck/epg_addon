@@ -196,7 +196,7 @@ def optimize_hw(
 
 
 def optimize_battery(prices, slot_minutes, charge_time_percentage, slot_to_time, 
-                     max_charge_price=None):
+                     max_charge_price=None, price_difference_threshold=None):
     """
     Optimize battery charging periods using percentile-based price thresholds.
     
@@ -207,6 +207,8 @@ def optimize_battery(prices, slot_minutes, charge_time_percentage, slot_to_time,
         slot_to_time: Function to convert slot index to time
         max_charge_price: Maximum price threshold for charging (from historical percentile).
                          If None, uses fallback based on horizon prices.
+        price_difference_threshold: Additional threshold for opportunistic charging.
+                                   Mark slot as charge if any future slot is more expensive by this amount.
         
     Returns:
         List of start times for battery charging
@@ -232,6 +234,22 @@ def optimize_battery(prices, slot_minutes, charge_time_percentage, slot_to_time,
     # Filter slots that are below the max charge price threshold
     eligible_slots = [(i, prices[i]) for i in range(len(prices)) if prices[i] <= max_charge_price]
     
+    # Add price difference logic: mark slots as charge slots if there's a future slot more expensive by threshold
+    if price_difference_threshold is not None and price_difference_threshold > 0:
+        logger.info(f"🔋 Battery charge: applying price difference threshold {price_difference_threshold:.4f} EUR/kWh")
+        for i in range(len(prices)):
+            current_price = prices[i]
+            # Check if any future slot is more expensive by at least the threshold
+            has_expensive_future = any(
+                prices[j] >= current_price + price_difference_threshold 
+                for j in range(i + 1, len(prices))
+            )
+            if has_expensive_future:
+                # Add to eligible slots if not already there
+                if not any(slot_idx == i for slot_idx, _ in eligible_slots):
+                    eligible_slots.append((i, current_price))
+        logger.info(f"🔋 Battery charge: after price difference logic, {len(eligible_slots)} eligible slots")
+    
     if not eligible_slots:
         logger.warning(f"⚠️ No slots below max_charge_price={max_charge_price:.4f} EUR/kWh")
         return []
@@ -252,7 +270,7 @@ def optimize_battery(prices, slot_minutes, charge_time_percentage, slot_to_time,
 
 
 def optimize_bat_discharge(prices, slot_minutes, discharge_time_percentage, slot_to_time,
-                           min_discharge_price=None):
+                           min_discharge_price=None, price_difference_threshold=None):
     """
     Optimize battery discharge periods using percentile-based price thresholds.
     
@@ -263,6 +281,8 @@ def optimize_bat_discharge(prices, slot_minutes, discharge_time_percentage, slot
         slot_to_time: Function to convert slot index to time
         min_discharge_price: Minimum price threshold for discharging (from historical percentile).
                             If None, uses fallback based on horizon prices.
+        price_difference_threshold: Additional threshold for opportunistic discharging.
+                                   Mark slot as discharge if it's more expensive than any slot being processed by this amount.
         
     Returns:
         List of start times for battery discharge
@@ -287,6 +307,22 @@ def optimize_bat_discharge(prices, slot_minutes, discharge_time_percentage, slot
     
     # Filter slots that are above the min discharge price threshold
     eligible_slots = [(i, prices[i]) for i in range(len(prices)) if prices[i] >= min_discharge_price]
+    
+    # Add price difference logic: mark slots as discharge slots if they are more expensive than earlier slots by threshold
+    if price_difference_threshold is not None and price_difference_threshold > 0:
+        logger.info(f"🔋 Battery discharge: applying price difference threshold {price_difference_threshold:.4f} EUR/kWh")
+        for i in range(len(prices)):
+            current_price = prices[i]
+            # Check if this slot is more expensive than any earlier slot by at least the threshold
+            is_expensive_compared_to_past = any(
+                current_price >= prices[j] + price_difference_threshold 
+                for j in range(0, i)
+            )
+            if is_expensive_compared_to_past:
+                # Add to eligible slots if not already there
+                if not any(slot_idx == i for slot_idx, _ in eligible_slots):
+                    eligible_slots.append((i, current_price))
+        logger.info(f"🔋 Battery discharge: after price difference logic, {len(eligible_slots)} eligible slots")
     
     if not eligible_slots:
         logger.warning(f"⚠️ No slots above min_discharge_price={min_discharge_price:.4f} EUR/kWh")

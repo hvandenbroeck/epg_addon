@@ -189,6 +189,7 @@ class HeatpumpOptimizer:
         BAT_PRICE_HISTORY_DAYS = CONFIG['options'].get('battery_price_history_days', 14)
         BAT_CHARGE_PERCENTILE = CONFIG['options'].get('battery_charge_percentile', 30)
         BAT_DISCHARGE_PERCENTILE = CONFIG['options'].get('battery_discharge_percentile', 70)
+        BAT_PRICE_DIFF_THRESHOLD = CONFIG['options'].get('battery_price_difference_threshold', 0.10)
 
         EV_MAX_PRICE = 0.02  # 6 cents per kWh
 
@@ -196,7 +197,8 @@ class HeatpumpOptimizer:
         logger.info(f"🔋 Battery optimization settings: charge_pct={BAT_CHARGE_TIME_PCT:.0%}, "
                    f"discharge_pct={BAT_DISCHARGE_TIME_PCT:.0%}, "
                    f"history_days={BAT_PRICE_HISTORY_DAYS}, "
-                   f"charge_percentile={BAT_CHARGE_PERCENTILE}, discharge_percentile={BAT_DISCHARGE_PERCENTILE}")
+                   f"charge_percentile={BAT_CHARGE_PERCENTILE}, discharge_percentile={BAT_DISCHARGE_PERCENTILE}, "
+                   f"price_diff_threshold={BAT_PRICE_DIFF_THRESHOLD:.4f} EUR/kWh")
 
         # Check if price fetcher is configured
         if not self.price_fetcher:
@@ -312,7 +314,8 @@ class HeatpumpOptimizer:
                 slot_minutes=slot_minutes,
                 charge_time_percentage=BAT_CHARGE_TIME_PCT,
                 slot_to_time=slot_to_time,
-                max_charge_price=max_charge_price
+                max_charge_price=max_charge_price,
+                price_difference_threshold=BAT_PRICE_DIFF_THRESHOLD
             )
             results[device_name] = bat_charge_times
         
@@ -325,7 +328,8 @@ class HeatpumpOptimizer:
                 slot_minutes=slot_minutes,
                 discharge_time_percentage=BAT_DISCHARGE_TIME_PCT,
                 slot_to_time=slot_to_time,
-                min_discharge_price=min_discharge_price
+                min_discharge_price=min_discharge_price,
+                price_difference_threshold=BAT_PRICE_DIFF_THRESHOLD
             )
             results[device_name] = bat_discharge_times
 
