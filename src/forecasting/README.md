@@ -5,15 +5,16 @@ This module contains all components related to predicting power usage for the ne
 ## Files
 
 ### `prediction.py`
-Main prediction logic using LightGBM (Light Gradient Boosting Machine) for forecasting tomorrow's **hourly** power usage based on:
+Main prediction logic using LightGBM (Light Gradient Boosting Machine) for forecasting power usage based on:
 - Historical hourly power consumption data
 - Hourly weather data (temperature, cloud cover)
 - Electricity price data (if available)
 - Hour of day and day of week patterns
 
 **Key Class:** `Prediction`
-- `calculateTomorrowsPowerUsage()`: Trains a model and predicts tomorrow's hourly power usage
-- Returns a DataFrame with hourly predictions including temperature, cloud cover, and prices
+- `calculatePowerUsage()`: Trains a model and predicts hourly power usage for the remaining hours of today AND all of tomorrow
+- `calculateTomorrowsPowerUsage()`: [DEPRECATED] Returns only tomorrow's predictions for backwards compatibility
+- Returns a DataFrame with hourly predictions including timestamp, temperature, cloud cover, date, and prices
 - Outputs nicely formatted hourly predictions to logs
 
 ### `statistics_loader.py`
@@ -27,7 +28,7 @@ Loads historical power usage statistics from Home Assistant API.
 Fetches weather data using Home Assistant location and Open-Meteo API.
 
 **Key Class:** `Weather`
-- `getTomorrowsHourlyWeather()`: Gets tomorrow's hourly weather forecast (temperature & cloud cover)
+- `getUpcomingHourlyWeather()`: Gets weather forecast for remaining hours of today and all of tomorrow (temperature & cloud cover)
 - `getHistoricalHourlyWeather()`: Gets historical hourly weather data for model training
 
 ### `price_history.py`
@@ -67,10 +68,13 @@ price_history_manager = PriceHistoryManager(entsoe_token, "BE")
 # Create prediction instance (with or without price data)
 prediction = Prediction(statistics_loader, weather, price_history_manager)
 
-# Calculate tomorrow's hourly predicted power usage
-results_df = await prediction.calculateTomorrowsPowerUsage()
+# Calculate power usage for remaining hours of today AND tomorrow
+results_df = await prediction.calculatePowerUsage()
 
-# Results DataFrame contains: hour, timestamp, temperature, cloud_cover, predicted_kwh, price (if available)
+# Or use the legacy method for just tomorrow (backwards compatible)
+tomorrow_df = await prediction.calculateTomorrowsPowerUsage()
+
+# Results DataFrame contains: hour, timestamp, temperature, cloud_cover, date, predicted_kwh, price (if available)
 ```
 
 ## Output Format
@@ -79,18 +83,29 @@ The prediction outputs a nicely formatted table to logs:
 
 ```
 ================================================================================
-📅 TOMORROW'S HOURLY POWER USAGE PREDICTION
+📅 POWER USAGE PREDICTION (TODAY + TOMORROW)
 ================================================================================
-Date: Tuesday, November 26, 2025
-Total Predicted Usage: 45.32 kWh
-Validation MAE: 0.123 kWh per hour
+
+📌 TODAY (Tuesday, November 26, 2025) - Remaining 8 hours
+Predicted Usage: 15.32 kWh
 --------------------------------------------------------------------------------
 Hour   Time     Temp     Cloud    Predicted    Price (€/kWh)
 --------------------------------------------------------------------------------
-00:00  00:00    8.2°C    45%      1.234 kWh    €0.1234
-01:00  01:00    7.9°C    50%      1.123 kWh    €0.1156
+16:00  16:00    8.2°C    45%      1.234 kWh    €0.1234
+17:00  17:00    7.9°C    50%      1.823 kWh    €0.1456
+...
+
+📌 TOMORROW (Wednesday, November 27, 2025)
+Predicted Usage: 45.32 kWh
+--------------------------------------------------------------------------------
+Hour   Time     Temp     Cloud    Predicted    Price (€/kWh)
+--------------------------------------------------------------------------------
+00:00  00:00    6.2°C    35%      1.234 kWh    €0.1234
+01:00  01:00    5.9°C    40%      1.123 kWh    €0.1156
 ...
 --------------------------------------------------------------------------------
+Total Predicted Usage: 60.64 kWh
+Validation MAE: 0.123 kWh per hour
 Peak hour: 18:00 (2.456 kWh)
 Lowest hour: 03:00 (0.987 kWh)
 ================================================================================

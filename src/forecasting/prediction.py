@@ -19,6 +19,19 @@ class Prediction:
         """
         Predict tomorrow's hourly power usage using historical data, weather, and price features.
         Returns a DataFrame with hourly predictions.
+        
+        DEPRECATED: Use calculatePowerUsage() instead which includes both today's remaining hours and tomorrow.
+        """
+        results = await self.calculatePowerUsage()
+        # Filter to only tomorrow's predictions for backwards compatibility
+        tomorrow = (datetime.now().date() + timedelta(days=1))
+        return results[results['date'] == tomorrow].reset_index(drop=True)
+
+    async def calculatePowerUsage(self):
+        """
+        Predict power usage for the remaining hours of today and all of tomorrow using 
+        historical data, weather, and price features.
+        Returns a DataFrame with hourly predictions for both today (remaining) and tomorrow.
         """
         # 1. Get historical hourly power usage data
         logger.info("📊 Fetching historical power usage data...")
@@ -141,65 +154,98 @@ class Prediction:
         mae = mean_absolute_error(target_val, val_pred)
         logger.info(f"📊 Validation MAE (hourly): {mae:.3f} kWh")
         
-        # 9. Get tomorrow's weather forecast
-        logger.info("🌤️ Fetching tomorrow's weather forecast...")
-        tomorrow_weather_df = await self.weather.getTomorrowsHourlyWeather()
+        # 9. Get weather forecast for remaining hours of today and all of tomorrow
+        logger.info("🌤️ Fetching weather forecasts...")
         
-        if len(tomorrow_weather_df) == 0:
-            logger.error("❌ No weather forecast available for tomorrow")
-            raise Exception("No weather forecast available for tomorrow")
-        
-        logger.info(f"✅ Retrieved {len(tomorrow_weather_df)} hours of forecast")
-        
-        # 10. Prepare tomorrow's features
+        combined_weather_df = await self.weather.getUpcomingHourlyWeather()
+        today = datetime.now().date()
         tomorrow = (datetime.now().date() + timedelta(days=1))
-        tomorrow_dayofweek = pd.Timestamp(tomorrow).dayofweek
         
-        future_df = tomorrow_weather_df[['hour', 'temperature', 'cloud_cover']].copy()
-        future_df['dayofweek'] = tomorrow_dayofweek
+        if len(combined_weather_df) == 0:
+            logger.error("❌ No weather forecast available")
+            raise Exception("No weather forecast available")
         
-        # Add price data if available (use today's prices as proxy or average)
+        logger.info(f"✅ Retrieved {len(combined_weather_df)} hours of forecast")
+        
+        # 10. Prepare features for all forecast hours
+        future_df = combined_weather_df[['hour', 'temperature', 'cloud_cover', 'date']].copy()
+        future_df['dayofweek'] = future_df['date'].apply(lambda d: pd.Timestamp(d).dayofweek)
+        
+        # Add price data if available (use similar day prices as proxy)
         if has_price_data:
-            # Try to get similar day prices (same day of week from recent weeks)
-            similar_day_prices = merged_df[
-                (merged_df['dayofweek'] == tomorrow_dayofweek) & 
-                (merged_df['timestamp'] >= merged_df['timestamp'].max() - pd.Timedelta(days=28))
-            ].groupby('hour')['price'].mean()
+            def get_price_for_row(row):
+                # Try to get similar day prices (same day of week from recent weeks)
+                similar_day_prices = merged_df[
+                    (merged_df['dayofweek'] == row['dayofweek']) & 
+                    (merged_df['timestamp'] >= merged_df['timestamp'].max() - pd.Timedelta(days=28))
+                ].groupby('hour')['price'].mean()
+                
+                price = similar_day_prices.get(row['hour'], np.nan)
+                
+                # If missing, use overall hourly average
+                if pd.isna(price):
+                    hourly_avg_prices = merged_df.groupby('hour')['price'].mean()
+                    price = hourly_avg_prices.get(row['hour'], merged_df['price'].mean())
+                
+                return price
             
-            future_df['price'] = future_df['hour'].map(similar_day_prices)
-            
-            # If some hours are missing, fill with overall hourly average
-            if future_df['price'].isna().any():
-                hourly_avg_prices = merged_df.groupby('hour')['price'].mean()
-                future_df['price'] = future_df['price'].fillna(
-                    future_df['hour'].map(hourly_avg_prices)
-                )
+            future_df['price'] = future_df.apply(get_price_for_row, axis=1)
         
-        # Ensure feature order matches training
-        future_df = future_df[feature_cols]
+        # Prepare features in correct order (without date column)
+        future_features = future_df[feature_cols].copy()
         
         # 11. Make predictions
-        logger.info("🔮 Predicting tomorrow's hourly power usage...")
-        tomorrow_predictions = lgb_reg.predict(future_df)
+        logger.info("🔮 Predicting power usage for today and tomorrow...")
+        predictions = lgb_reg.predict(future_features)
         
         # 12. Create results DataFrame
-        results_df = tomorrow_weather_df[['hour', 'timestamp', 'temperature', 'cloud_cover']].copy()
-        results_df['predicted_kwh'] = tomorrow_predictions
-        results_df['date'] = tomorrow
+        results_df = combined_weather_df[['hour', 'timestamp', 'temperature', 'cloud_cover', 'date']].copy()
+        results_df['predicted_kwh'] = predictions
         
         if has_price_data:
             results_df['price'] = future_df['price'].values
         
-        # Calculate total predicted usage
-        total_predicted = tomorrow_predictions.sum()
+        # Calculate totals
+        today_predictions = results_df[results_df['date'] == today]['predicted_kwh']
+        tomorrow_predictions = results_df[results_df['date'] == tomorrow]['predicted_kwh']
+        
+        today_total = today_predictions.sum() if len(today_predictions) > 0 else 0
+        tomorrow_total = tomorrow_predictions.sum()
+        total_predicted = predictions.sum()
         
         # 13. Log results in a nicely formatted way
         logger.info("=" * 80)
-        logger.info("📅 TOMORROW'S HOURLY POWER USAGE PREDICTION")
+        logger.info("📅 POWER USAGE PREDICTION (TODAY + TOMORROW)")
         logger.info("=" * 80)
-        logger.info(f"Date: {tomorrow.strftime('%A, %B %d, %Y')}")
-        logger.info(f"Total Predicted Usage: {total_predicted:.2f} kWh")
-        logger.info(f"Validation MAE: {mae:.3f} kWh per hour")
+        
+        # Log today's remaining hours if any
+        if len(today_predictions) > 0:
+            logger.info(f"\n📌 TODAY ({today.strftime('%A, %B %d, %Y')}) - Remaining {len(today_predictions)} hours")
+            logger.info(f"Predicted Usage: {today_total:.2f} kWh")
+            logger.info("-" * 80)
+            
+            if has_price_data:
+                logger.info(f"{'Hour':<6} {'Time':<8} {'Temp':<8} {'Cloud':<8} {'Predicted':<12} {'Price (€/kWh)':<15}")
+            else:
+                logger.info(f"{'Hour':<6} {'Time':<8} {'Temp':<8} {'Cloud':<8} {'Predicted':<12}")
+            logger.info("-" * 80)
+            
+            for _, row in results_df[results_df['date'] == today].iterrows():
+                hour_str = f"{int(row['hour']):02d}:00"
+                time_str = row['timestamp'].strftime('%H:%M')
+                temp_str = f"{row['temperature']:.1f}°C"
+                cloud_str = f"{row['cloud_cover']:.0f}%"
+                pred_str = f"{row['predicted_kwh']:.3f} kWh"
+                
+                if has_price_data:
+                    price_str = f"€{row['price']:.4f}"
+                    logger.info(f"{hour_str:<6} {time_str:<8} {temp_str:<8} {cloud_str:<8} {pred_str:<12} {price_str:<15}")
+                else:
+                    logger.info(f"{hour_str:<6} {time_str:<8} {temp_str:<8} {cloud_str:<8} {pred_str:<12}")
+        
+        # Log tomorrow's hours
+        logger.info(f"\n📌 TOMORROW ({tomorrow.strftime('%A, %B %d, %Y')})")
+        logger.info(f"Predicted Usage: {tomorrow_total:.2f} kWh")
         logger.info("-" * 80)
         
         if has_price_data:
@@ -208,7 +254,7 @@ class Prediction:
             logger.info(f"{'Hour':<6} {'Time':<8} {'Temp':<8} {'Cloud':<8} {'Predicted':<12}")
         logger.info("-" * 80)
         
-        for _, row in results_df.iterrows():
+        for _, row in results_df[results_df['date'] == tomorrow].iterrows():
             hour_str = f"{int(row['hour']):02d}:00"
             time_str = row['timestamp'].strftime('%H:%M')
             temp_str = f"{row['temperature']:.1f}°C"
@@ -221,7 +267,10 @@ class Prediction:
             else:
                 logger.info(f"{hour_str:<6} {time_str:<8} {temp_str:<8} {cloud_str:<8} {pred_str:<12}")
         
+        # Summary
         logger.info("-" * 80)
+        logger.info(f"Total Predicted Usage: {total_predicted:.2f} kWh")
+        logger.info(f"Validation MAE: {mae:.3f} kWh per hour")
         logger.info(f"Peak hour: {results_df.loc[results_df['predicted_kwh'].idxmax(), 'hour']:02.0f}:00 "
                    f"({results_df['predicted_kwh'].max():.3f} kWh)")
         logger.info(f"Lowest hour: {results_df.loc[results_df['predicted_kwh'].idxmin(), 'hour']:02.0f}:00 "
@@ -229,12 +278,17 @@ class Prediction:
         logger.info("=" * 80)
         
         # Export to CSV for debugging and web UI
-        results_df.to_csv("/app/tomorrow_hourly_predictions.csv", index=False)
-        logger.info("💾 Predictions saved to: /app/tomorrow_hourly_predictions.csv")
+        results_df.to_csv("/app/hourly_predictions.csv", index=False)
+        logger.info("💾 Predictions saved to: /app/hourly_predictions.csv")
         
-        # Export tomorrow's features for web UI download
-        future_df.to_csv("/app/tomorrow_features.csv", index=False)
-        logger.info("💾 Tomorrow's features saved to: /app/tomorrow_features.csv")
+        # Also save with legacy filename for backwards compatibility
+        tomorrow_results = results_df[results_df['date'] == tomorrow].copy()
+        tomorrow_results.to_csv("/app/tomorrow_hourly_predictions.csv", index=False)
+        logger.info("💾 Tomorrow's predictions saved to: /app/tomorrow_hourly_predictions.csv")
+        
+        # Export features for web UI download
+        future_df.to_csv("/app/forecast_features.csv", index=False)
+        logger.info("💾 Forecast features saved to: /app/forecast_features.csv")
         
         # Export full merged dataset for analysis
         merged_df.to_csv("/app/merged_historical_data.csv", index=False)

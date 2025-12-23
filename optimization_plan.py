@@ -58,7 +58,7 @@ async def main():
     price_history_manager = PriceHistoryManager(entsoe_token, entsoe_country) if entsoe_token else None
     
     prediction = Prediction(statistics_loader, weather, price_history_manager)
-    await prediction.calculateTomorrowsPowerUsage()
+    await prediction.calculatePowerUsage()
 
     # Create APScheduler instance
     scheduler = AsyncIOScheduler()

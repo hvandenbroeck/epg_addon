@@ -1,6 +1,7 @@
 import pulp
 import logging
 from datetime import datetime, timedelta
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +226,6 @@ def optimize_battery(prices, slot_minutes, charge_time_percentage, slot_to_time,
     # Use provided max_charge_price or calculate fallback from current horizon
     if max_charge_price is None:
         # Fallback: use 30th percentile of current horizon prices
-        import numpy as np
         max_charge_price = float(np.percentile(prices, 30))
         logger.info(f"🔋 Battery charge: using fallback threshold {max_charge_price:.4f} EUR/kWh (30th percentile of horizon)")
     else:
@@ -300,7 +300,6 @@ def optimize_bat_discharge(prices, slot_minutes, discharge_time_percentage, slot
     # Use provided min_discharge_price or calculate fallback from current horizon
     if min_discharge_price is None:
         # Fallback: use 70th percentile of current horizon prices
-        import numpy as np
         min_discharge_price = float(np.percentile(prices, 70))
         logger.info(f"🔋 Battery discharge: using fallback threshold {min_discharge_price:.4f} EUR/kWh (70th percentile of horizon)")
     else:

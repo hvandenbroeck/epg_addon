@@ -44,21 +44,24 @@ class Weather:
         
         logger.info(f"Location fetched successfully: lat={self.lat}, lon={self.lon}")
 
-    async def getTomorrowsHourlyWeather(self):
+    async def getUpcomingHourlyWeather(self):
         """
-        Returns a DataFrame with tomorrow's hourly weather forecast.
-        Columns: 'timestamp' (datetime), 'hour' (int), 'temperature' (Celsius), 'cloud_cover' (%)
+        Returns a DataFrame with weather forecast for remaining hours of today and all of tomorrow.
+        Columns: 'timestamp' (datetime), 'hour' (int), 'temperature' (Celsius), 'cloud_cover' (%), 'date'
         """
-        logger.info("Fetching tomorrow's hourly weather forecast")
+        logger.info("Fetching upcoming hourly weather forecast (today remaining + tomorrow)")
         # Ensure location is fetched
         await self._fetch_location()
 
-        # Get tomorrow's date
-        tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).date()
-        start_date = tomorrow.isoformat()
+        # Get date range: today through tomorrow
+        now = datetime.now(timezone.utc)
+        today = now.date()
+        current_hour = now.hour
+        tomorrow = today + timedelta(days=1)
+        start_date = today.isoformat()
         end_date = tomorrow.isoformat()
         
-        logger.debug(f"Querying Open-Meteo hourly forecast for date: {start_date}")
+        logger.debug(f"Querying Open-Meteo hourly forecast from {start_date} to {end_date}, filtering from hour {current_hour}")
         openmeteo_url = (
             f"https://api.open-meteo.com/v1/forecast?"
             f"latitude={self.lat}&longitude={self.lon}"
@@ -85,8 +88,15 @@ class Weather:
             'cloud_cover': cloud_cover
         })
         df['hour'] = df['timestamp'].dt.hour
+        df['date'] = df['timestamp'].dt.date
         
-        logger.info(f"Successfully fetched {len(df)} hours of tomorrow's weather forecast")
+        # Filter: keep remaining hours of today (current hour onwards) + all of tomorrow
+        df = df[
+            ((df['date'] == today) & (df['hour'] >= current_hour)) |
+            (df['date'] == tomorrow)
+        ].reset_index(drop=True)
+        
+        logger.info(f"Successfully fetched {len(df)} hours of upcoming weather forecast")
         return df
 
     async def getHistoricalHourlyWeather(self, days_back=365):
