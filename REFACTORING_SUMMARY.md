@@ -50,7 +50,7 @@ Successfully refactored the EPG Addon to use Pydantic BaseSettings for device co
 ## New Files Created
 
 1. **DEVICES_CONFIG_EXAMPLE.json** - Complete example with multiple devices
-   - Shows configuration for wp, hw, bat_charge, ev1, ev2
+   - Shows configuration for wp, hw, battery, ev1, ev2
    - Demonstrates different device types and configurations
 
 2. **DEVICES_CONFIG_MIGRATION.md** - Comprehensive migration guide
@@ -69,11 +69,16 @@ Successfully refactored the EPG Addon to use Pydantic BaseSettings for device co
 ```python
 class Device(BaseModel):
     name: str  # Required, unique identifier
-    type: DeviceType  # Enum: wp, hw, bat_charge, bat_discharge, ev
+    type: DeviceType  # Enum: wp, hw, battery, ev
     enable_load_management: bool = False
     load_management: Optional[LoadManagement] = None
     start: ActionSet = Field(default_factory=ActionSet)
     stop: ActionSet = Field(default_factory=ActionSet)
+    # Battery-specific actions
+    charge_start: Optional[ActionSet] = None
+    charge_stop: Optional[ActionSet] = None
+    discharge_start: Optional[ActionSet] = None
+    discharge_stop: Optional[ActionSet] = None
 ```
 
 ### 2. Multiple Devices Per Type

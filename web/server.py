@@ -92,9 +92,9 @@ def get_gantt():
     device_labels = {
         'wp': 'HP',  # Shortened for mobile
         'hw': 'HW',  # Shortened for mobile
-        'bat_charge': 'Bat+',
-        'bat_discharge': 'Bat-',
-        'bat': 'Bat',
+        'battery_charge': 'Bat+',
+        'battery_discharge': 'Bat-',
+        'battery': 'Bat',
         'ev': 'EV'
     }
     

@@ -57,8 +57,8 @@
       }
     },
     {
-      "name": "bat_charge",
-      "type": "bat_charge",
+      "name": "battery",
+      "type": "battery",
       "enable_load_management": true,
       "load_management": {
         "instantaneous_load_entity": "sensor.deye_battery_power",
@@ -80,7 +80,7 @@
           }
         }
       },
-      "start": {
+      "charge_start": {
         "entity": [
           {
             "service": "select/select_option",
@@ -89,12 +89,30 @@
           }
         ]
       },
-      "stop": {
+      "charge_stop": {
         "entity": [
           {
             "service": "select/select_option",
             "entity_id": "select.deye_prog1_charge",
             "option": "No Grid or Gen"
+          }
+        ]
+      },
+      "discharge_start": {
+        "entity": [
+          {
+            "service": "number/set_value",
+            "entity_id": "number.deye_prog1_capacity",
+            "value": 20
+          }
+        ]
+      },
+      "discharge_stop": {
+        "entity": [
+          {
+            "service": "number/set_value",
+            "entity_id": "number.deye_prog1_capacity",
+            "value": 80
           }
         ]
       }

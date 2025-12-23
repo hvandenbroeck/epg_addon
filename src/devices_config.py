@@ -2,7 +2,7 @@
 Device Configuration using Pydantic BaseSettings
 
 This module defines device configurations for Home Assistant integration.
-Devices are configured with unique names and types (wp, hw, bat_charge, bat_discharge, ev).
+Devices are configured with unique names and types (wp, hw, battery, ev).
 Multiple devices of the same type can be configured.
 
 Configuration is loaded from environment variables or config files.
@@ -16,7 +16,7 @@ import os
 
 
 # Device Types
-DeviceType = Literal["wp", "hw", "bat_charge", "bat_discharge", "ev"]
+DeviceType = Literal["wp", "hw", "battery", "ev"]
 
 
 # Action Models
@@ -69,8 +69,14 @@ class Device(BaseModel):
     type: DeviceType = Field(..., description="Device type")
     enable_load_management: bool = False
     load_management: Optional[LoadManagement] = None
+    # Generic start/stop actions (used by wp, hw, ev)
     start: ActionSet = Field(default_factory=ActionSet)
     stop: ActionSet = Field(default_factory=ActionSet)
+    # Battery-specific actions (only used when type='battery')
+    charge_start: Optional[ActionSet] = None
+    charge_stop: Optional[ActionSet] = None
+    discharge_start: Optional[ActionSet] = None
+    discharge_stop: Optional[ActionSet] = None
 
 
 class DevicesConfig(BaseSettings):
@@ -154,8 +160,8 @@ def load_default_config() -> DevicesConfig:
             ])
         ),
         Device(
-            name="bat_charge",
-            type="bat_charge",
+            name="battery",
+            type="battery",
             enable_load_management=True,
             load_management=LoadManagement(
                 instantaneous_load_entity="sensor.deye_battery_power",
@@ -175,7 +181,7 @@ def load_default_config() -> DevicesConfig:
                     ])
                 )
             ),
-            start=ActionSet(entity=[
+            charge_start=ActionSet(entity=[
                 EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=80),
                 EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=80),
                 EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=80),
@@ -189,20 +195,15 @@ def load_default_config() -> DevicesConfig:
                 EntityAction(service="select/select_option", entity_id="select.deye_prog5_charge", option="Allow Grid"),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog6_charge", option="Allow Grid"),
             ]),
-            stop=ActionSet(entity=[
+            charge_stop=ActionSet(entity=[
                 EntityAction(service="select/select_option", entity_id="select.deye_prog1_charge", option="No Grid or Gen"),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog2_charge", option="No Grid or Gen"),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog3_charge", option="No Grid or Gen"),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog4_charge", option="No Grid or Gen"),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog5_charge", option="No Grid or Gen"),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog6_charge", option="No Grid or Gen"),
-            ])
-        ),
-        Device(
-            name="bat_discharge",
-            type="bat_discharge",
-            enable_load_management=False,
-            start=ActionSet(entity=[
+            ]),
+            discharge_start=ActionSet(entity=[
                 EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=20),
                 EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=20),
                 EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=20),
@@ -216,7 +217,7 @@ def load_default_config() -> DevicesConfig:
                 EntityAction(service="select/select_option", entity_id="select.deye_prog5_charge", option="No Grid or Gen"),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog6_charge", option="No Grid or Gen"),
             ]),
-            stop=ActionSet(entity=[
+            discharge_stop=ActionSet(entity=[
                 EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=80),
                 EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=80),
                 EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=80),

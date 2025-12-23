@@ -50,8 +50,7 @@ Create or update `/data/options.json`:
 
 - `wp` - Heat Pump
 - `hw` - Hot Water  
-- `bat_charge` - Battery Charging
-- `bat_discharge` - Battery Discharging
+- `battery` - Battery (with separate charge/discharge actions)
 - `ev` - Electric Vehicle Charger
 
 ## 3. Basic Usage
@@ -159,8 +158,7 @@ Warning: Could not load devices config from /data/options.json: <error details>
 If `/data/options.json` doesn't exist or is invalid, the system loads default configuration with:
 - 1 wp device
 - 1 hw device  
-- 1 bat_charge device
-- 1 bat_discharge device
+- 1 battery device
 - 1 ev device
 
 ## 10. Testing Your Configuration

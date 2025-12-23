@@ -64,10 +64,38 @@ class Scheduler:
                 logger.error(f"❌ Invalid datetime in schedule: {e}")
                 continue
 
-            cfg = self.devices.get_device_config(device)
-            if not cfg:
-                logger.warning(f"⚠️ No config for '{device}'")
-                continue
+            # Handle battery charge/discharge entries (e.g., "battery_charge", "battery_discharge")
+            # These map to the same battery device but use different action sets
+            is_battery_charge = device.endswith('_charge')
+            is_battery_discharge = device.endswith('_discharge')
+            
+            if is_battery_charge or is_battery_discharge:
+                # Extract the actual device name (e.g., "battery" from "battery_charge")
+                base_device_name = device.rsplit('_', 1)[0]
+                cfg = self.devices.get_device_config(base_device_name)
+                if not cfg:
+                    logger.warning(f"⚠️ No config for battery device '{base_device_name}'")
+                    continue
+                
+                # Use battery-specific actions
+                if is_battery_charge:
+                    start_actions = cfg.charge_start.model_dump(exclude_none=True) if cfg.charge_start else {}
+                    stop_actions = cfg.charge_stop.model_dump(exclude_none=True) if cfg.charge_stop else {}
+                    action_type = "charge"
+                else:
+                    start_actions = cfg.discharge_start.model_dump(exclude_none=True) if cfg.discharge_start else {}
+                    stop_actions = cfg.discharge_stop.model_dump(exclude_none=True) if cfg.discharge_stop else {}
+                    action_type = "discharge"
+            else:
+                # Standard device handling (wp, hw, ev)
+                cfg = self.devices.get_device_config(device)
+                if not cfg:
+                    logger.warning(f"⚠️ No config for '{device}'")
+                    continue
+                start_actions = cfg.start.model_dump(exclude_none=True)
+                stop_actions = cfg.stop.model_dump(exclude_none=True)
+                action_type = None
+                base_device_name = device
 
             if end_time <= now:
                 logger.info(f"⏩ Skipping past event {device} ({start_time})")
@@ -75,10 +103,11 @@ class Scheduler:
 
             # Schedule start action if in the future
             if start_time > now and self.scheduler:
+                action_label = f"{action_type}_start" if action_type else "start"
                 self.scheduler.add_job(
                     self.devices.execute_device_action,
                     trigger=DateTrigger(run_date=start_time),
-                    args=[device, cfg.start.model_dump(exclude_none=True), "start", start_time],
+                    args=[base_device_name, start_actions, action_label, start_time],
                     id=f"{device}_start_device_{start_time.isoformat()}",
                     replace_existing=True
                 )
@@ -86,10 +115,11 @@ class Scheduler:
 
             # Schedule stop action if in the future
             if end_time > now and self.scheduler:
+                action_label = f"{action_type}_stop" if action_type else "stop"
                 self.scheduler.add_job(
                     self.devices.execute_device_action,
                     trigger=DateTrigger(run_date=end_time),
-                    args=[device, cfg.stop.model_dump(exclude_none=True), "stop", end_time],
+                    args=[base_device_name, stop_actions, action_label, end_time],
                     id=f"{device}_stop_device_{end_time.isoformat()}",
                     replace_existing=True
                 )

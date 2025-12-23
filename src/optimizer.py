@@ -305,10 +305,13 @@ class HeatpumpOptimizer:
                 hw_scheduled_starts = [horizon_start + timedelta(minutes=idx * slot_minutes) for idx in hw_slot_indices]
                 self._save_device_state(device_name, last_hw_end, hw_scheduled_starts)
 
-        # ===== BATTERY CHARGE OPTIMIZATION (iterate over all bat_charge devices) =====
-        bat_charge_devices = devices_config.get_devices_by_type('bat_charge')
-        for bat_device in bat_charge_devices:
+        # ===== BATTERY OPTIMIZATION (iterate over all battery devices) =====
+        # Battery devices have both charge and discharge schedules
+        battery_devices = devices_config.get_devices_by_type('battery')
+        for bat_device in battery_devices:
             device_name = bat_device.name
+            
+            # Optimize battery charging
             bat_charge_times = optimize_battery(
                 prices=prices,
                 slot_minutes=slot_minutes,
@@ -317,12 +320,10 @@ class HeatpumpOptimizer:
                 max_charge_price=max_charge_price,
                 price_difference_threshold=BAT_PRICE_DIFF_THRESHOLD
             )
-            results[device_name] = bat_charge_times
-        
-        # ===== BATTERY DISCHARGE OPTIMIZATION (iterate over all bat_discharge devices) =====
-        bat_discharge_devices = devices_config.get_devices_by_type('bat_discharge')
-        for bat_device in bat_discharge_devices:
-            device_name = bat_device.name
+            # Store charge times with a special key for scheduling
+            results[f"{device_name}_charge"] = bat_charge_times
+            
+            # Optimize battery discharging
             bat_discharge_times = optimize_bat_discharge(
                 prices=prices,
                 slot_minutes=slot_minutes,
@@ -331,7 +332,8 @@ class HeatpumpOptimizer:
                 min_discharge_price=min_discharge_price,
                 price_difference_threshold=BAT_PRICE_DIFF_THRESHOLD
             )
-            results[device_name] = bat_discharge_times
+            # Store discharge times with a special key for scheduling
+            results[f"{device_name}_discharge"] = bat_discharge_times
 
         # ===== EV OPTIMIZATION (iterate over all EV devices) =====
         ev_devices = devices_config.get_devices_by_type('ev')
@@ -350,10 +352,10 @@ class HeatpumpOptimizer:
                 device_block_minutes[device.name] = int(WP_BLOCK_HOURS * 60)
             elif device.type == 'hw':
                 device_block_minutes[device.name] = int(HW_BLOCK_HOURS * 60)
-            elif device.type == 'bat_charge':
-                device_block_minutes[device.name] = slot_minutes  # Single slot
-            elif device.type == 'bat_discharge':
-                device_block_minutes[device.name] = slot_minutes  # Single slot
+            elif device.type == 'battery':
+                # Battery has separate charge and discharge entries
+                device_block_minutes[f"{device.name}_charge"] = slot_minutes  # Single slot
+                device_block_minutes[f"{device.name}_discharge"] = slot_minutes  # Single slot
             elif device.type == 'ev':
                 device_block_minutes[device.name] = slot_minutes  # Single slot
         

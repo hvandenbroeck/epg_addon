@@ -61,7 +61,7 @@ class Devices:
         """Get all devices of a specific type.
         
         Args:
-            device_type: Type of device ('wp', 'hw', 'bat_charge', 'bat_discharge', 'ev')
+            device_type: Type of device ('wp', 'hw', 'battery', 'ev')
             
         Returns:
             List of Device objects

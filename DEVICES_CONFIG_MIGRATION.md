@@ -16,7 +16,7 @@ The device configuration has been rewritten to use **Pydantic BaseSettings**, pr
 
 **After:** Each device has:
 - **Unique name** (e.g., `"wp"`, `"ev1"`, `"ev2"`)
-- **Device type** (e.g., `"wp"`, `"hw"`, `"bat_charge"`, `"bat_discharge"`, `"ev"`)
+- **Device type** (e.g., `"wp"`, `"hw"`, `"battery"`, `"ev"`)
 
 ### 2. Configuration Location
 
@@ -51,8 +51,7 @@ See `DEVICES_CONFIG_EXAMPLE.json` for a complete example.
 Supported device types:
 - `wp` - Heat Pump (Water Pump)
 - `hw` - Hot Water
-- `bat_charge` - Battery Charging
-- `bat_discharge` - Battery Discharging
+- `battery` - Battery (with separate charge/discharge actions)
 - `ev` - Electric Vehicle Charger
 
 ### 4. Multiple Devices
@@ -85,11 +84,16 @@ You can now configure **multiple devices of the same type**. For example, two EV
 ```python
 class Device(BaseModel):
     name: str  # Unique device identifier
-    type: DeviceType  # wp, hw, bat_charge, bat_discharge, ev
+    type: DeviceType  # wp, hw, battery, ev
     enable_load_management: bool = False
     load_management: Optional[LoadManagement] = None
     start: ActionSet = Field(default_factory=ActionSet)
     stop: ActionSet = Field(default_factory=ActionSet)
+    # Battery-specific actions (only for type='battery')
+    charge_start: Optional[ActionSet] = None
+    charge_stop: Optional[ActionSet] = None
+    discharge_start: Optional[ActionSet] = None
+    discharge_stop: Optional[ActionSet] = None
 ```
 
 ### Action Models

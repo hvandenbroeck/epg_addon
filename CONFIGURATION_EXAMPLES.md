@@ -13,12 +13,12 @@ The addon automatically verifies device states and retries failed commands:
 - Entity: `value_check` (expected state), `state_attribute` (check attribute instead of state)
 - Switch services (`turn_on`/`turn_off`) auto-infer expected state ("on"/"off")
 
-## Example 1: Battery Charger with Efficiency Calculation
+## Example 1: Battery with Efficiency Calculation
 
 If your battery charger has 90% efficiency, you can automatically account for this:
 
 ```python
-"bat_charge": {
+"battery": {
     "enable_load_management": True,
     "load_management": {
         "apply_limit_actions": {
@@ -110,13 +110,13 @@ Control via MQTT with explicit verification topics:
 }
 ```
 
-## Example 4: Select Entity with Verification
+## Example 4: Battery Select Entity with Verification
 
 For select entities, verification uses the `option` value automatically:
 
 ```python
-"bat_charge": {
-    "start": {
+"battery": {
+    "charge_start": {
         "entity": [
             {
                 "service": "select/select_option",
@@ -126,7 +126,7 @@ For select entities, verification uses the `option` value automatically:
             }
         ]
     },
-    "stop": {
+    "charge_stop": {
         "entity": [
             {
                 "service": "select/select_option",
