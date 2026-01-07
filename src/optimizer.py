@@ -1,10 +1,23 @@
+"""Energy Optimization Orchestrator.
+
+This module coordinates the optimization workflow:
+1. Fetch prices from ENTSO-E
+2. Get device states from persistence
+3. Run optimization algorithms for each device type
+4. Save results and schedule actions
+
+The heavy lifting is delegated to specialized modules:
+- ha_client: Home Assistant API calls
+- device_state_manager: Device state persistence (TinyDB)
+- optimization/: Optimization algorithms
+"""
 import logging
 import json
 from datetime import datetime, timedelta
-import aiohttp
 from tinydb import TinyDB, Query
-import asyncio
 
+from .ha_client import HomeAssistantClient
+from .device_state_manager import DeviceStateManager
 from .devices import Devices
 from .scheduler import Scheduler
 from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, optimize_ev, limit_battery_cycles
@@ -21,12 +34,27 @@ logger = logging.getLogger(__name__)
 
 
 class HeatpumpOptimizer:
+    """Orchestrates energy optimization for heat pumps, batteries, and EVs.
+    
+    This class coordinates the optimization workflow by:
+    - Fetching electricity prices from ENTSO-E
+    - Calculating price thresholds from historical data
+    - Running device-specific optimization algorithms
+    - Saving schedules and triggering action scheduling
+    
+    The actual optimization algorithms are delegated to the optimization/ package,
+    while infrastructure concerns (HA API, persistence) are handled by specialized modules.
+    """
+
     def __init__(self, access_token, scheduler=None):
-        self.ha_url = CONFIG['options']['ha_url']
-        self.headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-        }
+        """Initialize the optimizer.
+        
+        Args:
+            access_token: Home Assistant Long-Lived Access Token
+            scheduler: Optional APScheduler instance for action scheduling
+        """
+        self.ha_client = HomeAssistantClient(access_token)
+        self.state_manager = DeviceStateManager()
         self.devices = Devices(access_token)
         self.scheduler_instance = Scheduler(scheduler, self.devices)
         
@@ -39,134 +67,47 @@ class HeatpumpOptimizer:
         self.price_history_manager = PriceHistoryManager(entsoe_token, entsoe_country) if entsoe_token else None
 
     async def get_state(self, entity_id):
-        """Get the state of an entity from Home Assistant."""
-        url = f"{self.ha_url}/api/states/{entity_id}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=self.headers) as response:
-                if response.status == 200:
-                    return await response.json()
-                return None
+        """Get the state of an entity from Home Assistant.
+        
+        Delegates to HomeAssistantClient for actual API call.
+        """
+        return await self.ha_client.get_state(entity_id)
 
     async def call_service(self, service, **service_data):
-        """Call a Home Assistant service."""
-        domain, service_name = service.split('/')
+        """Call a Home Assistant service.
         
-        url = f"{self.ha_url}/api/services/{domain}/{service_name}"
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=self.headers, json=service_data) as response:
-                return response.status == 200
+        Delegates to HomeAssistantClient for actual API call.
+        """
+        return await self.ha_client.call_service(service, **service_data)
 
     def _get_device_state(self, device):
-        """Get the last run state for a device from TinyDB.
+        """Get the last run state for a device.
         
-        Returns:
-            dict with 'last_run_end' (datetime or None) and 'locked_starts' (list of datetimes)
+        Delegates to DeviceStateManager for persistence operations.
         """
-        with TinyDB('db.json') as db:
-            state_doc = db.get(Query().id == f"{device}_state")
-        
-        if not state_doc:
-            return {'last_run_end': None, 'locked_starts': []}
-        
-        last_run_end = None
-        if state_doc.get('last_run_end'):
-            try:
-                last_run_end = datetime.fromisoformat(state_doc['last_run_end'])
-            except:
-                pass
-        
-        locked_starts = []
-        for start_str in state_doc.get('locked_starts', []):
-            try:
-                locked_starts.append(datetime.fromisoformat(start_str))
-            except:
-                pass
-        
-        return {'last_run_end': last_run_end, 'locked_starts': locked_starts}
+        return self.state_manager.get_device_state(device)
 
     def _save_device_state(self, device, last_run_end, scheduled_starts):
-        """Save device state to TinyDB for the next optimization run.
+        """Save device state for the next optimization run.
         
-        Args:
-            device: Device name (e.g., 'wp', 'hw')
-            last_run_end: datetime of when the last run ended (or will end)
-            scheduled_starts: list of datetime objects for scheduled start times
+        Delegates to DeviceStateManager for persistence operations.
         """
-        with TinyDB('db.json') as db:
-            state = {
-                'id': f"{device}_state",
-                'last_run_end': last_run_end.isoformat() if last_run_end else None,
-                'locked_starts': [s.isoformat() for s in scheduled_starts],
-                'updated_at': datetime.now().isoformat()
-            }
-            db.upsert(state, Query().id == f"{device}_state")
-        logger.debug(f"💾 Saved {device} state: last_run_end={last_run_end}, locked_starts={len(scheduled_starts)}")
+        self.state_manager.save_device_state(device, last_run_end, scheduled_starts)
 
     def _calculate_initial_gap(self, device, horizon_start, slot_minutes, block_hours):
         """Calculate how many slots since the device last ran.
         
-        Args:
-            device: Device name
-            horizon_start: datetime when the optimization horizon starts
-            slot_minutes: Duration of each slot in minutes
-            block_hours: Duration of each block in hours
-            
-        Returns:
-            Number of slots since last run ended (0 if currently running or just ended)
+        Delegates to DeviceStateManager for persistence operations.
         """
-        state = self._get_device_state(device)
-        last_run_end = state['last_run_end']
-        
-        if last_run_end is None:
-            # No previous run recorded - assume we need to run soon
-            # Return a moderate gap that won't force immediate run but will prioritize early
-            logger.info(f"📊 {device}: No previous run recorded, using default initial gap")
-            return int(4 * 60 / slot_minutes)  # Assume 4 hours gap
-        
-        if last_run_end >= horizon_start:
-            # Last run ends in the future (within or after horizon start)
-            logger.info(f"📊 {device}: Last run ends at {last_run_end}, horizon starts at {horizon_start}")
-            return 0
-        
-        # Calculate gap in slots
-        gap_minutes = (horizon_start - last_run_end).total_seconds() / 60
-        gap_slots = int(gap_minutes / slot_minutes)
-        logger.info(f"📊 {device}: Last run ended {gap_minutes:.0f} min ago ({gap_slots} slots)")
-        return gap_slots
+        return self.state_manager.calculate_initial_gap(device, horizon_start, slot_minutes, block_hours)
 
     def _get_locked_slots(self, device, horizon_start, lock_end_datetime, slot_minutes, block_hours):
         """Get slot indices that are locked (already scheduled and shouldn't be changed).
         
-        Locked slots are:
-        - Scheduled starts that fall within the lock window (now + lock_hours)
-        - Already executed starts
-        
-        Args:
-            device: Device name
-            horizon_start: datetime when horizon starts
-            lock_end_datetime: datetime until which slots are locked
-            slot_minutes: Duration of each slot
-            block_hours: Duration of each block in hours
-            
-        Returns:
-            Set of slot indices that are locked
+        Delegates to DeviceStateManager for persistence operations.
+        Note: block_hours is kept for API compatibility but not used in this delegation.
         """
-        state = self._get_device_state(device)
-        locked_starts = state['locked_starts']
-        
-        locked_slots = set()
-        for start_dt in locked_starts:
-            # Only lock if the start is:
-            # 1. Within the horizon
-            # 2. Before the lock end time
-            if start_dt >= horizon_start and start_dt < lock_end_datetime:
-                slot_idx = int((start_dt - horizon_start).total_seconds() / 60 / slot_minutes)
-                if slot_idx >= 0:
-                    locked_slots.add(slot_idx)
-                    logger.debug(f"🔒 {device}: Locked slot {slot_idx} (start at {start_dt})")
-        
-        return locked_slots
+        return self.state_manager.get_locked_slots(device, horizon_start, lock_end_datetime, slot_minutes)
 
     async def run_optimization(self):
         """Main optimization logic using rolling horizon."""
@@ -578,7 +519,7 @@ class HeatpumpOptimizer:
     async def _get_predicted_usage(self, slot_minutes):
         """Get predicted power usage interpolated to slot_minutes intervals."""
         try:
-            access_token = self.headers['Authorization'].replace('Bearer ', '')
+            access_token = self.ha_client.get_access_token()
             stats_loader = StatisticsLoader(access_token)
             weather = Weather(access_token)
             predictor = Prediction(stats_loader, weather, self.price_history_manager)
