@@ -121,7 +121,7 @@ def _evaluate_single_expression(expression, context):
 
 def _eval_node(node, safe_funcs):
     """Recursively evaluate an AST node with only safe operations."""
-    if isinstance(node, ast.Num):  # Python < 3.8
+    if isinstance(node, ast.Constant):  # Python < 3.8
         return node.n
     elif isinstance(node, ast.Constant):  # Python >= 3.8
         return node.value

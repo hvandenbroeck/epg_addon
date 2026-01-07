@@ -5,6 +5,14 @@
     <link rel="stylesheet" href="static/style.css">
 </head>
 <body>
+    <!-- Tab Navigation -->
+    <div class="tab-navigation">
+        <button class="tab-button active" onclick="switchTab('dashboard')">Dashboard</button>
+        <button class="tab-button" onclick="switchTab('debug')">Debug Logs</button>
+    </div>
+
+    <!-- Dashboard Tab -->
+    <div id="dashboard-tab" class="tab-content active">
     <div class="peak-display">
         <div class="peak-label">Current Power Peak</div>
         <div class="peak-value" id="peakValue">-- kW</div>
@@ -35,7 +43,263 @@
         <a href="download/entsoe_raw_prices.csv" download>Download entsoe_raw_prices.csv</a>
         <a href="download/entsoe_resampled_prices.csv" download>Download entsoe_resampled_prices.csv</a>
     </div>
+    </div>
+    <!-- End Dashboard Tab -->
+
+    <!-- Debug Logs Tab -->
+    <div id="debug-tab" class="tab-content">
+        <div class="debug-container">
+            <div class="debug-header">
+                <h2>Debug Logs</h2>
+                <div class="debug-controls">
+                    <div class="filter-group">
+                        <label for="levelFilter">Level:</label>
+                        <select id="levelFilter" onchange="updateLogs()">
+                            <option value="">All Levels</option>
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                            <option value="CRITICAL">CRITICAL</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="moduleFilter">Module:</label>
+                        <select id="moduleFilter" onchange="updateLogs()">
+                            <option value="">All Modules</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="searchFilter">Search:</label>
+                        <input type="text" id="searchFilter" placeholder="Search logs..." onkeyup="filterLogsClientSide()">
+                    </div>
+                    <div class="filter-group">
+                        <button onclick="updateLogs()" class="btn-refresh">🔄 Refresh</button>
+                        <button onclick="clearLogs()" class="btn-clear">🗑️ Clear All</button>
+                        <button onclick="toggleAutoRefresh()" class="btn-auto" id="autoRefreshBtn">⏸️ Auto-Refresh: ON</button>
+                    </div>
+                </div>
+            </div>
+            <div class="log-stats" id="logStats">Loading...</div>
+            <div class="log-container" id="logContainer">
+                <div class="loading">Loading logs...</div>
+            </div>
+            <div class="log-pagination">
+                <button onclick="loadMoreLogs()" id="loadMoreBtn">Load More</button>
+                <span id="logCount">0 logs displayed</span>
+            </div>
+        </div>
+    </div>
+    <!-- End Debug Logs Tab -->
+
     <script>
+        let currentTab = 'dashboard';
+        let autoRefreshInterval = null;
+        let autoRefreshEnabled = true;
+        let currentOffset = 0;
+        let allLogs = [];
+
+        function switchTab(tabName) {
+            currentTab = tabName;
+            
+            // Update tab buttons
+            document.querySelectorAll('.tab-button').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            // Update tab content
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.remove('active');
+            });
+            document.getElementById(tabName + '-tab').classList.add('active');
+            
+            // Load data for the tab
+            if (tabName === 'debug') {
+                updateLogs();
+                if (autoRefreshEnabled && !autoRefreshInterval) {
+                    autoRefreshInterval = setInterval(updateLogs, 10000); // Refresh every 10 seconds
+                }
+            } else {
+                // Stop auto-refresh when leaving debug tab
+                if (autoRefreshInterval) {
+                    clearInterval(autoRefreshInterval);
+                    autoRefreshInterval = null;
+                }
+            }
+        }
+
+        function toggleAutoRefresh() {
+            autoRefreshEnabled = !autoRefreshEnabled;
+            const btn = document.getElementById('autoRefreshBtn');
+            
+            if (autoRefreshEnabled) {
+                btn.textContent = '⏸️ Auto-Refresh: ON';
+                btn.classList.remove('btn-off');
+                if (currentTab === 'debug') {
+                    autoRefreshInterval = setInterval(updateLogs, 10000);
+                }
+            } else {
+                btn.textContent = '▶️ Auto-Refresh: OFF';
+                btn.classList.add('btn-off');
+                if (autoRefreshInterval) {
+                    clearInterval(autoRefreshInterval);
+                    autoRefreshInterval = null;
+                }
+            }
+        }
+
+        function updateLogs(append = false) {
+            const level = document.getElementById('levelFilter').value;
+            const module = document.getElementById('moduleFilter').value;
+            const offset = append ? currentOffset : 0;
+            
+            let url = `api/logs?limit=100&offset=${offset}`;
+            if (level) url += `&level=${level}`;
+            if (module) url += `&module=${module}`;
+            
+            fetch(url)
+                .then(response => response.json())
+                .then(data => {
+                    if (!append) {
+                        allLogs = data.logs;
+                        currentOffset = data.logs.length;
+                    } else {
+                        allLogs = allLogs.concat(data.logs);
+                        currentOffset += data.logs.length;
+                    }
+                    
+                    // Update module filter options
+                    const moduleFilter = document.getElementById('moduleFilter');
+                    const currentModule = moduleFilter.value;
+                    moduleFilter.innerHTML = '<option value="">All Modules</option>';
+                    data.unique_modules.forEach(mod => {
+                        if (mod) {
+                            const option = document.createElement('option');
+                            option.value = mod;
+                            option.textContent = mod;
+                            if (mod === currentModule) option.selected = true;
+                            moduleFilter.appendChild(option);
+                        }
+                    });
+                    
+                    // Update stats
+                    const stats = document.getElementById('logStats');
+                    const levelCounts = {};
+                    allLogs.forEach(log => {
+                        levelCounts[log.level] = (levelCounts[log.level] || 0) + 1;
+                    });
+                    stats.innerHTML = `
+                        <span class="stat-item">Total: <strong>${data.total}</strong></span>
+                        ${Object.entries(levelCounts).map(([lvl, count]) => 
+                            `<span class="stat-item stat-${lvl.toLowerCase()}">${lvl}: <strong>${count}</strong></span>`
+                        ).join('')}
+                    `;
+                    
+                    // Display logs
+                    displayLogs(allLogs);
+                    
+                    // Update load more button
+                    const loadMoreBtn = document.getElementById('loadMoreBtn');
+                    if (currentOffset >= data.total) {
+                        loadMoreBtn.style.display = 'none';
+                    } else {
+                        loadMoreBtn.style.display = 'inline-block';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching logs:', error);
+                    document.getElementById('logContainer').innerHTML = 
+                        '<div class="log-error">Error loading logs</div>';
+                });
+        }
+
+        function displayLogs(logs) {
+            const container = document.getElementById('logContainer');
+            const searchTerm = document.getElementById('searchFilter').value.toLowerCase();
+            
+            // Filter by search term on client side
+            let filteredLogs = logs;
+            if (searchTerm) {
+                filteredLogs = logs.filter(log => 
+                    log.message.toLowerCase().includes(searchTerm) ||
+                    log.module.toLowerCase().includes(searchTerm) ||
+                    log.filename.toLowerCase().includes(searchTerm)
+                );
+            }
+            
+            if (filteredLogs.length === 0) {
+                container.innerHTML = '<div class="no-logs">No logs match the current filters</div>';
+                document.getElementById('logCount').textContent = '0 logs displayed';
+                return;
+            }
+            
+            let html = '<table class="log-table"><thead><tr>' +
+                '<th>Time</th><th>Level</th><th>Module</th><th>Function</th><th>Line</th><th>Message</th>' +
+                '</tr></thead><tbody>';
+            
+            filteredLogs.forEach(log => {
+                const timestamp = new Date(log.timestamp);
+                const timeStr = timestamp.toLocaleString();
+                const levelClass = `log-level-${log.level.toLowerCase()}`;
+                
+                html += `
+                    <tr class="${levelClass}">
+                        <td class="log-time">${timeStr}</td>
+                        <td class="log-level"><span class="level-badge level-${log.level.toLowerCase()}">${log.level}</span></td>
+                        <td class="log-module" title="${log.filename}">${log.module}</td>
+                        <td class="log-func">${log.funcName}</td>
+                        <td class="log-line">${log.lineno}</td>
+                        <td class="log-message">${escapeHtml(log.message)}</td>
+                    </tr>
+                `;
+                
+                // Add exception info if present
+                if (log.exc_info) {
+                    html += `
+                        <tr class="log-exception">
+                            <td colspan="6"><pre>${escapeHtml(log.exc_info)}</pre></td>
+                        </tr>
+                    `;
+                }
+            });
+            
+            html += '</tbody></table>';
+            container.innerHTML = html;
+            document.getElementById('logCount').textContent = `${filteredLogs.length} logs displayed`;
+        }
+
+        function filterLogsClientSide() {
+            displayLogs(allLogs);
+        }
+
+        function loadMoreLogs() {
+            updateLogs(true);
+        }
+
+        function clearLogs() {
+            if (!confirm('Are you sure you want to clear all logs? This cannot be undone.')) {
+                return;
+            }
+            
+            fetch('api/logs/clear', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    alert('All logs cleared');
+                    updateLogs();
+                })
+                .catch(error => {
+                    console.error('Error clearing logs:', error);
+                    alert('Error clearing logs');
+                });
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
         function updatePeak() {
             fetch('api/peak')
                 .then(response => response.json())
