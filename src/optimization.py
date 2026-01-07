@@ -196,15 +196,15 @@ def optimize_hw(
     return [slot_to_time(i, slot_minutes) for i in starts]
 
 
-def optimize_battery(prices, slot_minutes, charge_time_percentage, slot_to_time, 
+def optimize_battery(prices, slot_minutes, slot_to_time, 
                      max_charge_price=None, price_difference_threshold=None):
     """
     Optimize battery charging periods using percentile-based price thresholds.
+    Returns all eligible charging slots (limiting is done in limit_battery_cycles).
     
     Args:
         prices: List of prices per slot
         slot_minutes: Duration of each slot in minutes
-        charge_time_percentage: Percentage of horizon time to use for charging (0.0-1.0)
         slot_to_time: Function to convert slot index to time
         max_charge_price: Maximum price threshold for charging (from historical percentile).
                          If None, uses fallback based on horizon prices.
@@ -214,13 +214,7 @@ def optimize_battery(prices, slot_minutes, charge_time_percentage, slot_to_time,
     Returns:
         List of start times for battery charging
     """
-    if not prices or charge_time_percentage <= 0:
-        return []
-    
-    # Calculate number of slots based on percentage
-    n_slots_to_use = max(1, int(len(prices) * charge_time_percentage))
-    
-    if n_slots_to_use <= 0:
+    if not prices:
         return []
     
     # Use provided max_charge_price or calculate fallback from current horizon
@@ -255,30 +249,30 @@ def optimize_battery(prices, slot_minutes, charge_time_percentage, slot_to_time,
         logger.warning(f"⚠️ No slots below max_charge_price={max_charge_price:.4f} EUR/kWh")
         return []
     
-    # Sort by price and take the cheapest n_slots_to_use
+    # Sort by price and return all eligible slots (limiting is done later)
     eligible_slots.sort(key=lambda x: x[1])
-    selected_slots = [slot for slot, _ in eligible_slots[:n_slots_to_use]]
+    selected_slots = [slot for slot, _ in eligible_slots]
     
     # Log selection info
     if selected_slots:
         avg_charge_price = sum(prices[i] for i in selected_slots) / len(selected_slots)
         min_price = min(prices[i] for i in selected_slots)
         max_selected_price = max(prices[i] for i in selected_slots)
-        logger.info(f"💰 Battery charge: selected {len(selected_slots)} slots "
+        logger.info(f"💰 Battery charge: selected {len(selected_slots)} eligible slots "
                    f"(avg={avg_charge_price:.4f}, range={min_price:.4f}-{max_selected_price:.4f} EUR/kWh)")
     
     return [slot_to_time(i, slot_minutes) for i in sorted(selected_slots)]
 
 
-def optimize_bat_discharge(prices, slot_minutes, discharge_time_percentage, slot_to_time,
+def optimize_bat_discharge(prices, slot_minutes, slot_to_time,
                            min_discharge_price=None, price_difference_threshold=None):
     """
     Optimize battery discharge periods using percentile-based price thresholds.
+    Returns all eligible discharge slots (limiting is done in limit_battery_cycles).
     
     Args:
         prices: List of prices per slot
         slot_minutes: Duration of each slot in minutes
-        discharge_time_percentage: Percentage of horizon time to use for discharging (0.0-1.0)
         slot_to_time: Function to convert slot index to time
         min_discharge_price: Minimum price threshold for discharging (from historical percentile).
                             If None, uses fallback based on horizon prices.
@@ -288,13 +282,7 @@ def optimize_bat_discharge(prices, slot_minutes, discharge_time_percentage, slot
     Returns:
         List of start times for battery discharge
     """
-    if not prices or discharge_time_percentage <= 0:
-        return []
-    
-    # Calculate number of discharge slots based on percentage
-    n_slots_to_use = max(1, int(len(prices) * discharge_time_percentage))
-    
-    if n_slots_to_use <= 0:
+    if not prices:
         return []
     
     # Use provided min_discharge_price or calculate fallback from current horizon
@@ -329,16 +317,16 @@ def optimize_bat_discharge(prices, slot_minutes, discharge_time_percentage, slot
         logger.warning(f"⚠️ No slots above min_discharge_price={min_discharge_price:.4f} EUR/kWh")
         return []
     
-    # Sort by price descending and take the highest n_slots_to_use
+    # Sort by price descending and return all eligible slots (limiting is done later)
     eligible_slots.sort(key=lambda x: x[1], reverse=True)
-    selected_slots = [slot for slot, _ in eligible_slots[:n_slots_to_use]]
+    selected_slots = [slot for slot, _ in eligible_slots]
     
     # Log selection info
     if selected_slots:
         avg_discharge_price = sum(prices[i] for i in selected_slots) / len(selected_slots)
         min_selected_price = min(prices[i] for i in selected_slots)
         max_price = max(prices[i] for i in selected_slots)
-        logger.info(f"💰 Battery discharge: selected {len(selected_slots)} slots "
+        logger.info(f"💰 Battery discharge: selected {len(selected_slots)} eligible slots "
                    f"(avg={avg_discharge_price:.4f}, range={min_selected_price:.4f}-{max_price:.4f} EUR/kWh)")
     
     return [slot_to_time(i, slot_minutes) for i in sorted(selected_slots)]
@@ -348,3 +336,167 @@ def optimize_ev(prices, slot_minutes, max_price, slot_to_time):
     """Optimize EV charging by selecting all timeslots where price is below threshold."""
     slots = [i for i in range(len(prices)) if prices[i] <= max_price]
     return [slot_to_time(i, slot_minutes) for i in slots]
+
+
+def limit_battery_cycles(
+    charge_times,
+    discharge_times,
+    slot_minutes,
+    horizon_start,
+    current_soc,
+    battery_capacity_kwh,
+    battery_charge_speed_kw,
+    min_soc_percent,
+    max_soc_percent,
+    prices=None,
+    predicted_power_usage=None,
+    device_name="battery"
+):
+    """
+    Limit battery charge and discharge times based on battery capacity and SOC constraints.
+    
+    Prioritizes cheapest slots for charging and most expensive for discharging,
+    while respecting SOC constraints over time.
+    
+    Args:
+        charge_times: List of charge start times (strings like "HH:MM")
+        discharge_times: List of discharge start times (strings like "HH:MM") 
+        slot_minutes: Duration of each slot in minutes
+        horizon_start: datetime when the horizon starts
+        current_soc: Current battery state of charge in percent (0-100), or None
+        battery_capacity_kwh: Battery capacity in kWh
+        battery_charge_speed_kw: Battery charge speed in kW
+        min_soc_percent: Minimum battery SOC in percent
+        max_soc_percent: Maximum battery SOC in percent
+        prices: List of prices per slot (used to prioritize cheap charge / expensive discharge)
+        predicted_power_usage: List of dicts with 'timestamp' and 'predicted_kwh' keys, or None
+        device_name: Name for logging purposes
+        
+    Returns:
+        Tuple of (limited_charge_times, limited_discharge_times)
+    """
+    if not charge_times and not discharge_times:
+        return [], []
+    
+    # Use current SOC or assume 0 % charged
+    if current_soc is None:
+        current_soc = 0
+        logger.warning(f"⚠️ {device_name}: No SOC available, assuming {current_soc:.1f}%")
+    
+    # Helper: convert time string to slot index
+    # Time strings are in HH:MM format relative to horizon_start (can exceed 23 hours)
+    def time_to_slot_idx(time_str):
+        hour, minute = map(int, time_str.split(':'))
+        total_minutes = hour * 60 + minute
+        return total_minutes // slot_minutes
+    
+    def slot_idx_to_time(slot_idx):
+        total_minutes = slot_idx * slot_minutes
+        return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+    
+    # Convert to slot indices
+    charge_slots = {time_to_slot_idx(t) for t in charge_times} if charge_times else set()
+    discharge_slots = {time_to_slot_idx(t) for t in discharge_times} if discharge_times else set()
+    
+    # Resolve conflicts - this shouldn't happen, but just in case
+    conflicts = charge_slots & discharge_slots
+    if conflicts:
+        logger.warning(f"⚠️ {device_name}: {len(conflicts)} slots have both charge and discharge, prioritizing discharge")
+        charge_slots -= conflicts
+    
+    if not charge_slots and not discharge_slots:
+        return [], []
+    
+    # Energy per slot when charging at full speed
+    slot_hours = slot_minutes / 60
+    charge_energy_per_slot = battery_charge_speed_kw * slot_hours
+    
+    # Build predicted usage lookup (slot_idx -> kWh usage per slot)
+    usage_by_slot = {}
+    if predicted_power_usage:
+        for pred in predicted_power_usage:
+            pred_time = pred['timestamp']
+            if isinstance(pred_time, str):
+                pred_time = datetime.fromisoformat(pred_time.replace('Z', '+00:00'))
+            if hasattr(pred_time, 'replace'):
+                pred_time = pred_time.replace(tzinfo=None)
+            slot_idx = int((pred_time - horizon_start).total_seconds() / 60 / slot_minutes)
+            if slot_idx >= 0:
+                usage_by_slot[slot_idx] = pred['predicted_kwh'] * slot_hours
+    
+    # Sort charge slots by price (cheapest first), discharge by price (most expensive first)
+    if prices:
+        charge_by_price = sorted(charge_slots, key=lambda s: prices[s] if s < len(prices) else float('inf'))
+        discharge_by_price = sorted(discharge_slots, key=lambda s: -prices[s] if s < len(prices) else float('-inf'))
+    else:
+        # Without prices, just use time order
+        charge_by_price = sorted(charge_slots)
+        discharge_by_price = sorted(discharge_slots)
+    
+    def simulate_soc(selected_charge, selected_discharge):
+        """Simulate SOC over time and return final SOC and feasibility."""
+        all_slots = sorted(selected_charge | selected_discharge)
+        soc = current_soc
+        for slot_idx in all_slots:
+            if slot_idx in selected_charge:
+                headroom = battery_capacity_kwh * (max_soc_percent - soc) / 100
+                if headroom < charge_energy_per_slot * 0.1:
+                    return None, False  # Can't charge - battery full
+                energy = min(charge_energy_per_slot, headroom)
+                soc += (energy / battery_capacity_kwh) * 100
+            elif slot_idx in selected_discharge:
+                available = battery_capacity_kwh * (soc - min_soc_percent) / 100
+                # Use battery's max discharge rate, not predicted usage
+                # (predicted usage is just a hint for prioritization, not a constraint)
+                discharge_energy = min(charge_energy_per_slot, available)
+                if available < charge_energy_per_slot * 0.1:
+                    return None, False  # Can't discharge - battery empty
+                soc -= (discharge_energy / battery_capacity_kwh) * 100
+        return soc, True
+    
+    # Greedy selection: add slots in price order if they keep the schedule feasible
+    selected_charge = set()
+    selected_discharge = set()
+    
+    logger.info(f"🔋 {device_name}: Starting SOC limiting - current_soc={current_soc:.1f}%, "
+                f"{len(charge_slots)} charge candidates, {len(discharge_slots)} discharge candidates")
+    
+    # First add discharge slots (most expensive first)
+    for slot_idx in discharge_by_price:
+        candidate = selected_discharge | {slot_idx}
+        final_soc, feasible = simulate_soc(selected_charge, candidate)
+        if feasible:
+            selected_discharge = candidate
+            logger.debug(f"🔋 {device_name}: Added discharge slot {slot_idx}, final_soc={final_soc:.1f}%")
+        else:
+            logger.debug(f"🔋 {device_name}: Rejected discharge slot {slot_idx} (infeasible)")
+    
+    # Then add charge slots (cheapest first) - this also enables more discharge
+    for slot_idx in charge_by_price:
+        candidate = selected_charge | {slot_idx}
+        _, feasible = simulate_soc(candidate, selected_discharge)
+        if feasible:
+            selected_charge = candidate
+            # Re-check if we can add more discharge slots now that we have more charge
+            for d_slot in discharge_by_price:
+                if d_slot not in selected_discharge:
+                    d_candidate = selected_discharge | {d_slot}
+                    _, d_feasible = simulate_soc(selected_charge, d_candidate)
+                    if d_feasible:
+                        selected_discharge = d_candidate
+    
+    # Convert back to time strings
+    limited_charge_times = sorted([slot_idx_to_time(s) for s in selected_charge])
+    limited_discharge_times = sorted([slot_idx_to_time(s) for s in selected_discharge])
+    
+    # Log results with price info if available
+    if prices and selected_charge:
+        avg_charge_price = sum(prices[s] for s in selected_charge if s < len(prices)) / len(selected_charge)
+        logger.info(f"🔋 {device_name}: Selected {len(selected_charge)} charge slots (avg price: {avg_charge_price:.4f})")
+    if prices and selected_discharge:
+        avg_discharge_price = sum(prices[s] for s in selected_discharge if s < len(prices)) / len(selected_discharge)
+        logger.info(f"🔋 {device_name}: Selected {len(selected_discharge)} discharge slots (avg price: {avg_discharge_price:.4f})")
+    
+    logger.info(f"🔋 {device_name}: Final - {len(limited_charge_times)} charge, {len(limited_discharge_times)} discharge slots")
+    
+    return limited_charge_times, limited_discharge_times

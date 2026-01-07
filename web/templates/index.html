@@ -14,6 +14,12 @@
         <div class="peak-label" style="margin-top: 10px; font-size: 14px;">Max Peak: <span id="maxPeak">--</span> kW</div>
         <div class="peak-timestamp" id="peakTimestamp">Loading...</div>
     </div>
+    <div class="battery-thresholds">
+        <h2>Battery Price Thresholds</h2>
+        <div id="batteryThresholdsContent">
+            <div class="loading">Loading thresholds...</div>
+        </div>
+    </div>
     <div class="device-limits">
         <h2>Device Load Limits</h2>
         <div id="deviceLimitsContent">
@@ -183,6 +189,56 @@
                 });
         }
 
+        function updateBatteryThresholds() {
+            fetch('api/battery_thresholds')
+                .then(response => response.json())
+                .then(data => {
+                    const container = document.getElementById('batteryThresholdsContent');
+                    
+                    if (!data.max_charge_price && !data.min_discharge_price) {
+                        container.innerHTML = '<div class="no-limits">No battery thresholds calculated yet</div>';
+                        return;
+                    }
+                    
+                    const maxCharge = data.max_charge_price !== null ? data.max_charge_price.toFixed(4) : '--';
+                    const minDischarge = data.min_discharge_price !== null ? data.min_discharge_price.toFixed(4) : '--';
+                    const historyDays = data.price_history_days || '--';
+                    const chargePercentile = data.charge_percentile || '--';
+                    const dischargePercentile = data.discharge_percentile || '--';
+                    const priceDiff = data.price_diff_threshold !== null ? data.price_diff_threshold.toFixed(4) : '--';
+                    
+                    let html = `
+                        <div class="threshold-grid">
+                            <div class="threshold-card charge">
+                                <div class="threshold-title">Max Charge Price</div>
+                                <div class="threshold-value">€${maxCharge}/kWh</div>
+                                <div class="threshold-detail">≤ ${chargePercentile}th percentile</div>
+                            </div>
+                            <div class="threshold-card discharge">
+                                <div class="threshold-title">Min Discharge Price</div>
+                                <div class="threshold-value">€${minDischarge}/kWh</div>
+                                <div class="threshold-detail">≥ ${dischargePercentile}th percentile</div>
+                            </div>
+                        </div>
+                        <div class="threshold-info">
+                            Based on ${historyDays} days of price history | Price diff threshold: €${priceDiff}/kWh
+                        </div>
+                    `;
+                    
+                    if (data.updated_at) {
+                        const date = new Date(data.updated_at);
+                        html += `<div class="threshold-timestamp">Last updated: ${date.toLocaleString()}</div>`;
+                    }
+                    
+                    container.innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Error fetching battery thresholds:', error);
+                    document.getElementById('batteryThresholdsContent').innerHTML = 
+                        '<div class="no-limits">Error loading battery thresholds</div>';
+                });
+        }
+
         function updateChart() {
             fetch('api/gantt')
                 .then(response => response.text())
@@ -212,11 +268,13 @@
         // Update on load
         updatePeak();
         updateDeviceLimits();
+        updateBatteryThresholds();
         updateChart();
         
         // Update peak and device limits every 30 seconds, chart every minute
         setInterval(updatePeak, 30000);
         setInterval(updateDeviceLimits, 30000);
+        setInterval(updateBatteryThresholds, 60000);
         setInterval(updateChart, 60000);
     </script>
 </body>

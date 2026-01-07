@@ -30,6 +30,34 @@ def get_results():
         schedule_docs = db.search(Query().id == 'schedule')
     return schedule_docs
 
+@app.route('/api/battery_thresholds')
+def get_battery_thresholds():
+    """Return battery price thresholds"""
+    with TinyDB('db.json') as db:
+        schedule_docs = db.search(Query().id == 'schedule')
+    
+    if schedule_docs and 'battery_price_thresholds' in schedule_docs[0]:
+        thresholds = schedule_docs[0]['battery_price_thresholds']
+        updated_at = schedule_docs[0].get('updated_at', '')
+        return jsonify({
+            'max_charge_price': thresholds.get('max_charge_price'),
+            'min_discharge_price': thresholds.get('min_discharge_price'),
+            'price_history_days': thresholds.get('price_history_days'),
+            'charge_percentile': thresholds.get('charge_percentile'),
+            'discharge_percentile': thresholds.get('discharge_percentile'),
+            'price_diff_threshold': thresholds.get('price_diff_threshold'),
+            'updated_at': updated_at
+        })
+    return jsonify({
+        'max_charge_price': None,
+        'min_discharge_price': None,
+        'price_history_days': None,
+        'charge_percentile': None,
+        'discharge_percentile': None,
+        'price_diff_threshold': None,
+        'updated_at': ''
+    })
+
 @app.route('/api/peak')
 def get_peak():
     """Return current peak power consumption"""
@@ -87,6 +115,7 @@ def get_gantt():
         return fig.to_html(include_plotlyjs=True, full_html=False)
     
     schedule = schedule_docs[0]['schedule']
+    original_battery_schedule = schedule_docs[0].get('original_battery_schedule', [])
     
     # Device labels and colors
     device_labels = {
@@ -95,7 +124,10 @@ def get_gantt():
         'battery_charge': 'Bat+',
         'battery_discharge': 'Bat-',
         'battery': 'Bat',
-        'ev': 'EV'
+        'ev': 'EV',
+        # Original planned battery times (for display only)
+        'battery_charge_planned': 'Bat+ Plan',
+        'battery_discharge_planned': 'Bat- Plan'
     }
     
     device_colors = {
@@ -104,11 +136,31 @@ def get_gantt():
         'Bat+': '#45B7D1',
         'Bat-': '#FFA07A',
         'Bat': '#95E1D3',
-        'EV': '#9B59B6'
+        'EV': '#9B59B6',
+        # Lighter/dashed colors for planned (original) battery times
+        'Bat+ Plan': '#A8D8E6',  # Lighter blue
+        'Bat- Plan': '#FFD4B8'   # Lighter orange
     }
     
     # Prepare data for timeline
     df_list = []
+    
+    # First add original battery schedule (planned times) - these appear first/on top
+    for entry in original_battery_schedule:
+        device = entry.get('device')
+        start = entry.get('start')
+        stop = entry.get('stop')
+        
+        if device and start and stop:
+            task_name = device_labels.get(device, device)
+            df_list.append({
+                'Task': task_name,
+                'Start': pd.to_datetime(start),
+                'Finish': pd.to_datetime(stop),
+                'Type': 'Planned'
+            })
+    
+    # Then add actual schedule entries
     for entry in schedule:
         device = entry.get('device')
         start = entry.get('start')
@@ -119,7 +171,8 @@ def get_gantt():
             df_list.append({
                 'Task': task_name,
                 'Start': pd.to_datetime(start),
-                'Finish': pd.to_datetime(stop)
+                'Finish': pd.to_datetime(stop),
+                'Type': 'Actual'
             })
     
     if not df_list:

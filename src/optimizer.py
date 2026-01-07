@@ -7,12 +7,15 @@ import asyncio
 
 from .devices import Devices
 from .scheduler import Scheduler
-from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, optimize_ev
+from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, optimize_ev, limit_battery_cycles
 from .utils import slot_to_time, slots_to_iso_ranges, merge_sequential_timeslots, time_to_slot
 from .config import CONFIG
 from .price_fetcher import EntsoeePriceFetcher
 from .devices_config import devices_config
 from .forecasting.price_history import PriceHistoryManager
+from .forecasting.statistics_loader import StatisticsLoader
+from .forecasting.weather import Weather
+from .forecasting.prediction import Prediction
 
 logger = logging.getLogger(__name__)
 
@@ -181,21 +184,16 @@ class HeatpumpOptimizer:
         HW_MIN_GAP_HOURS = 6    # Minimum gap between runs
         HW_MAX_GAP_HOURS = 12   # Maximum gap between runs
 
-        # Battery configuration - percentage-based
-        BAT_CHARGE_TIME_PCT = CONFIG['options'].get('battery_charge_time_percentage', 0.25)
-        BAT_DISCHARGE_TIME_PCT = CONFIG['options'].get('battery_discharge_time_percentage', 0.25)
-        
         # Battery percentile configuration (for dynamic price thresholds)
         BAT_PRICE_HISTORY_DAYS = CONFIG['options'].get('battery_price_history_days', 14)
         BAT_CHARGE_PERCENTILE = CONFIG['options'].get('battery_charge_percentile', 30)
         BAT_DISCHARGE_PERCENTILE = CONFIG['options'].get('battery_discharge_percentile', 70)
         BAT_PRICE_DIFF_THRESHOLD = CONFIG['options'].get('battery_price_difference_threshold', 0.10)
 
-        EV_MAX_PRICE = 0.02  # 6 cents per kWh
+        EV_MAX_PRICE = 0.09  # 10 cents per kWh
 
         logger.info("🔎 Starting energy optimization using ENTSO-E prices (rolling horizon)...")
-        logger.info(f"🔋 Battery optimization settings: charge_pct={BAT_CHARGE_TIME_PCT:.0%}, "
-                   f"discharge_pct={BAT_DISCHARGE_TIME_PCT:.0%}, "
+        logger.info(f"🔋 Battery optimization settings: "
                    f"history_days={BAT_PRICE_HISTORY_DAYS}, "
                    f"charge_percentile={BAT_CHARGE_PERCENTILE}, discharge_percentile={BAT_DISCHARGE_PERCENTILE}, "
                    f"price_diff_threshold={BAT_PRICE_DIFF_THRESHOLD:.4f} EUR/kWh")
@@ -307,32 +305,37 @@ class HeatpumpOptimizer:
 
         # ===== BATTERY OPTIMIZATION (iterate over all battery devices) =====
         # Battery devices have both charge and discharge schedules
+        # We store ORIGINAL times from price optimization (for display) and LIMITED times (for scheduling)
+        original_battery_times = {}  # Store original times before SOC limiting
+        
         battery_devices = devices_config.get_devices_by_type('battery')
         for bat_device in battery_devices:
             device_name = bat_device.name
             
-            # Optimize battery charging
+            # Optimize battery charging based on price thresholds
             bat_charge_times = optimize_battery(
                 prices=prices,
                 slot_minutes=slot_minutes,
-                charge_time_percentage=BAT_CHARGE_TIME_PCT,
                 slot_to_time=slot_to_time,
                 max_charge_price=max_charge_price,
                 price_difference_threshold=BAT_PRICE_DIFF_THRESHOLD
             )
-            # Store charge times with a special key for scheduling
-            results[f"{device_name}_charge"] = bat_charge_times
             
-            # Optimize battery discharging
+            # Optimize battery discharging based on price thresholds
             bat_discharge_times = optimize_bat_discharge(
                 prices=prices,
                 slot_minutes=slot_minutes,
-                discharge_time_percentage=BAT_DISCHARGE_TIME_PCT,
                 slot_to_time=slot_to_time,
                 min_discharge_price=min_discharge_price,
                 price_difference_threshold=BAT_PRICE_DIFF_THRESHOLD
             )
-            # Store discharge times with a special key for scheduling
+            
+            # Store ORIGINAL times (before SOC limiting) for informative display
+            original_battery_times[f"{device_name}_charge_planned"] = list(bat_charge_times) if bat_charge_times else []
+            original_battery_times[f"{device_name}_discharge_planned"] = list(bat_discharge_times) if bat_discharge_times else []
+            
+            # Store in results (will be overwritten with limited times below)
+            results[f"{device_name}_charge"] = bat_charge_times
             results[f"{device_name}_discharge"] = bat_discharge_times
 
         # ===== EV OPTIMIZATION (iterate over all EV devices) =====
@@ -342,7 +345,7 @@ class HeatpumpOptimizer:
             ev_times = optimize_ev(prices, slot_minutes, EV_MAX_PRICE, slot_to_time)
             results[device_name] = ev_times
 
-        logger.info(f"⚙️ Optimization Results: {json.dumps(results)}")
+        logger.info(f"⚙️ Optimization Results (before SOC limiting): {json.dumps(results)}")
 
         # Convert results to ISO time ranges for scheduling
         # Build device_block_minutes dynamically based on device type
@@ -370,18 +373,229 @@ class HeatpumpOptimizer:
                 ))
 
         iso_times_merged = merge_sequential_timeslots(iso_times)
+        
+        # Also convert original battery times to ISO ranges for display on Gantt chart
+        original_iso_times = []
+        for device_key, times in original_battery_times.items():
+            if times:
+                original_iso_times.append(slots_to_iso_ranges(
+                    times, device_key, horizon_start.date(), horizon_start,
+                    block_minutes=slot_minutes
+                ))
+        original_iso_times_merged = merge_sequential_timeslots(original_iso_times)
 
-        # Save schedule to TinyDB
+        # Save schedule to TinyDB (without limited times yet - will be added by recalculate)
         with TinyDB('db.json') as db:
             db.upsert({
                 "id": "schedule",
-                "schedule": iso_times_merged,
+                "schedule": iso_times_merged,  # Will be updated with limited times
+                "original_battery_schedule": original_iso_times_merged,  # Original price-based times for display
                 "horizon_start": horizon_start.isoformat(),
                 "horizon_end": horizon_end.isoformat(),
-                "updated_at": datetime.now().isoformat()
+                "prices": prices,  # Store prices for recalculation
+                "slot_minutes": slot_minutes,
+                "updated_at": datetime.now().isoformat(),
+                "battery_price_thresholds": {
+                    "max_charge_price": max_charge_price,
+                    "min_discharge_price": min_discharge_price,
+                    "price_history_days": BAT_PRICE_HISTORY_DAYS,
+                    "charge_percentile": BAT_CHARGE_PERCENTILE,
+                    "discharge_percentile": BAT_DISCHARGE_PERCENTILE,
+                    "price_diff_threshold": BAT_PRICE_DIFF_THRESHOLD
+                }
             }, Query().id == "schedule")
         
         logger.info(f"✅ Optimization complete. Schedule saved to TinyDB.")
         
+        # Run initial battery cycle limiting based on current SOC
+        await self.recalculate_battery_limits()
+        
         # Schedule actions from database
         await self.scheduler_instance.schedule_actions()
+
+    async def recalculate_battery_limits(self):
+        """Recalculate battery cycle limits based on current SOC.
+        
+        Called after optimization and every 15 minutes to adapt to actual SOC changes.
+        """
+        logger.info("🔋 Recalculating battery cycle limits based on current SOC...")
+        
+        # Load schedule from database
+        with TinyDB('db.json') as db:
+            schedule_doc = db.get(Query().id == "schedule")
+        
+        # Validate schedule exists and has required data
+        if not schedule_doc or not schedule_doc.get('horizon_start') or not schedule_doc.get('prices'):
+            logger.warning("⚠️ No valid schedule found, skipping recalculation")
+            return
+        
+        # Parse schedule parameters
+        horizon_start = datetime.fromisoformat(schedule_doc['horizon_start'])
+        horizon_end = datetime.fromisoformat(schedule_doc['horizon_end'])
+        
+        # Skip if optimization horizon has expired
+        if datetime.now() >= horizon_end:
+            logger.info("📅 Horizon expired, skipping recalculation")
+            return
+        
+        prices = schedule_doc['prices']
+        slot_minutes = schedule_doc.get('slot_minutes', 15)
+        original_battery_schedule = schedule_doc.get('original_battery_schedule', [])
+        predicted_usage = await self._get_predicted_usage(slot_minutes)
+        
+        # Keep all non-battery entries from current schedule
+        new_schedule = [
+            entry for entry in schedule_doc.get('schedule', [])
+            if not (entry.get('device', '').endswith('_charge') or 
+                   entry.get('device', '').endswith('_discharge'))
+        ]
+        
+        # Process each battery device
+        for bat_device in devices_config.get_devices_by_type('battery'):
+            # Get current SOC (or use 50% as fallback)
+            current_soc = await self._get_battery_soc(bat_device)
+            
+            # Extract original times from stored schedule
+            original_charge = self._extract_times(original_battery_schedule, f"{bat_device.name}_charge_planned", horizon_start, slot_minutes)
+            original_discharge = self._extract_times(original_battery_schedule, f"{bat_device.name}_discharge_planned", horizon_start, slot_minutes)
+            
+            # Filter out past timeslots before applying cycle limiting
+            original_charge = self._filter_future_times(original_charge, horizon_start, slot_minutes)
+            original_discharge = self._filter_future_times(original_discharge, horizon_start, slot_minutes)
+            
+            if original_charge or original_discharge:
+                logger.debug(f"🕐 {bat_device.name}: Processing {len(original_charge)} charge and {len(original_discharge)} discharge future slots")
+            
+            # Apply SOC-based cycle limiting if battery config is complete
+            if bat_device.battery_capacity_kwh and bat_device.battery_charge_speed_kw:
+                limited_charge, limited_discharge = limit_battery_cycles(
+                    charge_times=original_charge,
+                    discharge_times=original_discharge,
+                    slot_minutes=slot_minutes,
+                    horizon_start=horizon_start,
+                    current_soc=current_soc,
+                    battery_capacity_kwh=bat_device.battery_capacity_kwh,
+                    battery_charge_speed_kw=bat_device.battery_charge_speed_kw,
+                    min_soc_percent=bat_device.battery_min_soc_percent or 20.0,
+                    max_soc_percent=bat_device.battery_max_soc_percent or 80.0,
+                    prices=prices,
+                    predicted_power_usage=predicted_usage,
+                    device_name=bat_device.name
+                )
+            else:
+                # Use original times if battery not fully configured
+                logger.warning(f"⚠️ {bat_device.name}: Missing battery config, using original times")
+                limited_charge, limited_discharge = original_charge, original_discharge
+            
+            # Add limited times to schedule
+            new_schedule.extend(self._times_to_schedule(limited_charge, f"{bat_device.name}_charge", horizon_start, slot_minutes))
+            new_schedule.extend(self._times_to_schedule(limited_discharge, f"{bat_device.name}_discharge", horizon_start, slot_minutes))
+        
+        # Merge and save updated schedule
+        new_schedule = merge_sequential_timeslots([new_schedule])
+        schedule_doc['schedule'] = new_schedule
+        schedule_doc['last_soc_recalc'] = datetime.now().isoformat()
+        
+        with TinyDB('db.json') as db:
+            db.upsert(schedule_doc, Query().id == "schedule")
+        
+        logger.info(f"✅ Battery limits recalculated ({len(new_schedule)} entries)")
+        await self.scheduler_instance.schedule_actions()
+
+    async def _get_battery_soc(self, bat_device):
+        """Get current battery SOC, return 50% as fallback."""
+        if bat_device.battery_soc_entity:
+            state = await self.get_state(bat_device.battery_soc_entity)
+            if state and state.get('state') not in ('unknown', 'unavailable'):
+                try:
+                    soc = float(state['state'])
+                    logger.info(f"🔋 {bat_device.name}: SOC {soc:.1f}%")
+                    return soc
+                except (ValueError, TypeError):
+                    pass
+        
+        logger.warning(f"⚠️ {bat_device.name}: Using fallback SOC 50%")
+        return 50.0
+
+    def _filter_future_times(self, time_list, horizon_start, slot_minutes):
+        """Filter out past timeslots from a list of time strings.
+        
+        Args:
+            time_list: List of time strings in HH:MM format (relative to horizon_start)
+            horizon_start: Datetime of horizon start
+            slot_minutes: Duration of each slot in minutes
+            
+        Returns:
+            List of time strings that are in the future
+        """
+        if not time_list:
+            return []
+        
+        now = datetime.now()
+        future_times = []
+        
+        for time_str in time_list:
+            hour, minute = map(int, time_str.split(':'))
+            total_minutes = hour * 60 + minute
+            slot_datetime = horizon_start + timedelta(minutes=total_minutes)
+            
+            if slot_datetime >= now:
+                future_times.append(time_str)
+        
+        return future_times
+    
+    def _extract_times(self, schedule, device_key, horizon_start, slot_minutes):
+        """Extract future time slots for a device from schedule.
+        
+        Expands merged blocks back into individual slot times.
+        """
+        times = []
+        now = datetime.now()
+        
+        for entry in schedule:
+            if entry.get('device') == device_key:
+                start = datetime.fromisoformat(entry['start'])
+                stop = datetime.fromisoformat(entry['stop'])
+                
+                # Expand merged blocks into individual slots
+                current = start
+                slot_delta = timedelta(minutes=slot_minutes)
+                
+                while current < stop and current >= now:
+                    # Convert to HH:MM format relative to horizon
+                    minutes_from_horizon = int((current - horizon_start).total_seconds() / 60)
+                    times.append(f"{minutes_from_horizon // 60:02d}:{minutes_from_horizon % 60:02d}")
+                    current += slot_delta
+        
+        return times
+
+    def _times_to_schedule(self, times, device_key, horizon_start, slot_minutes):
+        """Convert time strings to ISO schedule entries."""
+        return slots_to_iso_ranges(
+            times, device_key, horizon_start.date(), horizon_start, block_minutes=slot_minutes
+        ) if times else []
+
+    async def _get_predicted_usage(self, slot_minutes):
+        """Get predicted power usage interpolated to slot_minutes intervals."""
+        try:
+            access_token = self.headers['Authorization'].replace('Bearer ', '')
+            stats_loader = StatisticsLoader(access_token)
+            weather = Weather(access_token)
+            predictor = Prediction(stats_loader, weather, self.price_history_manager)
+            
+            predicted_df = await predictor.calculatePowerUsage()
+            if predicted_df is not None and len(predicted_df) > 0:
+                # Interpolate hourly predictions to slot_minutes intervals
+                predicted_df = predicted_df.set_index('timestamp')
+                predicted_df = predicted_df.resample(f'{slot_minutes}min').interpolate(method='linear')
+                predicted_df = predicted_df.reset_index()
+                
+                # Convert from kWh per hour to kWh per slot
+                predicted_df['predicted_kwh'] = predicted_df['predicted_kwh'] * (slot_minutes / 60)
+                
+                usage = predicted_df[['timestamp', 'predicted_kwh']].to_dict('records')
+                logger.debug(f"🔋 Retrieved {len(usage)} {slot_minutes}-min slots of predicted power usage")
+                return usage
+        except Exception as e:
+            logger.warning(f"⚠️ Could not get predicted power usage: {e}")
+        return None

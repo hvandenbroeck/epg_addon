@@ -108,6 +108,27 @@ async def main():
     )
     logger.info("Daily optimization scheduled for 16:05 Europe/Brussels")
 
+    # Schedule battery SOC recalculation every 15 minutes
+    async def scheduled_battery_recalc():
+        logger.info("🔋 Running scheduled battery SOC recalculation...")
+        try:
+            await optimizer.recalculate_battery_limits()
+            logger.info("✅ Battery SOC recalculation completed successfully")
+        except Exception as e:
+            logger.error(f"❌ Error during battery SOC recalculation: {e}", exc_info=True)
+
+    scheduler.add_job(
+        scheduled_battery_recalc,
+        'cron',
+        minute='*/1',
+        timezone='Europe/Brussels',
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=60,
+        id='battery_soc_recalc'
+    )
+    logger.info("Battery SOC recalculation scheduled every 15 minutes (Europe/Brussels)")
+
     # Schedule load watcher to run every N minutes on the N-minute marks
     load_watcher_interval = CONFIG["options"].get("load_watcher_interval_minutes", 5)
 

@@ -77,6 +77,12 @@ class Device(BaseModel):
     charge_stop: Optional[ActionSet] = None
     discharge_start: Optional[ActionSet] = None
     discharge_stop: Optional[ActionSet] = None
+    # Battery-specific configuration (only used when type='battery')
+    battery_soc_entity: Optional[str] = Field(default=None, description="Home Assistant entity for battery state of charge (%)")
+    battery_capacity_kwh: Optional[float] = Field(default=None, description="Battery capacity in kWh")
+    battery_charge_speed_kw: Optional[float] = Field(default=None, description="Battery charge speed in kW")
+    battery_min_soc_percent: Optional[float] = Field(default=20.0, description="Minimum battery SOC in percent")
+    battery_max_soc_percent: Optional[float] = Field(default=80.0, description="Maximum battery SOC in percent")
 
 
 class DevicesConfig(BaseSettings):
@@ -163,6 +169,12 @@ def load_default_config() -> DevicesConfig:
             name="battery",
             type="battery",
             enable_load_management=True,
+            battery_soc_entity="sensor.deye_battery_soc",
+            #battery_soc_entity="input_number.battery_soc_simulation",  # Use helper instead of real sensor
+            battery_capacity_kwh=10.24,
+            battery_charge_speed_kw=3.5,
+            battery_min_soc_percent=20.0,
+            battery_max_soc_percent=80.0,
             load_management=LoadManagement(
                 instantaneous_load_entity="sensor.deye_battery_power",
                 instantaneous_load_entity_unit="W",

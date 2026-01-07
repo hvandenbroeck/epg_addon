@@ -60,6 +60,11 @@
       "name": "battery",
       "type": "battery",
       "enable_load_management": true,
+      "battery_soc_entity": "sensor.deye_battery_soc",
+      "battery_capacity_kwh": 10.24,
+      "battery_charge_speed_kw": 3.5,
+      "battery_min_soc_percent": 20.0,
+      "battery_max_soc_percent": 80.0,
       "load_management": {
         "instantaneous_load_entity": "sensor.deye_battery_power",
         "instantaneous_load_entity_unit": "W",
