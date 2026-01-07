@@ -519,7 +519,7 @@ class HeatpumpOptimizer:
     async def _get_predicted_usage(self, slot_minutes):
         """Get predicted power usage interpolated to slot_minutes intervals."""
         try:
-            access_token = self.ha_client.access_token
+            access_token = self.ha_client.get_access_token()
             stats_loader = StatisticsLoader(access_token)
             weather = Weather(access_token)
             predictor = Prediction(stats_loader, weather, self.price_history_manager)

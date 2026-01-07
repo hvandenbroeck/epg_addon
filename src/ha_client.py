@@ -21,11 +21,22 @@ class HomeAssistantClient:
             access_token: Home Assistant Long-Lived Access Token
         """
         self.ha_url = CONFIG['options']['ha_url']
-        self.access_token = access_token
+        self._access_token = access_token
         self.headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
         }
+
+    def get_access_token(self) -> str:
+        """Get the access token for external use.
+        
+        This method provides the access token for components that need
+        to create their own API connections (e.g., StatisticsLoader, Weather).
+        
+        Returns:
+            The Home Assistant access token
+        """
+        return self._access_token
 
     async def get_state(self, entity_id: str) -> dict | None:
         """Get the state of an entity from Home Assistant.
