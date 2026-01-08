@@ -221,20 +221,50 @@ class DeviceVerifier:
         """Verify all actions for a device are in the expected state.
         
         Args:
-            device: Device name (e.g., 'wp', 'hw', 'ev1')
-            action_label: Action to verify ('start' or 'stop')
+            device: Device name (e.g., 'wp', 'hw', 'ev1', 'battery_charge', 'battery_discharge')
+            action_label: Action to verify ('start', 'stop', 'charge_start', 'charge_stop', 'discharge_start', 'discharge_stop')
             context: Optional context for expression evaluation
             
         Returns:
             bool: True if all verifications passed, False if any failed
         """
-        device_obj = self.devices_config.get_device_by_name(device)
-        if not device_obj:
-            logger.warning(f"No config found for device '{device}'")
-            return True
+        # Handle battery charge/discharge entries (e.g., "battery_charge", "battery_discharge")
+        is_battery_charge = device.endswith('_charge')
+        is_battery_discharge = device.endswith('_discharge')
         
-        # Get the action (start or stop)
-        action_set = device_obj.start if action_label == "start" else device_obj.stop
+        if is_battery_charge or is_battery_discharge:
+            # Extract the actual device name (e.g., "battery" from "battery_charge")
+            base_device_name = device.rsplit('_', 1)[0]
+            device_obj = self.devices_config.get_device_by_name(base_device_name)
+            if not device_obj:
+                logger.warning(f"No config found for battery device '{base_device_name}'")
+                return True
+            
+            # Get the battery-specific action set
+            if is_battery_charge:
+                if action_label == "start":
+                    action_set = device_obj.charge_start
+                else:
+                    action_set = device_obj.charge_stop
+            else:  # is_battery_discharge
+                if action_label == "start":
+                    action_set = device_obj.discharge_start
+                else:
+                    action_set = device_obj.discharge_stop
+            
+            if not action_set:
+                logger.warning(f"No {action_label} action set for battery device '{device}'")
+                return True
+        else:
+            # Standard device handling (wp, hw, ev)
+            device_obj = self.devices_config.get_device_by_name(device)
+            if not device_obj:
+                logger.warning(f"No config found for device '{device}'")
+                return True
+            
+            # Get the action (start or stop)
+            action_set = device_obj.start if action_label == "start" else device_obj.stop
+        
         all_passed = True
         
         # Verify MQTT actions
@@ -316,7 +346,7 @@ class DeviceVerifier:
         """Run a single verification check for a device.
         
         Args:
-            device: Device identifier
+            device: Device identifier (e.g., 'wp', 'battery_charge')
             action_label: Action label ('start' or 'stop')
             context: Optional context for expression evaluation
             check_number: Which verification check this is (1-6)
@@ -327,12 +357,28 @@ class DeviceVerifier:
         
         if not is_correct:
             logger.warning(f"⚠️ Device {device} not in expected {action_label} state, retrying action...")
-            device_obj = self.devices_config.get_device_by_name(device)
-            if device_obj:
-                action_set = device_obj.start if action_label == "start" else device_obj.stop
-                action_config = action_set.model_dump(exclude_none=True)
-                # Execute without re-registering to avoid infinite loop
-                await self.devices.execute_device_action(device, action_config, action_label, context=context, skip_verification=True)
+            
+            # Handle battery charge/discharge entries
+            is_battery_charge = device.endswith('_charge')
+            is_battery_discharge = device.endswith('_discharge')
+            
+            if is_battery_charge or is_battery_discharge:
+                base_device_name = device.rsplit('_', 1)[0]
+                device_obj = self.devices_config.get_device_by_name(base_device_name)
+                if device_obj:
+                    if is_battery_charge:
+                        action_set = device_obj.charge_start if action_label == "start" else device_obj.charge_stop
+                    else:
+                        action_set = device_obj.discharge_start if action_label == "start" else device_obj.discharge_stop
+                    if action_set:
+                        action_config = action_set.model_dump(exclude_none=True)
+                        await self.devices.execute_device_action(base_device_name, action_config, action_label, context=context, skip_verification=True)
+            else:
+                device_obj = self.devices_config.get_device_by_name(device)
+                if device_obj:
+                    action_set = device_obj.start if action_label == "start" else device_obj.stop
+                    action_config = action_set.model_dump(exclude_none=True)
+                    await self.devices.execute_device_action(device, action_config, action_label, context=context, skip_verification=True)
         else:
             logger.info(f"✅ Device {device} verified in correct {action_label} state (check #{check_number}), cancelling remaining checks")
             # Cancel remaining verification jobs for this device
@@ -394,18 +440,40 @@ class DeviceVerifier:
         
         # Now verify each device's expected state
         for device, expected_action in device_states.items():
-            device_obj = self.devices_config.get_device_by_name(device)
-            if not device_obj:
-                continue
+            # Handle battery charge/discharge entries
+            is_battery_charge = device.endswith('_charge')
+            is_battery_discharge = device.endswith('_discharge')
+            
+            if is_battery_charge or is_battery_discharge:
+                base_device_name = device.rsplit('_', 1)[0]
+                device_obj = self.devices_config.get_device_by_name(base_device_name)
+                if not device_obj:
+                    continue
+                
+                # Get the appropriate battery action set
+                if is_battery_charge:
+                    action_set = device_obj.charge_start if expected_action == "start" else device_obj.charge_stop
+                else:
+                    action_set = device_obj.discharge_start if expected_action == "start" else device_obj.discharge_stop
+                
+                if not action_set:
+                    continue
+            else:
+                device_obj = self.devices_config.get_device_by_name(device)
+                if not device_obj:
+                    continue
+                action_set = device_obj.start if expected_action == "start" else device_obj.stop
             
             # Verify device state
             is_correct = await self.verify_device_action(device, expected_action)
             
             if not is_correct:
                 logger.warning(f"⚠️ Device {device} not in expected {expected_action} state during periodic check, executing action...")
-                action_set = device_obj.start if expected_action == "start" else device_obj.stop
                 action_config = action_set.model_dump(exclude_none=True)
-                await self.devices.execute_device_action(device, action_config, expected_action)
+                
+                # Use the correct device name for execute_device_action
+                exec_device_name = base_device_name if (is_battery_charge or is_battery_discharge) else device
+                await self.devices.execute_device_action(exec_device_name, action_config, expected_action)
                 # Register for post-action verification
                 self.register_action(device, expected_action)
             else:
