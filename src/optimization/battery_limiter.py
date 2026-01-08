@@ -9,6 +9,8 @@ This module implements SOC-aware battery cycle limiting that:
 import logging
 from datetime import datetime, timedelta
 
+from ..config import CONFIG
+
 logger = logging.getLogger(__name__)
 
 
@@ -87,8 +89,11 @@ def limit_battery_cycles(
     charge_energy_per_slot = battery_charge_speed_kw * slot_hours
     
     # Build predicted usage lookup (slot_idx -> kWh usage per slot)
+    # Apply discharge buffer to reduce predicted usage
     usage_by_slot = {}
     if predicted_power_usage:
+        discharge_buffer_percent = CONFIG['options'].get('battery_discharge_buffer_percent', 20)
+        discharge_buffer_multiplier = 1.0 - (discharge_buffer_percent / 100.0)
         for pred in predicted_power_usage:
             pred_time = pred['timestamp']
             if isinstance(pred_time, str):
@@ -97,7 +102,8 @@ def limit_battery_cycles(
                 pred_time = pred_time.replace(tzinfo=None)
             slot_idx = int((pred_time - horizon_start).total_seconds() / 60 / slot_minutes)
             if slot_idx >= 0:
-                usage_by_slot[slot_idx] = pred['predicted_kwh'] * slot_hours
+                # Reduce predicted usage by the discharge buffer percentage
+                usage_by_slot[slot_idx] = pred['predicted_kwh'] * slot_hours * discharge_buffer_multiplier
     
     # Sort charge slots by price (cheapest first), discharge by price (most expensive first)
     if prices:
@@ -153,7 +159,6 @@ def limit_battery_cycles(
             logger.debug(f"🔋 {device_name}: Rejected discharge slot {slot_idx} (infeasible)")
     
     # Get charge buffer percentage from config (default 20%)
-    from ..config import CONFIG
     charge_buffer_percent = CONFIG['options'].get('battery_charge_buffer_percent', 20)
     
     # Then add charge slots (cheapest first) - but only if economically viable
