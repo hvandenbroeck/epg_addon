@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, send_from_directory
+from flask import Flask, render_template, jsonify, send_from_directory, request
 from flask_cors import CORS
 import json
 from datetime import datetime, timedelta
@@ -102,6 +102,69 @@ def get_device_limits():
         'available_power_watts': 0,
         'limits': {}
     })
+
+@app.route('/api/logs')
+def get_logs():
+    """Return logs with optional filtering"""
+    # Get query parameters
+    level = request.args.get('level', None)  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+    module = request.args.get('module', None)  # Filter by module/filename
+    limit = request.args.get('limit', 500, type=int)  # Default to last 500 logs
+    offset = request.args.get('offset', 0, type=int)  # For pagination
+    
+    with TinyDB('db.json') as db:
+        logs_table = db.table('logs')
+        
+        # Build query
+        LogQuery = Query()
+        conditions = []
+        
+        if level:
+            conditions.append(LogQuery.level == level.upper())
+        
+        if module:
+            # Support filtering by module/filename
+            conditions.append(
+                (LogQuery.module == module) | 
+                (LogQuery.filename == module) | 
+                (LogQuery.filename == f"{module}.py")
+            )
+        
+        # Execute query
+        if conditions:
+            # Combine all conditions with AND
+            query = conditions[0]
+            for condition in conditions[1:]:
+                query = query & condition
+            logs = logs_table.search(query)
+        else:
+            logs = logs_table.all()
+        
+        # Sort by timestamp (newest first)
+        logs.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+        
+        # Get unique modules for filter dropdown
+        unique_modules = sorted(set(log.get('module', '') for log in logs_table.all()))
+        
+        # Apply pagination
+        total = len(logs)
+        logs = logs[offset:offset + limit]
+        
+        return jsonify({
+            'logs': logs,
+            'total': total,
+            'offset': offset,
+            'limit': limit,
+            'unique_modules': unique_modules
+        })
+
+@app.route('/api/logs/clear', methods=['POST'])
+def clear_logs():
+    """Clear all logs from the database"""
+    with TinyDB('db.json') as db:
+        logs_table = db.table('logs')
+        logs_table.truncate()
+    return jsonify({'status': 'success', 'message': 'All logs cleared'})
 
 @app.route('/api/gantt')
 def get_gantt():

@@ -13,6 +13,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 from src.forecasting import StatisticsLoader, Weather, Prediction, HAEnergyDashboardFetcher, PriceHistoryManager
 from src.config import CONFIG
+from src.log_handler import TinyDBLoggingHandler
 
 # Configure logging with both file and console output
 log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -38,6 +39,12 @@ console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.DEBUG)
 console_handler.setFormatter(logging.Formatter(log_format))
 root_logger.addHandler(console_handler)
+
+# TinyDB handler for web UI log viewing (stores last 5000 logs)
+db_handler = TinyDBLoggingHandler(db_path='db.json', max_records=5000)
+db_handler.setLevel(logging.DEBUG)
+db_handler.setFormatter(logging.Formatter(log_format))
+root_logger.addHandler(db_handler)
 
 logger = logging.getLogger(__name__)
 

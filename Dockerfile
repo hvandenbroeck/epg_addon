@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Set working directory
 WORKDIR /app
@@ -7,6 +7,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y jq glpk-utils && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
+# Install aiohttp and aiodns with compatible versions first to avoid conflicts
+RUN pip install 'aiohttp>=3.9.0' 'aiodns>=3.1.0'
 RUN pip install homeassistant requests apscheduler pulp flask flask-cors tinydb pandas lightgbm numpy scikit-learn websockets plotly entsoe-py pydantic pydantic-settings
 
 # Copy source files
