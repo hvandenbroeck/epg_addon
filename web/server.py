@@ -112,7 +112,7 @@ def get_logs():
     limit = request.args.get('limit', 500, type=int)  # Default to last 500 logs
     offset = request.args.get('offset', 0, type=int)  # For pagination
     
-    with TinyDB('db.json') as db:
+    with TinyDB('logs.json') as db:
         logs_table = db.table('logs')
         
         # Build query
@@ -161,7 +161,7 @@ def get_logs():
 @app.route('/api/logs/clear', methods=['POST'])
 def clear_logs():
     """Clear all logs from the database"""
-    with TinyDB('db.json') as db:
+    with TinyDB('logs.json') as db:
         logs_table = db.table('logs')
         logs_table.truncate()
     return jsonify({'status': 'success', 'message': 'All logs cleared'})
