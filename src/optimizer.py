@@ -323,14 +323,14 @@ class HeatpumpOptimizer:
                     times, device_key, horizon_start.date(), horizon_start,
                     block_minutes=slot_minutes
                 ))
-        original_iso_times_merged = merge_sequential_timeslots(original_iso_times)
+        original_battery_iso_times_merged = merge_sequential_timeslots(original_iso_times)
 
         # Save schedule to TinyDB (without limited times yet - will be added by recalculate)
         with TinyDB('db.json') as db:
             db.upsert({
                 "id": "schedule",
                 "schedule": iso_times_merged,  # Will be updated with limited times
-                "original_battery_schedule": original_iso_times_merged,  # Original price-based times for display
+                "original_battery_schedule": original_battery_iso_times_merged,  # Original price-based times for display
                 "horizon_start": horizon_start.isoformat(),
                 "horizon_end": horizon_end.isoformat(),
                 "prices": prices,  # Store prices for recalculation
@@ -396,13 +396,9 @@ class HeatpumpOptimizer:
             # Get current SOC (or use 50% as fallback)
             current_soc = await self._get_battery_soc(bat_device)
             
-            # Extract original times from stored schedule
+            # Extract original times from stored schedule (already filtered for future slots)
             original_charge = self._extract_times(original_battery_schedule, f"{bat_device.name}_charge_planned", horizon_start, slot_minutes)
             original_discharge = self._extract_times(original_battery_schedule, f"{bat_device.name}_discharge_planned", horizon_start, slot_minutes)
-            
-            # Filter out past timeslots before applying cycle limiting
-            original_charge = self._filter_future_times(original_charge, horizon_start, slot_minutes)
-            original_discharge = self._filter_future_times(original_discharge, horizon_start, slot_minutes)
             
             if original_charge or original_discharge:
                 logger.debug(f"🕐 {bat_device.name}: Processing {len(original_charge)} charge and {len(original_discharge)} discharge future slots")
@@ -458,33 +454,6 @@ class HeatpumpOptimizer:
         logger.warning(f"⚠️ {bat_device.name}: Using fallback SOC 50%")
         return 50.0
 
-    def _filter_future_times(self, time_list, horizon_start, slot_minutes):
-        """Filter out past timeslots from a list of time strings.
-        
-        Args:
-            time_list: List of time strings in HH:MM format (relative to horizon_start)
-            horizon_start: Datetime of horizon start
-            slot_minutes: Duration of each slot in minutes
-            
-        Returns:
-            List of time strings that are in the future
-        """
-        if not time_list:
-            return []
-        
-        now = datetime.now()
-        future_times = []
-        
-        for time_str in time_list:
-            hour, minute = map(int, time_str.split(':'))
-            total_minutes = hour * 60 + minute
-            slot_datetime = horizon_start + timedelta(minutes=total_minutes)
-            
-            if slot_datetime >= now:
-                future_times.append(time_str)
-        
-        return future_times
-    
     def _extract_times(self, schedule, device_key, horizon_start, slot_minutes):
         """Extract future time slots for a device from schedule.
         
@@ -502,10 +471,13 @@ class HeatpumpOptimizer:
                 current = start
                 slot_delta = timedelta(minutes=slot_minutes)
                 
-                while current < stop and current >= now:
-                    # Convert to HH:MM format relative to horizon
-                    minutes_from_horizon = int((current - horizon_start).total_seconds() / 60)
-                    times.append(f"{minutes_from_horizon // 60:02d}:{minutes_from_horizon % 60:02d}")
+                while current < stop:
+                    # Only add slots that haven't ended yet (includes in-progress slots)
+                    slot_end = current + slot_delta
+                    if slot_end > now:
+                        # Convert to HH:MM format relative to horizon
+                        minutes_from_horizon = int((current - horizon_start).total_seconds() / 60)
+                        times.append(f"{minutes_from_horizon // 60:02d}:{minutes_from_horizon % 60:02d}")
                     current += slot_delta
         
         return times

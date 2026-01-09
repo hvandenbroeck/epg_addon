@@ -49,6 +49,7 @@ def limit_battery_cycles(
     Returns:
         Tuple of (limited_charge_times, limited_discharge_times)
     """
+    logger.info(f"🔋 {device_name}: Input charge_times: {charge_times}")
     if not charge_times and not discharge_times:
         return [], []
     
@@ -108,25 +109,31 @@ def limit_battery_cycles(
         discharge_by_price = sorted(discharge_slots)
     
     def simulate_soc(selected_charge, selected_discharge):
-        """Simulate SOC over time and return final SOC and feasibility."""
+        """Simulate SOC over time and return final SOC, feasibility, and energy statistics."""
         all_slots = sorted(selected_charge | selected_discharge)
         soc = current_soc
+        total_charged_kwh = 0
+        total_discharged_kwh = 0
+        
         for slot_idx in all_slots:
             if slot_idx in selected_charge:
                 headroom = battery_capacity_kwh * (max_soc_percent - soc) / 100
                 if headroom < charge_energy_per_slot * 0.1:
-                    return None, False  # Can't charge - battery full
+                    return None, False, 0, 0  # Can't charge - battery full
                 energy = min(charge_energy_per_slot, headroom)
                 soc += (energy / battery_capacity_kwh) * 100
+                total_charged_kwh += energy
             elif slot_idx in selected_discharge:
                 available = battery_capacity_kwh * (soc - min_soc_percent) / 100
                 # Use battery's max discharge rate, not predicted usage
                 # (predicted usage is just a hint for prioritization, not a constraint)
                 discharge_energy = min(charge_energy_per_slot, available)
                 if available < charge_energy_per_slot * 0.1:
-                    return None, False  # Can't discharge - battery empty
+                    return None, False, 0, 0  # Can't discharge - battery empty
                 soc -= (discharge_energy / battery_capacity_kwh) * 100
-        return soc, True
+                total_discharged_kwh += discharge_energy
+        
+        return soc, True, total_charged_kwh, total_discharged_kwh
     
     # Greedy selection: add slots in price order if they keep the schedule feasible
     selected_charge = set()
@@ -138,26 +145,46 @@ def limit_battery_cycles(
     # First add discharge slots (most expensive first)
     for slot_idx in discharge_by_price:
         candidate = selected_discharge | {slot_idx}
-        final_soc, feasible = simulate_soc(selected_charge, candidate)
+        final_soc, feasible, _, _ = simulate_soc(selected_charge, candidate)
         if feasible:
             selected_discharge = candidate
             logger.debug(f"🔋 {device_name}: Added discharge slot {slot_idx}, final_soc={final_soc:.1f}%")
         else:
             logger.debug(f"🔋 {device_name}: Rejected discharge slot {slot_idx} (infeasible)")
     
-    # Then add charge slots (cheapest first) - this also enables more discharge
+    # Get charge buffer percentage from config (default 20%)
+    from ..config import CONFIG
+    charge_buffer_percent = CONFIG['options'].get('battery_charge_buffer_percent', 20)
+    
+    # Then add charge slots (cheapest first) - but only if economically viable
     for slot_idx in charge_by_price:
         candidate = selected_charge | {slot_idx}
-        _, feasible = simulate_soc(candidate, selected_discharge)
-        if feasible:
-            selected_charge = candidate
-            # Re-check if we can add more discharge slots now that we have more charge
-            for d_slot in discharge_by_price:
-                if d_slot not in selected_discharge:
-                    d_candidate = selected_discharge | {d_slot}
-                    _, d_feasible = simulate_soc(selected_charge, d_candidate)
-                    if d_feasible:
-                        selected_discharge = d_candidate
+        final_soc, feasible, charged_kwh, discharged_kwh = simulate_soc(candidate, selected_discharge)
+        
+        if not feasible:
+            continue
+        
+        # Check if adding this charge slot is economically viable
+        # Only add charge if we haven't exceeded discharge needs by more than the buffer
+        if discharged_kwh > 0:  # Only check if there are discharge slots
+            max_charge_allowed = discharged_kwh * (1 + charge_buffer_percent / 100)
+            if charged_kwh > max_charge_allowed:
+                logger.debug(f"🔋 {device_name}: Rejected charge slot {slot_idx} "
+                           f"(charged {charged_kwh:.2f} kWh would exceed discharge needs "
+                           f"{discharged_kwh:.2f} kWh + {charge_buffer_percent}% buffer)")
+                continue
+        
+        selected_charge = candidate
+        logger.debug(f"🔋 {device_name}: Added charge slot {slot_idx}, "
+                    f"charged={charged_kwh:.2f} kWh, discharged={discharged_kwh:.2f} kWh")
+        
+        # Re-check if we can add more discharge slots now that we have more charge
+        for d_slot in discharge_by_price:
+            if d_slot not in selected_discharge:
+                d_candidate = selected_discharge | {d_slot}
+                _, d_feasible, _, _ = simulate_soc(selected_charge, d_candidate)
+                if d_feasible:
+                    selected_discharge = d_candidate
     
     # Convert back to time strings
     limited_charge_times = sorted([slot_idx_to_time(s) for s in selected_charge])

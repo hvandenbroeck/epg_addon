@@ -116,10 +116,10 @@ battery_device = Device(
     ]),
     # Battery-specific actions for discharging
     discharge_start=ActionSet(entity=[
-        EntityAction(service="number/set_value", entity_id="number.battery_min_soc", value=20)
+        EntityAction(service="number/set_value", entity_id="number.battery_min_soc", value=10)
     ]),
     discharge_stop=ActionSet(entity=[
-        EntityAction(service="number/set_value", entity_id="number.battery_min_soc", value=80)
+        EntityAction(service="number/set_value", entity_id="number.battery_min_soc", value=90)
     ])
 )
 
