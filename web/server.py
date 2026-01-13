@@ -249,38 +249,54 @@ def get_gantt():
     
     df = pd.DataFrame(df_list)
     
+    # Create the Gantt chart using px.timeline
+    fig_gantt = px.timeline(
+        df,
+        x_start='Start',
+        x_end='Finish',
+        y='Task',
+        color='Task',
+        color_discrete_map=device_colors,
+        hover_data={'Type': True}
+    )
+    
+    # Set opacity based on Type (Planned vs Actual)
+    for trace in fig_gantt.data:
+        task_name = trace.name
+        # Get the Type values for this task's bars
+        task_df = df[df['Task'] == task_name]
+        opacities = [0.5 if t == 'Planned' else 0.9 for t in task_df['Type']]
+        trace.marker.opacity = opacities
+    
+    # Update hover template
+    fig_gantt.update_traces(
+        hovertemplate="<b>%{y}</b><br>Start: %{base|%Y-%m-%d %H:%M}<br>End: %{x|%Y-%m-%d %H:%M}<br>Type: %{customdata[0]}<extra></extra>"
+    )
+    
     # Create subplots: Gantt chart on top, price histogram below
     fig = make_subplots(
         rows=2, cols=1,
-        row_heights=[0.6, 0.4],  # Gantt takes 60%, histogram 40%
+        row_heights=[0.6, 0.4],
         shared_xaxes=True,
         vertical_spacing=0.08,
         subplot_titles=("Energy Optimization Schedule", "Electricity Prices (€/kWh)")
     )
     
-    # Add Gantt chart traces (subplot 1)
-    # We need to manually create the Gantt bars from the dataframe
-    for idx, row in df.iterrows():
-        task = row['Task']
-        color = device_colors.get(task, '#999999')
-        
-        # Determine opacity based on type (planned vs actual)
-        opacity = 0.5 if row['Type'] == 'Planned' else 0.9
-        
-        fig.add_trace(
-            go.Scatter(
-                x=[row['Start'], row['Finish'], row['Finish'], row['Start'], row['Start']],
-                y=[task, task, task, task, task],
-                fill='toself',
-                fillcolor=color,
-                line=dict(color=color, width=30),
-                opacity=opacity,
-                mode='lines',
-                showlegend=False,
-                hovertemplate=f"<b>{task}</b><br>Start: %{{x[0]}}<br>End: %{{x[1]}}<extra></extra>"
-            ),
-            row=1, col=1
-        )
+    # Add Gantt traces to subplot 1
+    for trace in fig_gantt.data:
+        trace.showlegend = False
+        trace.width = 0.8  # Make bars thicker (0-1 range, where 1 is full row height)
+        fig.add_trace(trace, row=1, col=1)
+    
+    # Copy y-axis category order from the gantt chart
+    fig.update_yaxes(
+        categoryorder=fig_gantt.layout.yaxis.categoryorder,
+        categoryarray=fig_gantt.layout.yaxis.categoryarray,
+        row=1, col=1
+    )
+    
+    # Set x-axis type to date for proper rendering
+    fig.update_xaxes(type='date', row=1, col=1)
     
     # Add "Now" line to Gantt chart
     now = datetime.now()
@@ -345,27 +361,31 @@ def get_gantt():
         showlegend=False,
         margin=dict(l=50, r=20, t=60, b=60),
         autosize=True,
-        dragmode='pan',
+        dragmode=False,  # Disable panning
         modebar=dict(
             orientation='v',
             bgcolor='rgba(255,255,255,0.7)'
         ),
         font=dict(size=10),
-        hovermode='closest'
+        hovermode='closest'  # Use closest for individual tooltips
     )
     
-    # Update x-axis for both subplots
+    # Update x-axis for both subplots with spike line
     fig.update_xaxes(
         tickformat='%Y-%m-%d %H:%M',
         tickangle=-45,
-        row=2, col=1,
-        title_text="Time"
+        showspikes=True,
+        spikemode='across+toaxis',
+        spikesnap='cursor',
+        spikecolor='rgba(100, 100, 100, 0.5)',
+        spikethickness=1,
+        spikedash='dot'
     )
     
-    # Update y-axis for Gantt chart
-    fig.update_yaxes(
-        title_text="",
-        row=1, col=1
+    # Add title to bottom x-axis
+    fig.update_xaxes(
+        title_text="Time",
+        row=2, col=1
     )
     
     # Update y-axis for price histogram
@@ -373,18 +393,20 @@ def get_gantt():
         title_text="€ct/kWh",
         row=2, col=1
     )
-    
     # Configure for better mobile experience
     config = {
         'responsive': True,
         'displayModeBar': True,
-        'modeBarButtonsToRemove': ['select2d', 'lasso2d', 'autoScale2d'],
-        'modeBarButtonsToAdd': ['pan2d'],
-        'scrollZoom': True,
+        'modeBarButtonsToRemove': ['select2d', 'lasso2d', 'autoScale2d', 'pan2d', 'zoom2d', 'zoomIn2d', 'zoomOut2d'],
+        'scrollZoom': False,  # Disable scroll zoom
         'displaylogo': False
     }
     
-    return fig.to_html(include_plotlyjs=True, full_html=False, config=config)
+    # Generate HTML and add crosshair cursor
+    html_output = fig.to_html(include_plotlyjs=True, full_html=False, config=config)
+    html_output = html_output.replace('<div', '<div style="cursor: crosshair;"', 1)
+    
+    return html_output
 
 
 
