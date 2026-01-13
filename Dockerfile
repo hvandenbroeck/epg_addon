@@ -7,9 +7,10 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y jq glpk-utils && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-# Install aiohttp and aiodns with compatible versions first to avoid conflicts
-RUN pip install 'aiohttp>=3.9.0' 'aiodns>=3.1.0'
-RUN pip install homeassistant requests apscheduler pulp flask flask-cors tinydb pandas lightgbm numpy scikit-learn websockets plotly entsoe-py pydantic pydantic-settings
+RUN pip install homeassistant requests apscheduler pulp flask flask-cors tinydb pandas lightgbm numpy scikit-learn websockets plotly entsoe-py pydantic pydantic-settings aiohttp
+
+# Explicitly uninstall aiodns and pycares if they were installed as sub-dependencies
+RUN pip uninstall -y aiodns pycares || true
 
 # Copy source files
 COPY src /app/src

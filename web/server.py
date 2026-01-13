@@ -6,6 +6,7 @@ import logging
 from tinydb import TinyDB, Query
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -168,7 +169,7 @@ def clear_logs():
 
 @app.route('/api/gantt')
 def get_gantt():
-    """Generate and return Plotly Gantt chart as interactive HTML"""
+    """Generate and return Plotly Gantt chart with price histogram as interactive HTML"""
     with TinyDB('db.json') as db:
         schedule_docs = db.search(Query().id == 'schedule')
     
@@ -179,6 +180,9 @@ def get_gantt():
     
     schedule = schedule_docs[0]['schedule']
     original_battery_schedule = schedule_docs[0].get('original_battery_schedule', [])
+    prices = schedule_docs[0].get('prices', [])
+    horizon_start = schedule_docs[0].get('horizon_start')
+    slot_minutes = schedule_docs[0].get('slot_minutes', 15)
     
     # Device labels and colors
     device_labels = {
@@ -245,44 +249,129 @@ def get_gantt():
     
     df = pd.DataFrame(df_list)
     
-    # Create timeline using Plotly Express
-    fig = px.timeline(df, x_start="Start", x_end="Finish", y="Task", color="Task",
-                      color_discrete_map=device_colors,
-                      title="Energy Optimization Schedule")
+    # Create subplots: Gantt chart on top, price histogram below
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.6, 0.4],  # Gantt takes 60%, histogram 40%
+        shared_xaxes=True,
+        vertical_spacing=0.08,
+        subplot_titles=("Energy Optimization Schedule", "Electricity Prices (€/kWh)")
+    )
     
-    # Add "Now" line as a shape
+    # Add Gantt chart traces (subplot 1)
+    # We need to manually create the Gantt bars from the dataframe
+    for idx, row in df.iterrows():
+        task = row['Task']
+        color = device_colors.get(task, '#999999')
+        
+        # Determine opacity based on type (planned vs actual)
+        opacity = 0.5 if row['Type'] == 'Planned' else 0.9
+        
+        fig.add_trace(
+            go.Scatter(
+                x=[row['Start'], row['Finish'], row['Finish'], row['Start'], row['Start']],
+                y=[task, task, task, task, task],
+                fill='toself',
+                fillcolor=color,
+                line=dict(color=color, width=30),
+                opacity=opacity,
+                mode='lines',
+                showlegend=False,
+                hovertemplate=f"<b>{task}</b><br>Start: %{{x[0]}}<br>End: %{{x[1]}}<extra></extra>"
+            ),
+            row=1, col=1
+        )
+    
+    # Add "Now" line to Gantt chart
     now = datetime.now()
-    fig.add_shape(
-        type="line",
-        x0=now, x1=now,
-        y0=0, y1=1,
-        yref="paper",
-        line=dict(color="red", width=2, dash="dash")
+    fig.add_vline(
+        x=now.timestamp() * 1000,  # Convert to milliseconds
+        line=dict(color="red", width=2, dash="dash"),
+        row=1, col=1
     )
     fig.add_annotation(
-        x=now, y=1, yref="paper",
+        x=now,
+        y=1,
+        yref="y domain",
         text="Now",
         showarrow=False,
         yanchor="bottom",
-        font=dict(color="red", size=12)
+        font=dict(color="red", size=10),
+        row=1, col=1
     )
+    
+    # Add price histogram (subplot 2)
+    if prices and horizon_start:
+        # Create time slots for prices
+        start_dt = datetime.fromisoformat(horizon_start)
+        price_times = [start_dt + timedelta(minutes=slot_minutes * i) for i in range(len(prices))]
+        
+        # Convert prices from EUR/kWh to EUR cents/kWh for better readability
+        prices_cents = [p * 100 for p in prices]
+        
+        # Create bar chart for prices
+        fig.add_trace(
+            go.Bar(
+                x=price_times,
+                y=prices_cents,
+                name='Price',
+                marker=dict(
+                    color=prices_cents,
+                    colorscale='RdYlGn_r',  # Red for high, green for low
+                    showscale=True,
+                    colorbar=dict(
+                        title="€ct/kWh",
+                        len=0.3,
+                        y=0.15,
+                        yanchor='middle'
+                    )
+                ),
+                hovertemplate='<b>Time:</b> %{x}<br><b>Price:</b> %{y:.2f} €ct/kWh<extra></extra>',
+                showlegend=False
+            ),
+            row=2, col=1
+        )
+        
+        # Add "Now" line to price chart
+        fig.add_vline(
+            x=now.timestamp() * 1000,
+            line=dict(color="red", width=2, dash="dash"),
+            row=2, col=1
+        )
     
     # Update layout
     fig.update_layout(
-        xaxis_title="Time",
-        yaxis_title="",  # Remove y-axis title to save space
-        height=400,
+        height=700,  # Increased height for two subplots
         showlegend=False,
-        xaxis=dict(tickformat='%Y-%m-%d %H:%M', tickangle=-45),
-        margin=dict(l=50, r=20, t=50, b=80),  # Reduced left margin significantly
-        # Mobile-friendly settings
+        margin=dict(l=50, r=20, t=60, b=60),
         autosize=True,
         dragmode='pan',
         modebar=dict(
             orientation='v',
             bgcolor='rgba(255,255,255,0.7)'
         ),
-        font=dict(size=10)  # Smaller font for mobile
+        font=dict(size=10),
+        hovermode='closest'
+    )
+    
+    # Update x-axis for both subplots
+    fig.update_xaxes(
+        tickformat='%Y-%m-%d %H:%M',
+        tickangle=-45,
+        row=2, col=1,
+        title_text="Time"
+    )
+    
+    # Update y-axis for Gantt chart
+    fig.update_yaxes(
+        title_text="",
+        row=1, col=1
+    )
+    
+    # Update y-axis for price histogram
+    fig.update_yaxes(
+        title_text="€ct/kWh",
+        row=2, col=1
     )
     
     # Configure for better mobile experience
