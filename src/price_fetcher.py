@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from datetime import datetime, timedelta
 import pandas as pd
 from entsoe import EntsoePandasClient
@@ -12,16 +13,20 @@ SLOT_MINUTES = 15
 class EntsoeePriceFetcher:
     """Fetches day-ahead electricity prices from ENTSO-E."""
     
-    def __init__(self, api_token, country_code):
+    def __init__(self, api_token, country_code, retry_interval_minutes=5, retry_max_hours=2):
         """Initialize the ENTSO-E price fetcher.
         
         Args:
             api_token: ENTSO-E API token
             country_code: Two-letter country code (e.g., 'BE', 'NL', 'DE')
+            retry_interval_minutes: Minutes between retry attempts (default: 5)
+            retry_max_hours: Maximum hours to keep retrying (default: 2)
         """
         self.api_token = api_token
         self.country_code = country_code
         self.client = EntsoePandasClient(api_token)
+        self.retry_interval_minutes = retry_interval_minutes
+        self.retry_max_hours = retry_max_hours
 
     def get_horizon_prices(self, horizon_start=None, lock_hours=2):
         """Fetch prices for a rolling horizon from now until end of tomorrow.
@@ -30,6 +35,7 @@ class EntsoeePriceFetcher:
         - Starts from the current time (rounded to 15-minute slot boundary)
         - Extends to end of tomorrow (or as far as data is available)
         - Returns metadata about the horizon for constraint calculations
+        - Automatically retries on failure (503 errors, etc.) based on configured intervals
         
         Args:
             horizon_start: datetime for horizon start (defaults to now)
@@ -42,9 +48,39 @@ class EntsoeePriceFetcher:
                 'horizon_end': datetime when horizon ends
                 'lock_end_slot': Slot index where lock period ends
                 'slot_minutes': Minutes per slot (15 minutes)
-            Returns None if fetch fails
+            Returns None if all retry attempts fail
+        """
+        max_attempts = (self.retry_max_hours * 60) // self.retry_interval_minutes
+        
+        for attempt in range(1, int(max_attempts) + 1):
+            result = self._fetch_prices(horizon_start, lock_hours, attempt, int(max_attempts))
+            if result is not None:
+                return result
+            
+            # If fetch failed and we have more attempts, wait before retry
+            if attempt < max_attempts:
+                logger.warning(f"⏳ Waiting {self.retry_interval_minutes} minutes before retry...")
+                import time
+                time.sleep(self.retry_interval_minutes * 60)
+        
+        logger.error(f"❌ Failed to fetch prices after {int(max_attempts)} attempts over {self.retry_max_hours} hours")
+        return None
+    
+    def _fetch_prices(self, horizon_start, lock_hours, attempt, max_attempts):
+        """Internal method to fetch prices (single attempt).
+        
+        Args:
+            horizon_start: datetime for horizon start
+            lock_hours: Number of hours from now to lock
+            attempt: Current attempt number
+            max_attempts: Total number of attempts
+            
+        Returns:
+            dict with price data or None if fetch fails
         """
         try:
+            if attempt > 1:
+                logger.info(f"🔄 Retry attempt {attempt}/{max_attempts}")
             logger.info(f"🔎 Fetching horizon prices from ENTSO-E for {self.country_code}...")
             
             now = horizon_start or datetime.now()
@@ -117,5 +153,9 @@ class EntsoeePriceFetcher:
             }
             
         except Exception as e:
-            logger.error(f"❌ Error fetching horizon prices from ENTSO-E: {e}", exc_info=True)
+            is_retryable = "503" in str(e) or "Service Temporarily Unavailable" in str(e) or "HTTPError" in str(type(e).__name__)
+            if is_retryable and attempt < max_attempts:
+                logger.warning(f"⚠️ Retryable error on attempt {attempt}/{max_attempts}: {e}")
+            else:
+                logger.error(f"❌ Error fetching horizon prices from ENTSO-E (attempt {attempt}/{max_attempts}): {e}", exc_info=True)
             return None

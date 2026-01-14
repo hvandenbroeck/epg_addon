@@ -61,7 +61,11 @@ class HeatpumpOptimizer:
         # Initialize ENTSO-E price fetcher
         entsoe_token = CONFIG['options'].get('entsoe_api_token', '')
         entsoe_country = CONFIG['options'].get('entsoe_country_code', 'BE')
-        self.price_fetcher = EntsoeePriceFetcher(entsoe_token, entsoe_country) if entsoe_token else None
+        retry_interval = CONFIG['options'].get('price_fetch_retry_interval_minutes', 5)
+        retry_max_hours = CONFIG['options'].get('price_fetch_retry_max_hours', 2)
+        self.price_fetcher = EntsoeePriceFetcher(
+            entsoe_token, entsoe_country, retry_interval, retry_max_hours
+        ) if entsoe_token else None
         
         # Initialize Price History Manager for percentile calculations
         self.price_history_manager = PriceHistoryManager(entsoe_token, entsoe_country) if entsoe_token else None
