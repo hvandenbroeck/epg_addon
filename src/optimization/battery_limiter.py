@@ -71,9 +71,25 @@ def limit_battery_cycles(
         total_minutes = slot_idx * slot_minutes
         return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
     
+    # Calculate current slot index to separate past from future
+    now = datetime.now().replace(tzinfo=None)
+    current_slot_idx = int((now - horizon_start).total_seconds() / 60 / slot_minutes)
+    
     # Convert to slot indices
     charge_slots = {time_to_slot_idx(t) for t in charge_times} if charge_times else set()
     discharge_slots = {time_to_slot_idx(t) for t in discharge_times} if discharge_times else set()
+    
+    # Separate past and future slots - preserve all past slots unchanged
+    past_charge_slots = {s for s in charge_slots if s < current_slot_idx}
+    past_discharge_slots = {s for s in discharge_slots if s < current_slot_idx}
+    future_charge_slots = {s for s in charge_slots if s >= current_slot_idx}
+    future_discharge_slots = {s for s in discharge_slots if s >= current_slot_idx}
+    
+    logger.info(f"🔋 {device_name}: Preserving {len(past_charge_slots)} past charge slots and {len(past_discharge_slots)} past discharge slots")
+    
+    # Only process future slots
+    charge_slots = future_charge_slots
+    discharge_slots = future_discharge_slots
     
     # Resolve conflicts - this shouldn't happen, but just in case
     conflicts = charge_slots & discharge_slots
@@ -191,9 +207,13 @@ def limit_battery_cycles(
                 if d_feasible:
                     selected_discharge = d_candidate
     
+    # Combine past slots (unchanged) with limited future slots
+    final_charge_slots = past_charge_slots | selected_charge
+    final_discharge_slots = past_discharge_slots | selected_discharge
+    
     # Convert back to time strings
-    limited_charge_times = sorted([slot_idx_to_time(s) for s in selected_charge])
-    limited_discharge_times = sorted([slot_idx_to_time(s) for s in selected_discharge])
+    limited_charge_times = sorted([slot_idx_to_time(s) for s in final_charge_slots])
+    limited_discharge_times = sorted([slot_idx_to_time(s) for s in final_discharge_slots])
     
     # Log results with price info if available
     if prices and selected_charge:
