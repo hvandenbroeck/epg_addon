@@ -83,6 +83,10 @@ class Device(BaseModel):
     battery_charge_speed_kw: Optional[float] = Field(default=None, description="Battery charge speed in kW")
     battery_min_soc_percent: Optional[float] = Field(default=20.0, description="Minimum battery SOC in percent")
     battery_max_soc_percent: Optional[float] = Field(default=80.0, description="Maximum battery SOC in percent")
+    # WP and HW optimization parameters (only used when type='wp' or type='hw')
+    block_hours: Optional[float] = Field(default=None, description="Minimum runtime when turned on (hours)")
+    min_gap_hours: Optional[float] = Field(default=None, description="Minimum gap between runs (hours)")
+    max_gap_hours: Optional[float] = Field(default=None, description="Maximum gap between runs (hours)")
 
 
 class DevicesConfig(BaseSettings):

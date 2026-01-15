@@ -116,18 +116,8 @@ class HeatpumpOptimizer:
     async def run_optimization(self):
         """Main optimization logic using rolling horizon."""
         # Slot configuration - pricing data is 15-minute intervals
-        SLOT_MINUTES = 15
-        LOCK_HOURS = 2  # Don't reschedule actions within 2 hours
-
-        # Heat Pump (WP) configuration - NEW sliding window approach
-        WP_BLOCK_HOURS = 1      # Minimum runtime when turned on
-        WP_MIN_GAP_HOURS = 3    # Minimum gap between runs (prevent rapid cycling)
-        WP_MAX_GAP_HOURS = 8    # Maximum gap between runs (must run at least every 6 hours)
-
-        # Hot Water (HW) configuration - NEW sliding window approach
-        HW_BLOCK_HOURS = 1      # Minimum runtime when turned on
-        HW_MIN_GAP_HOURS = 6    # Minimum gap between runs
-        HW_MAX_GAP_HOURS = 12   # Maximum gap between runs
+        SLOT_MINUTES = CONFIG['options'].get('slot_minutes', 15)
+        LOCK_HOURS = CONFIG['options'].get('lock_hours', 2)  # Don't reschedule actions within 2 hours
 
         # Battery percentile configuration (for dynamic price thresholds)
         BAT_PRICE_HISTORY_DAYS = CONFIG['options'].get('battery_price_history_days', 14)
@@ -196,6 +186,11 @@ class HeatpumpOptimizer:
         wp_devices = devices_config.get_devices_by_type('wp')
         for wp_device in wp_devices:
             device_name = wp_device.name
+            # Use device-specific config with fallback defaults
+            WP_BLOCK_HOURS = wp_device.block_hours if wp_device.block_hours is not None else 1.0
+            WP_MIN_GAP_HOURS = wp_device.min_gap_hours if wp_device.min_gap_hours is not None else 3.0
+            WP_MAX_GAP_HOURS = wp_device.max_gap_hours if wp_device.max_gap_hours is not None else 8.0
+            
             wp_initial_gap = self._calculate_initial_gap(device_name, horizon_start, slot_minutes, WP_BLOCK_HOURS)
             wp_locked_slots = self._get_locked_slots(device_name, horizon_start, lock_end_datetime, slot_minutes, WP_BLOCK_HOURS)
             
@@ -224,6 +219,11 @@ class HeatpumpOptimizer:
         hw_devices = devices_config.get_devices_by_type('hw')
         for hw_device in hw_devices:
             device_name = hw_device.name
+            # Use device-specific config with fallback defaults
+            HW_BLOCK_HOURS = hw_device.block_hours if hw_device.block_hours is not None else 1.0
+            HW_MIN_GAP_HOURS = hw_device.min_gap_hours if hw_device.min_gap_hours is not None else 6.0
+            HW_MAX_GAP_HOURS = hw_device.max_gap_hours if hw_device.max_gap_hours is not None else 12.0
+            
             hw_initial_gap = self._calculate_initial_gap(device_name, horizon_start, slot_minutes, HW_BLOCK_HOURS)
             hw_locked_slots = self._get_locked_slots(device_name, horizon_start, lock_end_datetime, slot_minutes, HW_BLOCK_HOURS)
             
@@ -297,9 +297,11 @@ class HeatpumpOptimizer:
         device_block_minutes = {}
         for device in devices_config.devices:
             if device.type == 'wp':
-                device_block_minutes[device.name] = int(WP_BLOCK_HOURS * 60)
+                block_hours = device.block_hours if device.block_hours is not None else 1.0
+                device_block_minutes[device.name] = int(block_hours * 60)
             elif device.type == 'hw':
-                device_block_minutes[device.name] = int(HW_BLOCK_HOURS * 60)
+                block_hours = device.block_hours if device.block_hours is not None else 1.0
+                device_block_minutes[device.name] = int(block_hours * 60)
             elif device.type == 'battery':
                 # Battery has separate charge and discharge entries
                 device_block_minutes[f"{device.name}_charge"] = slot_minutes  # Single slot
