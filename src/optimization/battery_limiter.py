@@ -131,8 +131,10 @@ def limit_battery_cycles(
         discharge_by_price = sorted(discharge_slots)
     
     def simulate_soc(selected_charge, selected_discharge):
+
         """Simulate SOC over time and return final SOC, feasibility, and energy statistics."""
-        all_slots = sorted(selected_charge | selected_discharge)
+        
+        all_slots = sorted(selected_charge | selected_discharge) #Sort over time
         soc = current_soc
         total_charged_kwh = 0
         total_discharged_kwh = 0
@@ -165,24 +167,34 @@ def limit_battery_cycles(
                 f"{len(charge_slots)} charge candidates, {len(discharge_slots)} discharge candidates")
     
     # First add discharge slots (most expensive first)
+    logger.debug(f"🔋 {device_name}: Phase 1 - Adding discharge slots (most expensive first)")
     for slot_idx in discharge_by_price:
         candidate = selected_discharge | {slot_idx}
-        final_soc, feasible, _, _ = simulate_soc(selected_charge, candidate)
+        slot_price = prices[slot_idx] if prices and slot_idx < len(prices) else None
+        final_soc, feasible, charged_kwh, discharged_kwh = simulate_soc(selected_charge, candidate)
         if feasible:
             selected_discharge = candidate
-            logger.debug(f"🔋 {device_name}: Added discharge slot {slot_idx}, final_soc={final_soc:.1f}%")
+            price_str = f", price={slot_price:.4f}" if slot_price is not None else ""
+            logger.debug(f"🔋 {device_name}: ✓ Added discharge slot {slot_idx}, final_soc={final_soc:.1f}%{price_str}")
         else:
-            logger.debug(f"🔋 {device_name}: Rejected discharge slot {slot_idx} (infeasible)")
+            price_str = f", price={slot_price:.4f}" if slot_price is not None else ""
+            logger.debug(f"🔋 {device_name}: ✗ Rejected discharge slot {slot_idx} (SOC constraint violated{price_str})")
     
     # Get charge buffer percentage from config (default 20%)
     charge_buffer_percent = CONFIG['options'].get('battery_charge_buffer_percent', 20)
     
+    logger.debug(f"🔋 {device_name}: Phase 2 - Adding charge slots (cheapest first, buffer={charge_buffer_percent}%)")
+    logger.debug(f"🔋 {device_name}: Initial state: {len(selected_discharge)} discharge slots selected")
+    
     # Then add charge slots (cheapest first) - but only if economically viable
     for slot_idx in charge_by_price:
         candidate = selected_charge | {slot_idx}
+        slot_price = prices[slot_idx] if prices and slot_idx < len(prices) else None
         final_soc, feasible, charged_kwh, discharged_kwh = simulate_soc(candidate, selected_discharge)
         
         if not feasible:
+            price_str = f", price={slot_price:.4f}" if slot_price is not None else ""
+            logger.debug(f"🔋 {device_name}: ✗ Rejected charge slot {slot_idx} (SOC constraint violated{price_str})")
             continue
         
         # Check if adding this charge slot is economically viable
@@ -190,39 +202,53 @@ def limit_battery_cycles(
         if discharged_kwh > 0:  # Only check if there are discharge slots
             max_charge_allowed = discharged_kwh * (1 + charge_buffer_percent / 100)
             if charged_kwh > max_charge_allowed:
-                logger.debug(f"🔋 {device_name}: Rejected charge slot {slot_idx} "
+                price_str = f", price={slot_price:.4f}" if slot_price is not None else ""
+                logger.debug(f"🔋 {device_name}: ✗ Rejected charge slot {slot_idx} "
                            f"(charged {charged_kwh:.2f} kWh would exceed discharge needs "
-                           f"{discharged_kwh:.2f} kWh + {charge_buffer_percent}% buffer)")
+                           f"{discharged_kwh:.2f} kWh + {charge_buffer_percent}% buffer = {max_charge_allowed:.2f} kWh{price_str})")
                 continue
         
         selected_charge = candidate
-        logger.debug(f"🔋 {device_name}: Added charge slot {slot_idx}, "
-                    f"charged={charged_kwh:.2f} kWh, discharged={discharged_kwh:.2f} kWh")
+        price_str = f", price={slot_price:.4f}" if slot_price is not None else ""
+        energy_balance = charged_kwh - discharged_kwh
+        logger.debug(f"🔋 {device_name}: ✓ Added charge slot {slot_idx}, "
+                    f"charged={charged_kwh:.2f} kWh, discharged={discharged_kwh:.2f} kWh, "
+                    f"balance={energy_balance:+.2f} kWh, final_soc={final_soc:.1f}%{price_str}")
         
         # Re-check if we can add more discharge slots now that we have more charge
         for d_slot in discharge_by_price:
             if d_slot not in selected_discharge:
                 d_candidate = selected_discharge | {d_slot}
-                _, d_feasible, _, _ = simulate_soc(selected_charge, d_candidate)
+                d_final_soc, d_feasible, d_charged_kwh, d_discharged_kwh = simulate_soc(selected_charge, d_candidate)
                 if d_feasible:
                     selected_discharge = d_candidate
+                    d_slot_price = prices[d_slot] if prices and d_slot < len(prices) else None
+                    price_str = f", price={d_slot_price:.4f}" if d_slot_price is not None else ""
+                    logger.debug(f"🔋 {device_name}: ✓ Re-added discharge slot {d_slot} (now feasible with more charge, final_soc={d_final_soc:.1f}%{price_str})")
     
     # Combine past slots (unchanged) with limited future slots
     final_charge_slots = past_charge_slots | selected_charge
     final_discharge_slots = past_discharge_slots | selected_discharge
+    
+    logger.debug(f"🔋 {device_name}: Selection complete - {len(selected_charge)} future charge slots, "
+                f"{len(selected_discharge)} future discharge slots added")
     
     # Convert back to time strings
     limited_charge_times = sorted([slot_idx_to_time(s) for s in final_charge_slots])
     limited_discharge_times = sorted([slot_idx_to_time(s) for s in final_discharge_slots])
     
     # Log results with price info if available
+    final_soc, _, total_charged, total_discharged = simulate_soc(selected_charge, selected_discharge)
+    energy_balance = total_charged - total_discharged
+    
     if prices and selected_charge:
         avg_charge_price = sum(prices[s] for s in selected_charge if s < len(prices)) / len(selected_charge)
-        logger.info(f"🔋 {device_name}: Selected {len(selected_charge)} charge slots (avg price: {avg_charge_price:.4f})")
+        logger.info(f"🔋 {device_name}: Selected {len(selected_charge)} charge slots (avg price: {avg_charge_price:.4f}, total: {total_charged:.2f} kWh)")
     if prices and selected_discharge:
         avg_discharge_price = sum(prices[s] for s in selected_discharge if s < len(prices)) / len(selected_discharge)
-        logger.info(f"🔋 {device_name}: Selected {len(selected_discharge)} discharge slots (avg price: {avg_discharge_price:.4f})")
+        logger.info(f"🔋 {device_name}: Selected {len(selected_discharge)} discharge slots (avg price: {avg_discharge_price:.4f}, total: {total_discharged:.2f} kWh)")
     
     logger.info(f"🔋 {device_name}: Final - {len(limited_charge_times)} charge, {len(limited_discharge_times)} discharge slots")
+    logger.info(f"🔋 {device_name}: Energy balance: {energy_balance:+.2f} kWh, final_soc: {final_soc:.1f}% (started at {current_soc:.1f}%)")
     
     return limited_charge_times, limited_discharge_times
