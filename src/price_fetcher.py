@@ -90,11 +90,14 @@ class EntsoeePriceFetcher:
             
             # Calculate dates
             today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            yesterday_start = today_start - timedelta(days=1)  # Include yesterday for discharge threshold context
             tomorrow_start = today_start + timedelta(days=1)
             tomorrow_end = tomorrow_start + timedelta(days=1)
             
-            # Fetch prices for today and tomorrow
-            start = pd.Timestamp(today_start, tz='Europe/Brussels')
+            # Fetch prices from yesterday through tomorrow
+            # We need yesterday's prices to preserve discharge decisions that were based on
+            # cheap prices from yesterday (e.g., yesterday 23:00 charge, today afternoon discharge)
+            start = pd.Timestamp(yesterday_start, tz='Europe/Brussels')
             end = pd.Timestamp(tomorrow_end, tz='Europe/Brussels')
             
             # Query day-ahead prices
@@ -141,8 +144,29 @@ class EntsoeePriceFetcher:
             
             horizon_end = horizon_datetimes[-1] + timedelta(minutes=SLOT_MINUTES) if horizon_datetimes else current_slot_start
             
+            # Calculate reference price stats for battery discharge threshold calculations
+            # Include yesterday's prices to preserve discharge decisions that were based on
+            # cheap prices from yesterday (e.g., yesterday 23:00 charge → today afternoon discharge)
+            reference_prices = []
+            ref_slot = yesterday_start  # Start from yesterday 00:00
+            while ref_slot < tomorrow_end:
+                slot_ts = pd.Timestamp(ref_slot, tz='Europe/Brussels')
+                if slot_ts in prices_series.index:
+                    reference_prices.append(prices_series[slot_ts])
+                else:
+                    hour_ts = pd.Timestamp(ref_slot.replace(minute=0), tz='Europe/Brussels')
+                    if hour_ts in prices_series.index:
+                        reference_prices.append(prices_series[hour_ts])
+                ref_slot += timedelta(minutes=SLOT_MINUTES)
+            
+            # Use min from yesterday+today+tomorrow for discharge threshold reference
+            full_day_min_price = min(reference_prices) if reference_prices else min(horizon_prices)
+            full_day_max_price = max(reference_prices) if reference_prices else max(horizon_prices)
+            
             logger.info(f"✅ Horizon: {current_slot_start.strftime('%Y-%m-%d %H:%M')} to {horizon_end.strftime('%Y-%m-%d %H:%M')} "
                        f"({len(horizon_prices)} slots @ {SLOT_MINUTES}min, lock until slot {lock_end_slot})")
+            logger.info(f"📈 Reference price range (yesterday+today+tomorrow): {full_day_min_price:.4f} - {full_day_max_price:.4f} EUR/kWh "
+                       f"(horizon range: {min(horizon_prices):.4f} - {max(horizon_prices):.4f})")
             
             return {
                 'prices': horizon_prices,
@@ -150,6 +174,8 @@ class EntsoeePriceFetcher:
                 'horizon_end': horizon_end,
                 'lock_end_slot': lock_end_slot,
                 'slot_minutes': SLOT_MINUTES,
+                'full_day_min_price': full_day_min_price,  # Min price from 00:00 today, for discharge threshold
+                'full_day_max_price': full_day_max_price,  # Max price from full day
             }
             
         except Exception as e:

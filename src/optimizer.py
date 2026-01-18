@@ -125,7 +125,7 @@ class HeatpumpOptimizer:
         BAT_DISCHARGE_PERCENTILE = CONFIG['options'].get('battery_discharge_percentile', 70)
         BAT_PRICE_DIFF_THRESHOLD = CONFIG['options'].get('battery_price_difference_threshold', 0.10)
 
-        EV_MAX_PRICE = 0.09  # 10 cents per kWh
+        EV_MAX_PRICE = 0.11  # 11 cents per kWh
 
         logger.info("🔎 Starting energy optimization using ENTSO-E prices (rolling horizon)...")
         logger.info(f"🔋 Battery optimization settings: "
@@ -149,6 +149,8 @@ class HeatpumpOptimizer:
         horizon_start = horizon_data['horizon_start']
         horizon_end = horizon_data['horizon_end']
         lock_end_slot = horizon_data['lock_end_slot']
+        # Full day's min price for discharge threshold calculations (includes prices before current slot)
+        full_day_min_price = horizon_data.get('full_day_min_price')
         # Use SLOT_MINUTES from config (should match price_fetcher's slot_minutes)
         slot_minutes = SLOT_MINUTES
         
@@ -252,6 +254,7 @@ class HeatpumpOptimizer:
         # Battery devices have both charge and discharge schedules
         # We store ORIGINAL times from price optimization (for display) and LIMITED times (for scheduling)
         original_battery_times = {}  # Store original times before SOC limiting
+        discharge_price_context = {}  # Store price context for preserving discharge decisions
         
         battery_devices = devices_config.get_devices_by_type('battery')
         for bat_device in battery_devices:
@@ -267,13 +270,19 @@ class HeatpumpOptimizer:
             )
             
             # Optimize battery discharging based on price thresholds
-            bat_discharge_times = optimize_bat_discharge(
+            # Note: optimize_bat_discharge returns a tuple (times, price_context)
+            # Pass full_day_min_price to preserve discharge decisions even when low prices have passed
+            bat_discharge_times, bat_price_context = optimize_bat_discharge(
                 prices=prices,
                 slot_minutes=slot_minutes,
                 slot_to_time=slot_to_time,
                 min_discharge_price=min_discharge_price,
-                price_difference_threshold=BAT_PRICE_DIFF_THRESHOLD
+                price_difference_threshold=BAT_PRICE_DIFF_THRESHOLD,
+                reference_min_price=full_day_min_price
             )
+            
+            # Store price context for this device (used to preserve decisions on recalculation)
+            discharge_price_context[device_name] = bat_price_context
             
             # Store ORIGINAL times (before SOC limiting) for informative display
             original_battery_times[f"{device_name}_charge_planned"] = list(bat_charge_times) if bat_charge_times else []
@@ -349,7 +358,8 @@ class HeatpumpOptimizer:
                     "charge_percentile": BAT_CHARGE_PERCENTILE,
                     "discharge_percentile": BAT_DISCHARGE_PERCENTILE,
                     "price_diff_threshold": BAT_PRICE_DIFF_THRESHOLD
-                }
+                },
+                "discharge_price_context": discharge_price_context  # Preserve min price for discharge threshold calculations
             }, Query().id == "schedule")
         
         logger.info(f"✅ Optimization complete. Schedule saved to TinyDB.")

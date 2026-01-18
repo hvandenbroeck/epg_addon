@@ -92,8 +92,9 @@ def optimize_bat_discharge(
     slot_minutes: int, 
     slot_to_time,
     min_discharge_price: float | None = None, 
-    price_difference_threshold: float | None = None
-) -> list[str]:
+    price_difference_threshold: float | None = None,
+    reference_min_price: float | None = None
+) -> tuple[list[str], dict]:
     """
     Optimize battery discharge periods using percentile-based price thresholds.
     Returns all eligible discharge slots (limiting is done in limit_battery_cycles).
@@ -106,12 +107,18 @@ def optimize_bat_discharge(
                             If None, uses fallback based on horizon prices.
         price_difference_threshold: Additional threshold for opportunistic discharging.
                                    Mark slot as discharge if it's more expensive than any slot being processed by this amount.
+        reference_min_price: Optional minimum price from original optimization horizon.
+                            When provided, this is used for price_difference_threshold calculations
+                            instead of looking at earlier slots in current horizon.
+                            This preserves discharge decisions when low prices have passed.
         
     Returns:
-        List of start times for battery discharge as HH:MM strings
+        Tuple of:
+            - List of start times for battery discharge as HH:MM strings
+            - Dict with price context (min_price_used) for storing with schedule
     """
     if not prices:
-        return []
+        return [], {'min_price_used': None}
     
     # Use provided min_discharge_price or calculate fallback from current horizon
     if min_discharge_price is None:
@@ -125,25 +132,38 @@ def optimize_bat_discharge(
     eligible_slots = [(i, prices[i]) for i in range(len(prices)) if prices[i] >= min_discharge_price]
     logger.info(f"🔋 Battery discharge: initially {len(eligible_slots)} eligible slots above threshold {min_discharge_price:.4f} EUR/kWh")
     
-    # Add price difference logic: mark slots as discharge slots if they are more expensive than earlier slots by threshold
+    # Calculate the reference minimum price for price difference logic
+    # Use reference_min_price if provided (from previous optimization), otherwise use current horizon min
+    if reference_min_price is not None:
+        min_price_for_threshold = reference_min_price
+        logger.info(f"🔋 Battery discharge: using preserved reference min price {min_price_for_threshold:.4f} EUR/kWh")
+    else:
+        min_price_for_threshold = min(prices) if prices else 0
+        logger.info(f"🔋 Battery discharge: using current horizon min price {min_price_for_threshold:.4f} EUR/kWh")
+    
+    # Add price difference logic: mark slots as discharge slots if they are more expensive than the reference min by threshold
     if price_difference_threshold is not None and price_difference_threshold > 0:
         logger.info(f"🔋 Battery discharge: applying price difference threshold {price_difference_threshold:.4f} EUR/kWh")
         for i in range(len(prices)):
             current_price = prices[i]
-            # Check if this slot is more expensive than any earlier slot by at least the threshold
-            is_expensive_compared_to_past = any(
-                current_price >= prices[j] + price_difference_threshold 
-                for j in range(0, i)
-            )
-            if is_expensive_compared_to_past:
+            # Check if this slot is more expensive than the reference min price by at least the threshold
+            # This preserves discharge decisions even when the low prices have passed in the horizon
+            is_expensive_compared_to_reference = current_price >= min_price_for_threshold + price_difference_threshold
+            
+            if is_expensive_compared_to_reference:
                 # Add to eligible slots if not already there
                 if not any(slot_idx == i for slot_idx, _ in eligible_slots):
                     eligible_slots.append((i, current_price))
         logger.info(f"🔋 Battery discharge: after price difference logic, {len(eligible_slots)} eligible slots")
     
+    # Return both the times and the price context for storage
+    price_context = {
+        'min_price_used': min_price_for_threshold
+    }
+    
     if not eligible_slots:
         logger.warning(f"⚠️ No slots above min_discharge_price={min_discharge_price:.4f} EUR/kWh")
-        return []
+        return [], price_context
     
     # Sort by price descending and return all eligible slots (limiting is done later)
     eligible_slots.sort(key=lambda x: x[1], reverse=True)
@@ -157,4 +177,4 @@ def optimize_bat_discharge(
         logger.info(f"💰 Battery discharge: selected {len(selected_slots)} eligible slots "
                    f"(avg={avg_discharge_price:.4f}, range={min_selected_price:.4f}-{max_price:.4f} EUR/kWh)")
     
-    return [slot_to_time(i, slot_minutes) for i in sorted(selected_slots)]
+    return [slot_to_time(i, slot_minutes) for i in sorted(selected_slots)], price_context
