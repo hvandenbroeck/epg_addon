@@ -251,7 +251,7 @@ def load_default_config() -> DevicesConfig:
                 instantaneous_load_entity_unit="W",
                 load_priority=2,
                 load_limiter_entity="select.device_load_limit",
-                load_maximum_watts="6000",
+                load_maximum_watts="8000",
                 charge_sign="positive",
                 automated_phase_switching=True,
                 apply_limit_actions=LoadManagementActions(

@@ -98,7 +98,11 @@ def limit_battery_cycles(
         charge_slots -= conflicts
     
     if not charge_slots and not discharge_slots:
-        return [], []
+        # No future slots to process - return past slots unchanged
+        limited_charge_times = sorted([slot_idx_to_time(s) for s in past_charge_slots])
+        limited_discharge_times = sorted([slot_idx_to_time(s) for s in past_discharge_slots])
+        logger.info(f"🔋 {device_name}: No future slots, preserving {len(limited_charge_times)} past charge and {len(limited_discharge_times)} past discharge slots")
+        return limited_charge_times, limited_discharge_times
     
     # Energy per slot when charging at full speed
     slot_hours = slot_minutes / 60

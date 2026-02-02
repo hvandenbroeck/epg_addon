@@ -125,7 +125,7 @@ class HeatpumpOptimizer:
         BAT_DISCHARGE_PERCENTILE = CONFIG['options'].get('battery_discharge_percentile', 70)
         BAT_PRICE_DIFF_THRESHOLD = CONFIG['options'].get('battery_price_difference_threshold', 0.10)
 
-        EV_MAX_PRICE = 0.11  # 11 cents per kWh
+        EV_MAX_PRICE = 0.10  # 11 cents per kWh
 
         logger.info("🔎 Starting energy optimization using ENTSO-E prices (rolling horizon)...")
         logger.info(f"🔋 Battery optimization settings: "
@@ -471,12 +471,12 @@ class HeatpumpOptimizer:
         return 50.0
 
     def _extract_times(self, schedule, device_key, horizon_start, slot_minutes):
-        """Extract future time slots for a device from schedule.
+        """Extract time slots for a device from schedule.
         
         Expands merged blocks back into individual slot times.
+        Returns all slots (past and future) - filtering is done by limit_battery_cycles.
         """
         times = []
-        now = datetime.now()
         
         for entry in schedule:
             if entry.get('device') == device_key:
@@ -488,11 +488,9 @@ class HeatpumpOptimizer:
                 slot_delta = timedelta(minutes=slot_minutes)
                 
                 while current < stop:
-                    # Only add slots that haven't ended yet (includes in-progress slots)
-                    slot_end = current + slot_delta
-                    if slot_end > now:
-                        # Convert to HH:MM format relative to horizon
-                        minutes_from_horizon = int((current - horizon_start).total_seconds() / 60)
+                    # Convert to HH:MM format relative to horizon
+                    minutes_from_horizon = int((current - horizon_start).total_seconds() / 60)
+                    if minutes_from_horizon >= 0:  # Only include slots within the horizon
                         times.append(f"{minutes_from_horizon // 60:02d}:{minutes_from_horizon % 60:02d}")
                     current += slot_delta
         
