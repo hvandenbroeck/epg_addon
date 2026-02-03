@@ -87,6 +87,10 @@ class Device(BaseModel):
     block_hours: Optional[float] = Field(default=None, description="Minimum runtime when turned on (hours)")
     min_gap_hours: Optional[float] = Field(default=None, description="Minimum gap between runs (hours)")
     max_gap_hours: Optional[float] = Field(default=None, description="Maximum gap between runs (hours)")
+    # WP runtime calculation sensors (only used when type='wp')
+    inside_temp_sensor: Optional[str] = Field(default=None, description="Inside temperature sensor entity ID")
+    outside_temp_sensor: Optional[str] = Field(default=None, description="Outside temperature sensor entity ID")
+    heatpump_status_sensor: Optional[str] = Field(default=None, description="Heat pump on/off status sensor entity ID")
 
 
 class DevicesConfig(BaseSettings):

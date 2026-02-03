@@ -1,0 +1,361 @@
+"""Heat Pump Daily Runtime Calculator.
+
+This module calculates expected daily runtime for heat pumps based on historical data.
+It analyzes the relationship between inside temperature, outside temperature, and 
+heat pump operation to estimate how long the heat pump needs to run daily.
+
+The calculation considers:
+- Inside temperature changes when heat pump is running
+- Outside temperature (lower = longer runtime needed)
+- Historical heat pump on/off states
+- Last 10 days of data
+"""
+
+import logging
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional, Tuple
+from tinydb import TinyDB, Query
+
+logger = logging.getLogger(__name__)
+
+
+class RuntimeCalculator:
+    """Calculates expected daily runtime for heat pumps based on historical data."""
+
+    async def calculate_and_store_daily_runtime(
+        self,
+        ha_url: str,
+        access_token: str,
+        device_name: str,
+        inside_temp_sensor: str,
+        outside_temp_sensor: str,
+        heatpump_status_sensor: str,
+        days_back: int = 10
+    ) -> Optional[float]:
+        """Calculate expected daily runtime and store it in database.
+        
+        This is the main entry point that orchestrates:
+        1. Loading historical data from Home Assistant
+        2. Calculating expected daily runtime
+        3. Storing the result in TinyDB
+        
+        Args:
+            ha_url: Home Assistant URL
+            access_token: Home Assistant access token
+            device_name: Device name for storage in database
+            inside_temp_sensor: Inside temperature sensor entity ID
+            outside_temp_sensor: Outside temperature sensor entity ID
+            heatpump_status_sensor: Heat pump status sensor entity ID
+            days_back: Number of days of history to analyze
+            
+        Returns:
+            Expected daily runtime in hours, or None if calculation fails
+        """
+        logger.info(f"🔍 Calculating daily runtime for {device_name} from historical data...")
+        
+        # Load history from Home Assistant
+        history = await self.load_history_from_ha(
+            ha_url=ha_url,
+            access_token=access_token,
+            inside_temp_sensor=inside_temp_sensor,
+            outside_temp_sensor=outside_temp_sensor,
+            heatpump_status_sensor=heatpump_status_sensor,
+            days_back=days_back
+        )
+        
+        if not history:
+            logger.warning(f"⚠️ Could not load history for {device_name}")
+            return None
+        
+        # Calculate expected daily runtime
+        expected_daily_runtime = self.calculate_daily_runtime(
+            history=history,
+            inside_temp_sensor=inside_temp_sensor,
+            outside_temp_sensor=outside_temp_sensor,
+            heatpump_status_sensor=heatpump_status_sensor,
+            days_back=days_back
+        )
+        
+        if expected_daily_runtime:
+            logger.info(f"📊 {device_name}: Expected daily runtime = {expected_daily_runtime:.2f} hours")
+            
+            # Store in database
+            with TinyDB('db.json') as db:
+                runtime_table = db.table('wp_daily_runtime')
+                runtime_table.upsert(
+                    {
+                        'device': device_name,
+                        'expected_daily_runtime_hours': expected_daily_runtime,
+                        'calculated_at': datetime.now().isoformat(),
+                        'inside_temp_sensor': inside_temp_sensor,
+                        'outside_temp_sensor': outside_temp_sensor,
+                        'heatpump_status_sensor': heatpump_status_sensor
+                    },
+                    Query().device == device_name
+                )
+            
+            return expected_daily_runtime
+        else:
+            logger.warning(f"⚠️ Could not calculate daily runtime for {device_name}")
+            return None
+
+    async def load_history_from_ha(
+        self, 
+        ha_url: str,
+        access_token: str,
+        inside_temp_sensor: str,
+        outside_temp_sensor: str,
+        heatpump_status_sensor: str,
+        days_back: int = 10
+    ) -> Dict[str, List[Tuple[datetime, float]]]:
+        """Load sensor history from Home Assistant.
+        
+        Args:
+            ha_url: Home Assistant URL
+            access_token: Home Assistant access token
+            inside_temp_sensor: Inside temperature sensor entity ID
+            outside_temp_sensor: Outside temperature sensor entity ID
+            heatpump_status_sensor: Heat pump status sensor entity ID
+            days_back: Number of days of history to load
+            
+        Returns:
+            Dictionary mapping entity_id to list of (timestamp, value) tuples
+        """
+        import aiohttp
+        from datetime import timezone
+        
+        # Calculate time range
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(days=days_back)
+        
+        # List of entity IDs to fetch
+        entity_ids = [inside_temp_sensor, outside_temp_sensor, heatpump_status_sensor]
+        
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
+        
+        history = {}
+        
+        # Create a single session for all requests
+        async with aiohttp.ClientSession() as session:
+            # Fetch history for each entity
+            for entity_id in entity_ids:
+                try:
+                    # Home Assistant history API endpoint
+                    # Format: /api/history/period/<timestamp>?filter_entity_id=<entity_id>
+                    url = f"{ha_url}/api/history/period/{start_time.isoformat()}?filter_entity_id={entity_id}"
+                    
+                    async with session.get(url, headers=headers) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            
+                            # Parse the response
+                            # data is a list of lists, where each inner list contains state changes for an entity
+                            if data and len(data) > 0:
+                                entity_data = data[0]  # First (and only) entity in response
+                                history[entity_id] = []
+                                
+                                for state_change in entity_data:
+                                    try:
+                                        # Parse timestamp
+                                        last_changed = state_change.get('last_changed')
+                                        if last_changed:
+                                            # Handle ISO 8601 format with proper timezone support
+                                            if last_changed.endswith('Z'):
+                                                last_changed = last_changed[:-1] + '+00:00'
+                                            timestamp = datetime.fromisoformat(last_changed)
+                                            
+                                            # Parse state value
+                                            state = state_change.get('state')
+                                            if state and state not in ['unknown', 'unavailable', 'None']:
+                                                value = float(state)
+                                                history[entity_id].append((timestamp, value))
+                                    except (ValueError, TypeError) as e:
+                                        logger.debug(f"Skipping invalid state for {entity_id}: {e}")
+                                        continue
+                                
+                                logger.info(f"Loaded {len(history[entity_id])} history entries for {entity_id}")
+                        else:
+                            logger.error(f"Failed to fetch history for {entity_id}: HTTP {response.status}")
+                except Exception as e:
+                    logger.error(f"Error loading history for {entity_id}: {e}")
+        
+        return history
+
+    def calculate_daily_runtime(
+        self,
+        history: Dict[str, List[Tuple[datetime, float]]],
+        inside_temp_sensor: str,
+        outside_temp_sensor: str,
+        heatpump_status_sensor: str,
+        days_back: int = 10
+    ) -> Optional[float]:
+        """Calculate expected daily runtime based on historical data.
+        
+        The calculation analyzes the last N days to determine:
+        1. How long the heat pump ran each day
+        2. The relationship between outside temperature and runtime
+        3. The average daily runtime weighted by outside temperature
+        
+        Args:
+            history: Dictionary of sensor histories
+            inside_temp_sensor: Inside temperature sensor entity ID
+            outside_temp_sensor: Outside temperature sensor entity ID  
+            heatpump_status_sensor: Heat pump status sensor entity ID
+            days_back: Number of days to analyze (default 10)
+            
+        Returns:
+            Expected daily runtime in hours, or None if calculation fails
+        """
+        if heatpump_status_sensor not in history:
+            logger.error(f"Heat pump status sensor {heatpump_status_sensor} not found in history")
+            return None
+        
+        if outside_temp_sensor not in history:
+            logger.error(f"Outside temperature sensor {outside_temp_sensor} not found in history")
+            return None
+        
+        pump_history = history[heatpump_status_sensor]
+        outside_temp_history = history[outside_temp_sensor]
+        
+        if not pump_history or not outside_temp_history:
+            logger.error("Insufficient history data for runtime calculation")
+            return None
+        
+        # Calculate daily runtimes from pump status history
+        daily_runtimes = self._calculate_daily_runtimes_from_status(pump_history, days_back)
+        
+        if not daily_runtimes:
+            logger.warning("No daily runtimes calculated from history")
+            return None
+        
+        # Calculate average daily outside temperature for each day
+        daily_avg_temps = self._calculate_daily_avg_temps(outside_temp_history, days_back)
+        
+        # Calculate weighted average runtime
+        # Lower outside temps typically require longer runtime
+        total_runtime = 0.0
+        total_weight = 0.0
+        
+        for day_str, runtime_hours in daily_runtimes.items():
+            if day_str in daily_avg_temps:
+                avg_temp = daily_avg_temps[day_str]
+                # Weight by inverse of temperature (lower temp = higher weight)
+                # Add offset to avoid division by zero and to handle negative temps
+                temp_weight = 1.0 / (avg_temp + 20.0) if avg_temp > -20 else 0.1
+                total_runtime += runtime_hours * temp_weight
+                total_weight += temp_weight
+        
+        if total_weight == 0:
+            # Fallback to simple average
+            avg_runtime = sum(daily_runtimes.values()) / len(daily_runtimes)
+            logger.info(f"Calculated average daily runtime: {avg_runtime:.2f} hours (simple average)")
+            return avg_runtime
+        
+        weighted_avg_runtime = total_runtime / total_weight
+        logger.info(f"Calculated weighted average daily runtime: {weighted_avg_runtime:.2f} hours "
+                   f"(based on {len(daily_runtimes)} days)")
+        
+        return weighted_avg_runtime
+
+    def _calculate_daily_runtimes_from_status(
+        self,
+        pump_history: List[Tuple[datetime, float]],
+        days_back: int
+    ) -> Dict[str, float]:
+        """Calculate runtime in hours for each day from pump status history.
+        
+        Args:
+            pump_history: List of (timestamp, status) tuples where status is 1=on, 0=off
+            days_back: Number of days to analyze
+            
+        Returns:
+            Dictionary mapping date string (YYYY-MM-DD) to runtime in hours
+        """
+        if not pump_history:
+            return {}
+        
+        # Get date range
+        latest_timestamp = pump_history[-1][0]
+        earliest_date = latest_timestamp - timedelta(days=days_back)
+        
+        # Filter to relevant date range
+        filtered_history = [(ts, status) for ts, status in pump_history if ts >= earliest_date]
+        
+        if not filtered_history:
+            return {}
+        
+        # Calculate runtime per day
+        daily_runtimes = {}
+        
+        for i in range(len(filtered_history)):
+            timestamp, status = filtered_history[i]
+            date_str = timestamp.date().isoformat()
+            
+            # Calculate duration until next status change (or end of history)
+            if i < len(filtered_history) - 1:
+                next_timestamp = filtered_history[i + 1][0]
+                duration_seconds = (next_timestamp - timestamp).total_seconds()
+            else:
+                # For last entry, assume it holds for 1 hour (or until end of day)
+                duration_seconds = 3600
+            
+            # Add runtime if pump was on (status == 1)
+            if status == 1:
+                duration_hours = duration_seconds / 3600.0
+                if date_str not in daily_runtimes:
+                    daily_runtimes[date_str] = 0.0
+                daily_runtimes[date_str] += duration_hours
+        
+        logger.debug(f"Calculated runtimes for {len(daily_runtimes)} days: {daily_runtimes}")
+        return daily_runtimes
+
+    def _calculate_daily_avg_temps(
+        self,
+        temp_history: List[Tuple[datetime, float]],
+        days_back: int
+    ) -> Dict[str, float]:
+        """Calculate average temperature for each day.
+        
+        Args:
+            temp_history: List of (timestamp, temperature) tuples
+            days_back: Number of days to analyze
+            
+        Returns:
+            Dictionary mapping date string (YYYY-MM-DD) to average temperature
+        """
+        if not temp_history:
+            return {}
+        
+        # Get date range
+        latest_timestamp = temp_history[-1][0]
+        earliest_date = latest_timestamp - timedelta(days=days_back)
+        
+        # Filter to relevant date range
+        filtered_history = [(ts, temp) for ts, temp in temp_history if ts >= earliest_date]
+        
+        if not filtered_history:
+            return {}
+        
+        # Calculate average per day
+        daily_temps = {}
+        daily_counts = {}
+        
+        for timestamp, temp in filtered_history:
+            date_str = timestamp.date().isoformat()
+            if date_str not in daily_temps:
+                daily_temps[date_str] = 0.0
+                daily_counts[date_str] = 0
+            daily_temps[date_str] += temp
+            daily_counts[date_str] += 1
+        
+        # Calculate averages
+        daily_avg_temps = {
+            date_str: daily_temps[date_str] / daily_counts[date_str]
+            for date_str in daily_temps
+        }
+        
+        logger.debug(f"Calculated average temps for {len(daily_avg_temps)} days")
+        return daily_avg_temps

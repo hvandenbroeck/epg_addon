@@ -1,9 +1,13 @@
 {
+{
   "devices": [
     {
       "name": "wp",
       "type": "wp",
       "enable_load_management": false,
+      "inside_temp_sensor": "sensor.ebusd_700_z2roomtemp",
+      "outside_temp_sensor": "sensor.ebusd_700_displayedoutsidetemp",
+      "heatpump_status_sensor": "sensor.ebusd_700_hc2pumpstatus_2",
       "start": {
         "mqtt": [
           {

@@ -164,7 +164,8 @@ def optimize_wp(
     locked_slots: set[int],
     initial_gap_slots: int,
     horizon_start_datetime: datetime,
-    slot_to_time
+    slot_to_time,
+    expected_daily_runtime: float = None
 ) -> list[str]:
     """Optimize heat pump operation using sliding window constraints.
     
@@ -178,16 +179,37 @@ def optimize_wp(
         initial_gap_slots: Slots since last run
         horizon_start_datetime: When the horizon starts
         slot_to_time: Function to convert slot index to time string
+        expected_daily_runtime: Expected daily runtime in hours (optional)
         
     Returns:
         List of start times as HH:MM strings
     """
+    # Adjust block_hours based on expected daily runtime if provided
+    # The idea is that if we know the expected daily runtime, we can ensure
+    # the optimization schedules enough runtime to meet that expectation
+    adjusted_block_hours = block_hours
+    if expected_daily_runtime is not None and expected_daily_runtime > 0:
+        # Calculate how many blocks per day we need based on expected runtime
+        blocks_needed_per_day = expected_daily_runtime / block_hours
+        # Adjust max_gap to ensure we get enough runs per day
+        # If we need X blocks per day, gaps should be at most (24 / X - block_hours) hours
+        if blocks_needed_per_day > 0:
+            optimal_max_gap = (24.0 / blocks_needed_per_day) - block_hours
+            # Use the smaller of the configured max_gap and the calculated optimal
+            adjusted_max_gap = min(max_gap_hours, optimal_max_gap)
+            logger.info(f"WP: Using expected runtime {expected_daily_runtime:.2f}h/day "
+                       f"(~{blocks_needed_per_day:.1f} runs/day) -> adjusted max_gap to {adjusted_max_gap:.2f}h")
+        else:
+            adjusted_max_gap = max_gap_hours
+    else:
+        adjusted_max_gap = max_gap_hours
+    
     starts = optimize_thermal_device(
         prices=prices,
         slot_minutes=slot_minutes,
-        block_hours=block_hours,
+        block_hours=adjusted_block_hours,
         min_gap_hours=min_gap_hours,
-        max_gap_hours=max_gap_hours,
+        max_gap_hours=adjusted_max_gap,
         locked_slots=locked_slots,
         initial_gap_slots=initial_gap_slots,
         horizon_start_datetime=horizon_start_datetime,

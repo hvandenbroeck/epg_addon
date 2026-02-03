@@ -1,2 +1,6 @@
 __pycache__/
 config.json
+db.json
+logs.json
+*.pyc
+.DS_Store
