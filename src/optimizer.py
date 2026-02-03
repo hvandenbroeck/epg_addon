@@ -29,6 +29,7 @@ from .forecasting.price_history import PriceHistoryManager
 from .forecasting.statistics_loader import StatisticsLoader
 from .forecasting.weather import Weather
 from .forecasting.prediction import Prediction
+from .runtime_calculator import RuntimeCalculator
 
 logger = logging.getLogger(__name__)
 
@@ -186,12 +187,57 @@ class HeatpumpOptimizer:
         
         # ===== HEAT PUMP OPTIMIZATION (iterate over all WP devices) =====
         wp_devices = devices_config.get_devices_by_type('wp')
+        runtime_calc = RuntimeCalculator()
+        
         for wp_device in wp_devices:
             device_name = wp_device.name
             # Use device-specific config with fallback defaults
             WP_BLOCK_HOURS = wp_device.block_hours if wp_device.block_hours is not None else 1.0
             WP_MIN_GAP_HOURS = wp_device.min_gap_hours if wp_device.min_gap_hours is not None else 3.0
             WP_MAX_GAP_HOURS = wp_device.max_gap_hours if wp_device.max_gap_hours is not None else 8.0
+            
+            # Calculate expected daily runtime from historical data
+            expected_daily_runtime = None
+            if (wp_device.inside_temp_sensor and 
+                wp_device.outside_temp_sensor and 
+                wp_device.heatpump_status_sensor):
+                
+                logger.info(f"🔍 Calculating daily runtime for {device_name} from historical data...")
+                
+                # Try to load from CSV first (for testing)
+                csv_path = 'data/history.csv'
+                import os
+                if os.path.exists(csv_path):
+                    history = runtime_calc.load_history_from_csv(csv_path)
+                    if history:
+                        expected_daily_runtime = runtime_calc.calculate_daily_runtime(
+                            history=history,
+                            inside_temp_sensor=wp_device.inside_temp_sensor,
+                            outside_temp_sensor=wp_device.outside_temp_sensor,
+                            heatpump_status_sensor=wp_device.heatpump_status_sensor,
+                            days_back=10
+                        )
+                
+                if expected_daily_runtime:
+                    logger.info(f"📊 {device_name}: Expected daily runtime = {expected_daily_runtime:.2f} hours")
+                    # Store in database
+                    with TinyDB('db.json') as db:
+                        runtime_table = db.table('wp_daily_runtime')
+                        runtime_table.upsert(
+                            {
+                                'device': device_name,
+                                'expected_daily_runtime_hours': expected_daily_runtime,
+                                'calculated_at': datetime.now().isoformat(),
+                                'inside_temp_sensor': wp_device.inside_temp_sensor,
+                                'outside_temp_sensor': wp_device.outside_temp_sensor,
+                                'heatpump_status_sensor': wp_device.heatpump_status_sensor
+                            },
+                            Query().device == device_name
+                        )
+                else:
+                    logger.warning(f"⚠️ Could not calculate daily runtime for {device_name}")
+            else:
+                logger.debug(f"ℹ️ {device_name}: Runtime sensors not configured, skipping runtime calculation")
             
             wp_initial_gap = self._calculate_initial_gap(device_name, horizon_start, slot_minutes, WP_BLOCK_HOURS)
             wp_locked_slots = self._get_locked_slots(device_name, horizon_start, lock_end_datetime, slot_minutes, WP_BLOCK_HOURS)
@@ -216,6 +262,7 @@ class HeatpumpOptimizer:
                 last_wp_end = horizon_start + timedelta(minutes=(last_wp_slot + int(WP_BLOCK_HOURS * 60 / slot_minutes)) * slot_minutes)
                 wp_scheduled_starts = [horizon_start + timedelta(minutes=idx * slot_minutes) for idx in wp_slot_indices]
                 self._save_device_state(device_name, last_wp_end, wp_scheduled_starts)
+
 
         # ===== HOT WATER OPTIMIZATION (iterate over all HW devices) =====
         hw_devices = devices_config.get_devices_by_type('hw')
