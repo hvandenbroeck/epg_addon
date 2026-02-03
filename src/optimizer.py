@@ -204,19 +204,24 @@ class HeatpumpOptimizer:
                 
                 logger.info(f"🔍 Calculating daily runtime for {device_name} from historical data...")
                 
-                # Try to load from CSV first (for testing)
-                csv_path = 'data/history.csv'
-                import os
-                if os.path.exists(csv_path):
-                    history = runtime_calc.load_history_from_csv(csv_path)
-                    if history:
-                        expected_daily_runtime = runtime_calc.calculate_daily_runtime(
-                            history=history,
-                            inside_temp_sensor=wp_device.inside_temp_sensor,
-                            outside_temp_sensor=wp_device.outside_temp_sensor,
-                            heatpump_status_sensor=wp_device.heatpump_status_sensor,
-                            days_back=10
-                        )
+                # Load history from Home Assistant
+                history = await runtime_calc.load_history_from_ha(
+                    ha_url=self.ha_client.ha_url,
+                    access_token=self.ha_client.get_access_token(),
+                    inside_temp_sensor=wp_device.inside_temp_sensor,
+                    outside_temp_sensor=wp_device.outside_temp_sensor,
+                    heatpump_status_sensor=wp_device.heatpump_status_sensor,
+                    days_back=10
+                )
+                
+                if history:
+                    expected_daily_runtime = runtime_calc.calculate_daily_runtime(
+                        history=history,
+                        inside_temp_sensor=wp_device.inside_temp_sensor,
+                        outside_temp_sensor=wp_device.outside_temp_sensor,
+                        heatpump_status_sensor=wp_device.heatpump_status_sensor,
+                        days_back=10
+                    )
                 
                 if expected_daily_runtime:
                     logger.info(f"📊 {device_name}: Expected daily runtime = {expected_daily_runtime:.2f} hours")

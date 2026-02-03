@@ -67,9 +67,10 @@ class RuntimeCalculator:
             logger.error(f"Error loading history from {csv_path}: {e}")
             return {}
 
-    def load_history_from_ha(
+    async def load_history_from_ha(
         self, 
-        ha_client,
+        ha_url: str,
+        access_token: str,
         inside_temp_sensor: str,
         outside_temp_sensor: str,
         heatpump_status_sensor: str,
@@ -78,7 +79,8 @@ class RuntimeCalculator:
         """Load sensor history from Home Assistant.
         
         Args:
-            ha_client: Home Assistant client instance
+            ha_url: Home Assistant URL
+            access_token: Home Assistant access token
             inside_temp_sensor: Inside temperature sensor entity ID
             outside_temp_sensor: Outside temperature sensor entity ID
             heatpump_status_sensor: Heat pump status sensor entity ID
@@ -87,9 +89,64 @@ class RuntimeCalculator:
         Returns:
             Dictionary mapping entity_id to list of (timestamp, value) tuples
         """
-        # TODO: Implement Home Assistant history API integration
-        logger.warning("Home Assistant history loading not yet implemented, using CSV fallback")
-        return {}
+        import aiohttp
+        from datetime import timezone
+        
+        # Calculate time range
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(days=days_back)
+        
+        # List of entity IDs to fetch
+        entity_ids = [inside_temp_sensor, outside_temp_sensor, heatpump_status_sensor]
+        
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
+        
+        history = {}
+        
+        # Fetch history for each entity
+        for entity_id in entity_ids:
+            try:
+                # Home Assistant history API endpoint
+                # Format: /api/history/period/<timestamp>?filter_entity_id=<entity_id>
+                url = f"{ha_url}/api/history/period/{start_time.isoformat()}?filter_entity_id={entity_id}"
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, headers=headers) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            
+                            # Parse the response
+                            # data is a list of lists, where each inner list contains state changes for an entity
+                            if data and len(data) > 0:
+                                entity_data = data[0]  # First (and only) entity in response
+                                history[entity_id] = []
+                                
+                                for state_change in entity_data:
+                                    try:
+                                        # Parse timestamp
+                                        last_changed = state_change.get('last_changed')
+                                        if last_changed:
+                                            timestamp = datetime.fromisoformat(last_changed.replace('Z', '+00:00'))
+                                            
+                                            # Parse state value
+                                            state = state_change.get('state')
+                                            if state and state not in ['unknown', 'unavailable', 'None']:
+                                                value = float(state)
+                                                history[entity_id].append((timestamp, value))
+                                    except (ValueError, TypeError) as e:
+                                        logger.debug(f"Skipping invalid state for {entity_id}: {e}")
+                                        continue
+                                
+                                logger.info(f"Loaded {len(history[entity_id])} history entries for {entity_id}")
+                        else:
+                            logger.error(f"Failed to fetch history for {entity_id}: HTTP {response.status}")
+            except Exception as e:
+                logger.error(f"Error loading history for {entity_id}: {e}")
+        
+        return history
 
     def calculate_daily_runtime(
         self,

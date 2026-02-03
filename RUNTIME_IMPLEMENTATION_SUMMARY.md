@@ -19,13 +19,14 @@ heatpump_status_sensor: Optional[str] = Field(default=None, description="Heat pu
 ### 2. Runtime Calculator Module (`src/runtime_calculator.py`)
 
 Created a new module that:
-- Loads historical sensor data from CSV files (with future support for Home Assistant API)
+- Loads historical sensor data from Home Assistant history API
 - Calculates daily runtime for each day in the historical data
 - Computes average outside temperature per day
 - Calculates a weighted average runtime (lower temperatures get higher weight)
 
 Key features:
 - Analyzes last 10 days of history by default
+- Fetches data directly from Home Assistant via `/api/history/period` endpoint
 - Handles time-series data with variable intervals
 - Robust error handling for missing or invalid data
 
@@ -49,7 +50,7 @@ adjusted_max_gap = min(max_gap_hours, optimal_max_gap)
 Enhanced the heat pump optimization workflow to:
 - Import the RuntimeCalculator
 - Check if runtime sensors are configured
-- Load historical data from CSV (fallback for testing)
+- Load historical data from Home Assistant history API
 - Calculate expected daily runtime
 - Store results in TinyDB (`wp_daily_runtime` table)
 - Log the calculated runtime

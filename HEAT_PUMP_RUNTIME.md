@@ -40,17 +40,13 @@ If these sensors are not configured, the runtime calculation will be skipped and
 
 ### 1. Historical Data Collection
 
-The system loads the last 10 days of historical data from:
-- `data/history.csv` (for testing/development)
-- Home Assistant history API (when available)
+The system loads the last 10 days of historical data from Home Assistant using the history API endpoint:
+- `/api/history/period/<timestamp>?filter_entity_id=<entity_id>`
 
-The CSV format is:
-```csv
-entity_id,state,last_changed
-sensor.ebusd_700_z2roomtemp,21.25,2026-01-28T23:00:00.000Z
-sensor.ebusd_700_displayedoutsidetemp,2.75,2026-01-28T23:00:00.000Z
-sensor.ebusd_700_hc2pumpstatus_2,1,2026-01-28T23:00:00.000Z
-```
+The system automatically fetches history for:
+- Inside temperature sensor
+- Outside temperature sensor
+- Heat pump status sensor (1=on, 0=off)
 
 ### 2. Daily Runtime Calculation
 
@@ -113,28 +109,24 @@ WP: Using expected runtime 10.52h/day (~10.5 runs/day) -> adjusted max_gap to 1.
 
 ## Testing
 
-Run the test script to validate the runtime calculation:
+The runtime calculation automatically fetches historical data from Home Assistant during each optimization run. To verify it's working:
 
-```bash
-python3 test_optimization_integration.py
-```
+1. Configure the sensor fields in your device configuration
+2. Check the logs during optimization for runtime calculation messages
+3. Verify the calculated runtime in the TinyDB database (`wp_daily_runtime` table)
 
-This will:
-1. Load historical data from `data/history.csv`
-2. Calculate expected daily runtime
-3. Show daily runtimes and average temperatures
-4. Display the weighted average calculation
+The test scripts in the repository use CSV data for offline testing, but the production system uses live Home Assistant data.
 
 ## Notes
 
 - The runtime calculation is performed during each optimization run
+- Historical data is fetched directly from Home Assistant using the history API
 - If sensors are not configured, the optimization uses default parameters
 - The calculation requires at least a few days of historical data to be accurate
 - The weighted average gives more importance to colder days (which typically require longer runtime)
 
 ## Future Enhancements
 
-- Integration with Home Assistant history API (currently uses CSV fallback)
 - Machine learning models to predict runtime based on weather forecasts
 - Adaptive learning from actual vs. scheduled runtime
 - Per-day runtime variation based on weather predictions
