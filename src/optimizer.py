@@ -202,45 +202,16 @@ class HeatpumpOptimizer:
                 wp_device.outside_temp_sensor and 
                 wp_device.heatpump_status_sensor):
                 
-                logger.info(f"🔍 Calculating daily runtime for {device_name} from historical data...")
-                
-                # Load history from Home Assistant
-                history = await runtime_calc.load_history_from_ha(
+                # Use RuntimeCalculator to load history, calculate, and store runtime
+                expected_daily_runtime = await runtime_calc.calculate_and_store_daily_runtime(
                     ha_url=self.ha_client.ha_url,
                     access_token=self.ha_client.get_access_token(),
+                    device_name=device_name,
                     inside_temp_sensor=wp_device.inside_temp_sensor,
                     outside_temp_sensor=wp_device.outside_temp_sensor,
                     heatpump_status_sensor=wp_device.heatpump_status_sensor,
                     days_back=10
                 )
-                
-                if history:
-                    expected_daily_runtime = runtime_calc.calculate_daily_runtime(
-                        history=history,
-                        inside_temp_sensor=wp_device.inside_temp_sensor,
-                        outside_temp_sensor=wp_device.outside_temp_sensor,
-                        heatpump_status_sensor=wp_device.heatpump_status_sensor,
-                        days_back=10
-                    )
-                
-                if expected_daily_runtime:
-                    logger.info(f"📊 {device_name}: Expected daily runtime = {expected_daily_runtime:.2f} hours")
-                    # Store in database
-                    with TinyDB('db.json') as db:
-                        runtime_table = db.table('wp_daily_runtime')
-                        runtime_table.upsert(
-                            {
-                                'device': device_name,
-                                'expected_daily_runtime_hours': expected_daily_runtime,
-                                'calculated_at': datetime.now().isoformat(),
-                                'inside_temp_sensor': wp_device.inside_temp_sensor,
-                                'outside_temp_sensor': wp_device.outside_temp_sensor,
-                                'heatpump_status_sensor': wp_device.heatpump_status_sensor
-                            },
-                            Query().device == device_name
-                        )
-                else:
-                    logger.warning(f"⚠️ Could not calculate daily runtime for {device_name}")
             else:
                 logger.debug(f"ℹ️ {device_name}: Runtime sensors not configured, skipping runtime calculation")
             

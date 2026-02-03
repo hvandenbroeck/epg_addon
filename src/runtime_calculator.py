@@ -14,12 +14,90 @@ The calculation considers:
 import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
+from tinydb import TinyDB, Query
 
 logger = logging.getLogger(__name__)
 
 
 class RuntimeCalculator:
     """Calculates expected daily runtime for heat pumps based on historical data."""
+
+    async def calculate_and_store_daily_runtime(
+        self,
+        ha_url: str,
+        access_token: str,
+        device_name: str,
+        inside_temp_sensor: str,
+        outside_temp_sensor: str,
+        heatpump_status_sensor: str,
+        days_back: int = 10
+    ) -> Optional[float]:
+        """Calculate expected daily runtime and store it in database.
+        
+        This is the main entry point that orchestrates:
+        1. Loading historical data from Home Assistant
+        2. Calculating expected daily runtime
+        3. Storing the result in TinyDB
+        
+        Args:
+            ha_url: Home Assistant URL
+            access_token: Home Assistant access token
+            device_name: Device name for storage in database
+            inside_temp_sensor: Inside temperature sensor entity ID
+            outside_temp_sensor: Outside temperature sensor entity ID
+            heatpump_status_sensor: Heat pump status sensor entity ID
+            days_back: Number of days of history to analyze
+            
+        Returns:
+            Expected daily runtime in hours, or None if calculation fails
+        """
+        logger.info(f"🔍 Calculating daily runtime for {device_name} from historical data...")
+        
+        # Load history from Home Assistant
+        history = await self.load_history_from_ha(
+            ha_url=ha_url,
+            access_token=access_token,
+            inside_temp_sensor=inside_temp_sensor,
+            outside_temp_sensor=outside_temp_sensor,
+            heatpump_status_sensor=heatpump_status_sensor,
+            days_back=days_back
+        )
+        
+        if not history:
+            logger.warning(f"⚠️ Could not load history for {device_name}")
+            return None
+        
+        # Calculate expected daily runtime
+        expected_daily_runtime = self.calculate_daily_runtime(
+            history=history,
+            inside_temp_sensor=inside_temp_sensor,
+            outside_temp_sensor=outside_temp_sensor,
+            heatpump_status_sensor=heatpump_status_sensor,
+            days_back=days_back
+        )
+        
+        if expected_daily_runtime:
+            logger.info(f"📊 {device_name}: Expected daily runtime = {expected_daily_runtime:.2f} hours")
+            
+            # Store in database
+            with TinyDB('db.json') as db:
+                runtime_table = db.table('wp_daily_runtime')
+                runtime_table.upsert(
+                    {
+                        'device': device_name,
+                        'expected_daily_runtime_hours': expected_daily_runtime,
+                        'calculated_at': datetime.now().isoformat(),
+                        'inside_temp_sensor': inside_temp_sensor,
+                        'outside_temp_sensor': outside_temp_sensor,
+                        'heatpump_status_sensor': heatpump_status_sensor
+                    },
+                    Query().device == device_name
+                )
+            
+            return expected_daily_runtime
+        else:
+            logger.warning(f"⚠️ Could not calculate daily runtime for {device_name}")
+            return None
 
     async def load_history_from_ha(
         self, 
