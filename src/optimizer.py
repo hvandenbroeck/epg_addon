@@ -251,7 +251,8 @@ class HeatpumpOptimizer:
                 locked_slots=wp_locked_slots,
                 initial_gap_slots=wp_initial_gap,
                 horizon_start_datetime=horizon_start,
-                slot_to_time=slot_to_time
+                slot_to_time=slot_to_time,
+                expected_daily_runtime=expected_daily_runtime
             )
             results[device_name] = wp_times
             
