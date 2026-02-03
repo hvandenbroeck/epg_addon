@@ -106,14 +106,15 @@ class RuntimeCalculator:
         
         history = {}
         
-        # Fetch history for each entity
-        for entity_id in entity_ids:
-            try:
-                # Home Assistant history API endpoint
-                # Format: /api/history/period/<timestamp>?filter_entity_id=<entity_id>
-                url = f"{ha_url}/api/history/period/{start_time.isoformat()}?filter_entity_id={entity_id}"
-                
-                async with aiohttp.ClientSession() as session:
+        # Create a single session for all requests
+        async with aiohttp.ClientSession() as session:
+            # Fetch history for each entity
+            for entity_id in entity_ids:
+                try:
+                    # Home Assistant history API endpoint
+                    # Format: /api/history/period/<timestamp>?filter_entity_id=<entity_id>
+                    url = f"{ha_url}/api/history/period/{start_time.isoformat()}?filter_entity_id={entity_id}"
+                    
                     async with session.get(url, headers=headers) as response:
                         if response.status == 200:
                             data = await response.json()
@@ -129,7 +130,10 @@ class RuntimeCalculator:
                                         # Parse timestamp
                                         last_changed = state_change.get('last_changed')
                                         if last_changed:
-                                            timestamp = datetime.fromisoformat(last_changed.replace('Z', '+00:00'))
+                                            # Handle ISO 8601 format with proper timezone support
+                                            if last_changed.endswith('Z'):
+                                                last_changed = last_changed[:-1] + '+00:00'
+                                            timestamp = datetime.fromisoformat(last_changed)
                                             
                                             # Parse state value
                                             state = state_change.get('state')
@@ -143,8 +147,8 @@ class RuntimeCalculator:
                                 logger.info(f"Loaded {len(history[entity_id])} history entries for {entity_id}")
                         else:
                             logger.error(f"Failed to fetch history for {entity_id}: HTTP {response.status}")
-            except Exception as e:
-                logger.error(f"Error loading history for {entity_id}: {e}")
+                except Exception as e:
+                    logger.error(f"Error loading history for {entity_id}: {e}")
         
         return history
 
