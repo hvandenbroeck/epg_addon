@@ -191,3 +191,4 @@ print(f"Found {ev_count} EV devices")
 - See `DEVICES_CONFIG_EXAMPLE.json` for complete example
 - Read `DEVICES_CONFIG_MIGRATION.md` for detailed documentation
 - Check `example_device_config_usage.py` for code examples
+- See `HEAT_PUMP_RUNTIME.md` for heat pump runtime calculation feature
