@@ -23,10 +23,6 @@ logger = logging.getLogger(__name__)
 class RuntimeCalculator:
     """Calculates expected daily runtime for heat pumps based on historical data."""
 
-    def __init__(self):
-        """Initialize the runtime calculator."""
-        pass
-
     def load_history_from_csv(self, csv_path: str) -> Dict[str, List[Tuple[datetime, float]]]:
         """Load sensor history from CSV file.
         
