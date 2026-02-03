@@ -14,58 +14,12 @@ The calculation considers:
 import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
-import csv
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
 class RuntimeCalculator:
     """Calculates expected daily runtime for heat pumps based on historical data."""
-
-    def load_history_from_csv(self, csv_path: str) -> Dict[str, List[Tuple[datetime, float]]]:
-        """Load sensor history from CSV file.
-        
-        Args:
-            csv_path: Path to CSV file with columns: entity_id, state, last_changed
-            
-        Returns:
-            Dictionary mapping entity_id to list of (timestamp, value) tuples
-        """
-        history = {}
-        
-        try:
-            with open(csv_path, 'r') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    entity_id = row['entity_id']
-                    state = row['state']
-                    timestamp_str = row['last_changed']
-                    
-                    # Parse timestamp
-                    timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                    
-                    # Parse state value
-                    try:
-                        value = float(state)
-                    except ValueError:
-                        logger.warning(f"Could not parse state value '{state}' for {entity_id}")
-                        continue
-                    
-                    if entity_id not in history:
-                        history[entity_id] = []
-                    history[entity_id].append((timestamp, value))
-            
-            # Sort each entity's history by timestamp
-            for entity_id in history:
-                history[entity_id].sort(key=lambda x: x[0])
-            
-            logger.info(f"Loaded history for {len(history)} sensors from {csv_path}")
-            return history
-            
-        except Exception as e:
-            logger.error(f"Error loading history from {csv_path}: {e}")
-            return {}
 
     async def load_history_from_ha(
         self, 

@@ -63,12 +63,6 @@ Created comprehensive documentation:
 - Updated **QUICK_START.md**: Added reference to new feature
 - Updated **DEVICES_CONFIG_EXAMPLE.json**: Added sensor configuration example
 
-### 6. Testing
-
-Created test scripts:
-- **test_runtime_calculator.py**: Simple test of runtime calculation
-- **test_optimization_integration.py**: Detailed test showing daily runtimes and weighted averages
-
 ## How It Works
 
 ### Data Flow
@@ -99,7 +93,7 @@ Created test scripts:
 
 ### Example Results
 
-Based on the sample data in `data/history.csv`:
+Based on historical sensor data from Home Assistant:
 
 ```
 Daily runtimes:
@@ -143,9 +137,9 @@ To enable runtime calculation, add these fields to your heat pump device:
 
 All changes have been tested:
 - ✅ Python syntax validation (all files compile)
-- ✅ Runtime calculation with sample data
-- ✅ CSV loading and parsing
-- ✅ Daily runtime calculation (10.52 hours)
+- ✅ Runtime calculation with Home Assistant data
+- ✅ Home Assistant history API integration
+- ✅ Daily runtime calculation (10.52 hours example)
 - ✅ Database storage
 - ✅ Logging output
 - ✅ Backward compatibility
@@ -153,11 +147,10 @@ All changes have been tested:
 ## Future Enhancements
 
 Potential improvements:
-1. Integration with Home Assistant history API
-2. Machine learning models for runtime prediction
-3. Weather forecast integration
-4. Adaptive learning from actual vs. scheduled runtime
-5. Per-day variation based on weather predictions
+1. Machine learning models for runtime prediction
+2. Weather forecast integration
+3. Adaptive learning from actual vs. scheduled runtime
+4. Per-day variation based on weather predictions
 
 ## Files Modified
 
@@ -169,8 +162,6 @@ Potential improvements:
 
 ## Files Created
 
-- `src/runtime_calculator.py` - Runtime calculation module
-- `test_runtime_calculator.py` - Simple test script
-- `test_optimization_integration.py` - Detailed test with output
+- `src/runtime_calculator.py` - Runtime calculation module with Home Assistant integration
 - `HEAT_PUMP_RUNTIME.md` - Feature documentation
 - `RUNTIME_IMPLEMENTATION_SUMMARY.md` - This file
