@@ -12,7 +12,7 @@ The calculated runtime is used to optimize the heat pump schedule by adjusting t
 
 ## Configuration
 
-To enable runtime calculation for a heat pump device, add the following sensor configuration fields to the device in your `DEVICES_CONFIG.json`:
+To enable runtime calculation for a heat pump device, add the following sensor configuration fields to the device in your `/data/options.json`:
 
 ```json
 {
