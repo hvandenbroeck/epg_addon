@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from tinydb import TinyDB, Query
 
-from .devices_config import devices_config
+from .devices_config import devices_config, ActionSet
 from .utils import ensure_list, evaluate_expression
 from .config import CONFIG
 
@@ -384,6 +384,28 @@ class DeviceVerifier:
             # Cancel remaining verification jobs for this device
             self._cancel_verification_jobs(device)
 
+    def _get_base_device_name(self, device: str) -> str:
+        """Return the base device name, stripping any '_charge' or '_discharge' suffix."""
+        if device.endswith('_charge') or device.endswith('_discharge'):
+            return device.rsplit('_', 1)[0]
+        return device
+
+    def _is_known_device(self, device: str) -> bool:
+        """Return True if the device (or its battery base name) is found in the config."""
+        return self.devices_config.get_device_by_name(self._get_base_device_name(device)) is not None
+
+    def _get_action_set(self, device: str, action_label: str) -> Optional[ActionSet]:
+        """Return the ActionSet for the given device and action label, or None."""
+        base_name = self._get_base_device_name(device)
+        device_obj = self.devices_config.get_device_by_name(base_name)
+        if not device_obj:
+            return None
+        if device.endswith('_charge'):
+            return device_obj.charge_start if action_label == "start" else device_obj.charge_stop
+        if device.endswith('_discharge'):
+            return device_obj.discharge_start if action_label == "start" else device_obj.discharge_stop
+        return device_obj.start if action_label == "start" else device_obj.stop
+
     async def run_periodic_verification(self):
         """Run periodic verification for all scheduled devices.
         
@@ -406,8 +428,9 @@ class DeviceVerifier:
         
         now = datetime.now()
         
-        # Group schedule entries by device and determine expected state
-        # A device should be "start" if ANY of its slots is currently active
+        # Group schedule entries by device and determine expected state.
+        # A device should be "start" if ANY of its slots is currently active.
+        # Battery entries appear as "<name>_charge" / "<name>_discharge" in the schedule.
         device_states: Dict[str, str] = {}  # device -> expected action ("start" or "stop")
         
         for entry in schedule_doc["schedule"]:
@@ -418,6 +441,10 @@ class DeviceVerifier:
             if not device or not start_str or not stop_str:
                 continue
             
+            # Skip entries for devices not present in the current config
+            if not self._is_known_device(device):
+                continue
+            
             try:
                 start_time = datetime.fromisoformat(start_str)
                 end_time = datetime.fromisoformat(stop_str)
@@ -425,56 +452,26 @@ class DeviceVerifier:
                 logger.error(f"Invalid datetime in schedule entry: {e}")
                 continue
             
-            device_obj = self.devices_config.get_device_by_name(device)
-            if not device_obj:
-                continue
-            
-            # Check if this slot is currently active
+            # Active slot takes priority over any previously recorded "stop"
             if start_time <= now < end_time:
-                # Device should be running - this takes priority
                 device_states[device] = "start"
             elif device not in device_states:
-                # Device has a schedule entry but no active slot yet
-                # Default to "stop" - device should be off outside scheduled windows
+                # No active slot for this device yet — it should be off
                 device_states[device] = "stop"
         
-        # Now verify each device's expected state
+        # Verify each device's expected state and re-apply the action when needed
         for device, expected_action in device_states.items():
-            # Handle battery charge/discharge entries
-            is_battery_charge = device.endswith('_charge')
-            is_battery_discharge = device.endswith('_discharge')
-            
-            if is_battery_charge or is_battery_discharge:
-                base_device_name = device.rsplit('_', 1)[0]
-                device_obj = self.devices_config.get_device_by_name(base_device_name)
-                if not device_obj:
-                    continue
-                
-                # Get the appropriate battery action set
-                if is_battery_charge:
-                    action_set = device_obj.charge_start if expected_action == "start" else device_obj.charge_stop
-                else:
-                    action_set = device_obj.discharge_start if expected_action == "start" else device_obj.discharge_stop
-                
-                if not action_set:
-                    continue
-            else:
-                device_obj = self.devices_config.get_device_by_name(device)
-                if not device_obj:
-                    continue
-                action_set = device_obj.start if expected_action == "start" else device_obj.stop
-            
-            # Verify device state
             is_correct = await self.verify_device_action(device, expected_action)
             
             if not is_correct:
                 logger.warning(f"⚠️ Device {device} not in expected {expected_action} state during periodic check, executing action...")
+                action_set = self._get_action_set(device, expected_action)
+                if not action_set:
+                    logger.warning(f"No action set found for {device} {expected_action}, skipping retry")
+                    continue
                 action_config = action_set.model_dump(exclude_none=True)
-                
-                # Use the correct device name for execute_device_action
-                exec_device_name = base_device_name if (is_battery_charge or is_battery_discharge) else device
+                exec_device_name = self._get_base_device_name(device)
                 await self.devices.execute_device_action(exec_device_name, action_config, expected_action)
-                # Register for post-action verification
                 self.register_action(device, expected_action)
             else:
                 logger.debug(f"✅ Device {device} verified in correct {expected_action} state")
