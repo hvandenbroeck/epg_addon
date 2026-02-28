@@ -26,7 +26,9 @@ def limit_battery_cycles(
     max_soc_percent: float,
     prices: list[float] | None = None,
     predicted_power_usage: list[dict] | None = None,
-    device_name: str = "battery"
+    device_name: str = "battery",
+    previous_limited_charge_times: list[str] | None = None,
+    previous_limited_discharge_times: list[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """
     Limit battery charge and discharge times based on battery capacity and SOC constraints.
@@ -47,7 +49,11 @@ def limit_battery_cycles(
         prices: List of prices per slot (used to prioritize cheap charge / expensive discharge)
         predicted_power_usage: List of dicts with 'timestamp' and 'predicted_kwh' keys, or None
         device_name: Name for logging purposes
-        
+        previous_limited_charge_times: Previously limited charge times (HH:MM strings) used to
+            determine which past slots to preserve. If None, falls back to charge_times.
+        previous_limited_discharge_times: Previously limited discharge times (HH:MM strings) used to
+            determine which past slots to preserve. If None, falls back to discharge_times.
+
     Returns:
         Tuple of (limited_charge_times, limited_discharge_times)
     """
@@ -78,10 +84,23 @@ def limit_battery_cycles(
     # Convert to slot indices
     charge_slots = {time_to_slot_idx(t) for t in charge_times} if charge_times else set()
     discharge_slots = {time_to_slot_idx(t) for t in discharge_times} if discharge_times else set()
-    
+
+    # Past slots are taken from the previously limited schedule so that we preserve
+    # what was actually planned, not what the optimizer re-suggests for the past.
+    prev_charge_slots = (
+        {time_to_slot_idx(t) for t in previous_limited_charge_times}
+        if previous_limited_charge_times is not None
+        else charge_slots
+    )
+    prev_discharge_slots = (
+        {time_to_slot_idx(t) for t in previous_limited_discharge_times}
+        if previous_limited_discharge_times is not None
+        else discharge_slots
+    )
+
     # Separate past and future slots - preserve all past slots unchanged
-    past_charge_slots = {s for s in charge_slots if s < current_slot_idx}
-    past_discharge_slots = {s for s in discharge_slots if s < current_slot_idx}
+    past_charge_slots = {s for s in prev_charge_slots if s < current_slot_idx}
+    past_discharge_slots = {s for s in prev_discharge_slots if s < current_slot_idx}
     future_charge_slots = {s for s in charge_slots if s >= current_slot_idx}
     future_discharge_slots = {s for s in discharge_slots if s >= current_slot_idx}
     

@@ -126,7 +126,7 @@ class HeatpumpOptimizer:
         BAT_DISCHARGE_PERCENTILE = CONFIG['options'].get('battery_discharge_percentile', 70)
         BAT_PRICE_DIFF_THRESHOLD = CONFIG['options'].get('battery_price_difference_threshold', 0.10)
 
-        EV_MAX_PRICE = 0.10  # 11 cents per kWh
+        EV_MAX_PRICE = 0.02  # 11 cents per kWh
 
         logger.info("🔎 Starting energy optimization using ENTSO-E prices (rolling horizon)...")
         logger.info(f"🔋 Battery optimization settings: "
@@ -439,7 +439,12 @@ class HeatpumpOptimizer:
             # Extract original times from stored schedule (already filtered for future slots)
             original_charge = self._extract_times(original_battery_schedule, f"{bat_device.name}_charge_planned", horizon_start, slot_minutes)
             original_discharge = self._extract_times(original_battery_schedule, f"{bat_device.name}_discharge_planned", horizon_start, slot_minutes)
-            
+
+            # Extract previously limited times from current schedule to preserve past planned slots
+            current_schedule = schedule_doc.get('schedule', [])
+            prev_limited_charge = self._extract_times(current_schedule, f"{bat_device.name}_charge", horizon_start, slot_minutes)
+            prev_limited_discharge = self._extract_times(current_schedule, f"{bat_device.name}_discharge", horizon_start, slot_minutes)
+
             if original_charge or original_discharge:
                 logger.debug(f"🕐 {bat_device.name}: Processing {len(original_charge)} charge and {len(original_discharge)} discharge future slots")
             
@@ -457,7 +462,9 @@ class HeatpumpOptimizer:
                     max_soc_percent=bat_device.battery_max_soc_percent or 80.0,
                     prices=prices,
                     predicted_power_usage=predicted_usage,
-                    device_name=bat_device.name
+                    device_name=bat_device.name,
+                    previous_limited_charge_times=prev_limited_charge,
+                    previous_limited_discharge_times=prev_limited_discharge,
                 )
             else:
                 # Use original times if battery not fully configured

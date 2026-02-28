@@ -127,7 +127,7 @@ class PriceHistoryManager:
             # Always resample to hourly to handle both 15-min and hourly data consistently
             # For hourly data, this just aligns timestamps; for 15-min data, it averages to hourly
             logger.info(f"📊 Fetched {len(prices_series)} records, resampling to hourly resolution")
-            prices_series = prices_series.resample('H').mean()
+            prices_series = prices_series.resample('h').mean()
             logger.info(f"✅ Resampled to {len(prices_series)} hourly prices")
             
             # Export resampled hourly prices for analysis

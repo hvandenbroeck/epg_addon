@@ -127,7 +127,7 @@ async def main():
     scheduler.add_job(
         scheduled_battery_recalc,
         'cron',
-        minute='*/15',
+        minute='10,25,40,55',
         timezone='Europe/Brussels',
         coalesce=True,
         max_instances=1,
