@@ -28,7 +28,8 @@ class StatisticsLoader:
         energy_dashboard_config = await fetcher.fetch_energy_dashboard_config()
 
         # Extract entities from energy dashboard config
-        entities = self.extract_energy_entities_for_usage(energy_dashboard_config)
+        exclude_devices = CONFIG.get("options", {}).get("prediction_exclude_devices", [])
+        entities = self.extract_energy_entities_for_usage(energy_dashboard_config, exclude_devices)
 
         # Build list of statistic IDs to fetch
         statistic_ids = []
@@ -93,25 +94,33 @@ class StatisticsLoader:
         ] if col in df.columns]
         cols_minus = [col for col in [
             *(entities.get("grid_export", [])),
-            *(entities.get("battery_charge", []))
+            *(entities.get("battery_charge", [])),
+            *(entities.get("excluded_devices", []))
         ] if col in df.columns]
 
         # Sum positive contributors
         df["energy_used_per_hour"] = 0.0
         for col in cols_plus:
             df["energy_used_per_hour"] += df[col].diff()
-        # Subtract negative contributors
+        # Subtract negative contributors (grid export, battery charge, excluded devices)
         for col in cols_minus:
             df["energy_used_per_hour"] -= df[col].diff()
 
         return df
 
     @staticmethod
-    def extract_energy_entities_for_usage(energy_config):
+    def extract_energy_entities_for_usage(energy_config, exclude_device_names=None):
         """
         Extracts entities needed to calculate true total energy used by home.
         Returns a dict of relevant sensors grouped by their role.
+
+        Args:
+            energy_config: Energy dashboard config from Home Assistant.
+            exclude_device_names: Optional list of device names (from device_consumption)
+                whose energy usage should be subtracted from the total, e.g. ["EV Charger"].
         """
+        if exclude_device_names is None:
+            exclude_device_names = []
         result = energy_config.get("result", {})
         entities = {
             "grid_import": [],
@@ -119,6 +128,7 @@ class StatisticsLoader:
             "battery_discharge": [],
             "grid_export": [],
             "battery_charge": [],
+            "excluded_devices": [],
         }
 
         for source in result.get("energy_sources", []):
@@ -143,4 +153,13 @@ class StatisticsLoader:
                     entities["battery_discharge"].append(sensor_discharge)
                 if sensor_charge:
                     entities["battery_charge"].append(sensor_charge)
+
+        # Extract device_consumption sensors that should be excluded from the prediction
+        for device in result.get("device_consumption", []):
+            device_name = device.get("name", "")
+            if device_name in exclude_device_names:
+                sensor = device.get("stat_consumption")
+                if sensor:
+                    entities["excluded_devices"].append(sensor)
+
         return entities
