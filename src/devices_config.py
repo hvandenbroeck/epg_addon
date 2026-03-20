@@ -158,7 +158,7 @@ def load_default_config() -> DevicesConfig:
             enable_load_management=False,
             start=ActionSet(mqtt=[
                 MQTTAction(topic="ebusd/700/z2sfmode/set", topic_get="ebusd/700/z2sfmode/get", payload="veto"),
-                MQTTAction(topic="ebusd/700/z2quickvetotemp/set", topic_get="ebusd/700/z2quickvetotemp/get", payload="22")
+                MQTTAction(topic="ebusd/700/z2quickvetotemp/set", topic_get="ebusd/700/z2quickvetotemp/get", payload="21")
             ]),
             stop=ActionSet(mqtt=[
                 MQTTAction(topic="ebusd/700/z2sfmode/set", topic_get="ebusd/700/z2sfmode/get", payload="auto"),
@@ -185,7 +185,7 @@ def load_default_config() -> DevicesConfig:
             battery_capacity_kwh=14.3,
             battery_charge_speed_kw=3.5,
             battery_min_soc_percent=10.0,
-            battery_max_soc_percent=70.0,
+            battery_max_soc_percent=50.0,
             load_management=LoadManagement(
                 instantaneous_load_entity="sensor.deye_battery_power",
                 instantaneous_load_entity_unit="W",
@@ -205,12 +205,12 @@ def load_default_config() -> DevicesConfig:
                 )
             ),
             charge_start=ActionSet(entity=[
-                EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=70),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=70),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=70),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=70),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=70),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=70),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=50),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=50),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=50),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=50),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=50),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=50),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog1_charge", option="Allow Grid"),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog2_charge", option="Allow Grid"),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog3_charge", option="Allow Grid"),
@@ -241,12 +241,12 @@ def load_default_config() -> DevicesConfig:
                 EntityAction(service="select/select_option", entity_id="select.deye_prog6_charge", option="No Grid or Gen"),
             ]),
             discharge_stop=ActionSet(entity=[
-                EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=70),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=70),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=70),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=70),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=70),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=70),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=50),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=50),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=50),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=50),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=50),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=50),
             ])
         ),
         Device(

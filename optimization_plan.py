@@ -170,7 +170,7 @@ async def main():
         scheduler.add_job(
             scheduled_periodic_verification,
             'cron',
-            minute='*/5',
+            minute='5,25,45,55',
             timezone='Europe/Brussels',
             coalesce=True,
             max_instances=1,
