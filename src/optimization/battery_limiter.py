@@ -172,9 +172,8 @@ def limit_battery_cycles(
                 total_charged_kwh += energy
             elif slot_idx in selected_discharge:
                 available = battery_capacity_kwh * (soc - min_soc_percent) / 100
-                # Use battery's max discharge rate, not predicted usage
-                # (predicted usage is just a hint for prioritization, not a constraint)
-                discharge_energy = min(charge_energy_per_slot, available)
+                # Use battery's predicted usage
+                discharge_energy = min(usage_by_slot.get(slot_idx, 0), available)
                 if available < charge_energy_per_slot * 0.1:
                     return None, False, 0, 0  # Can't discharge - battery empty
                 soc -= (discharge_energy / battery_capacity_kwh) * 100
