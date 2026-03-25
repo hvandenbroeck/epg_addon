@@ -279,6 +279,19 @@ class HeatpumpOptimizer:
         # We store ORIGINAL times from price optimization (for display) and LIMITED times (for scheduling)
         original_battery_times = {}  # Store original times before SOC limiting
         discharge_price_context = {}  # Store price context for preserving discharge decisions
+
+        # Fetch solar predictions before running battery price optimization so that
+        # solar_only detection inside limit_battery_cycles can skip unnecessary grid-charge
+        # scheduling for slots that are already covered by expected solar production.
+        predicted_solar = await self._get_predicted_solar(slot_minutes)
+        if predicted_solar:
+            total_solar_kwh = sum(p['predicted_kwh'] for p in predicted_solar)
+            logger.info(
+                f"☀️ Solar predictions available: {len(predicted_solar)} slots, "
+                f"total predicted production = {total_solar_kwh:.2f} kWh"
+            )
+        else:
+            logger.info("☀️ No solar predictions available – proceeding without solar_only detection")
         
         battery_devices = devices_config.get_devices_by_type('battery')
         for bat_device in battery_devices:
@@ -423,12 +436,14 @@ class HeatpumpOptimizer:
         slot_minutes = schedule_doc.get('slot_minutes', 15)
         original_battery_schedule = schedule_doc.get('original_battery_schedule', [])
         predicted_usage = await self._get_predicted_usage(slot_minutes)
+        predicted_solar = await self._get_predicted_solar(slot_minutes)
         
         # Keep all non-battery entries from current schedule
         new_schedule = [
             entry for entry in schedule_doc.get('schedule', [])
             if not (entry.get('device', '').endswith('_charge') or 
-                   entry.get('device', '').endswith('_discharge'))
+                   entry.get('device', '').endswith('_discharge') or
+                   entry.get('device', '').endswith('_solar_only'))
         ]
         
         # Process each battery device
@@ -450,7 +465,7 @@ class HeatpumpOptimizer:
             
             # Apply SOC-based cycle limiting if battery config is complete
             if bat_device.battery_capacity_kwh and bat_device.battery_charge_speed_kw:
-                limited_charge, limited_discharge = limit_battery_cycles(
+                limited_charge, limited_discharge, solar_only_times = limit_battery_cycles(
                     charge_times=original_charge,
                     discharge_times=original_discharge,
                     slot_minutes=slot_minutes,
@@ -462,6 +477,7 @@ class HeatpumpOptimizer:
                     max_soc_percent=bat_device.battery_max_soc_percent or 80.0,
                     prices=prices,
                     predicted_power_usage=predicted_usage,
+                    predicted_solar_production=predicted_solar,
                     device_name=bat_device.name,
                     previous_limited_charge_times=prev_limited_charge,
                     previous_limited_discharge_times=prev_limited_discharge,
@@ -469,11 +485,12 @@ class HeatpumpOptimizer:
             else:
                 # Use original times if battery not fully configured
                 logger.warning(f"⚠️ {bat_device.name}: Missing battery config, using original times")
-                limited_charge, limited_discharge = original_charge, original_discharge
+                limited_charge, limited_discharge, solar_only_times = original_charge, original_discharge, []
             
             # Add limited times to schedule
             new_schedule.extend(self._times_to_schedule(limited_charge, f"{bat_device.name}_charge", horizon_start, slot_minutes))
             new_schedule.extend(self._times_to_schedule(limited_discharge, f"{bat_device.name}_discharge", horizon_start, slot_minutes))
+            new_schedule.extend(self._times_to_schedule(solar_only_times, f"{bat_device.name}_solar_only", horizon_start, slot_minutes))
         
         # Merge and save updated schedule
         new_schedule = merge_sequential_timeslots([new_schedule])
@@ -557,4 +574,29 @@ class HeatpumpOptimizer:
                 return usage
         except Exception as e:
             logger.warning(f"⚠️ Could not get predicted power usage: {e}")
+        return None
+
+    async def _get_predicted_solar(self, slot_minutes):
+        """Get predicted solar production interpolated to slot_minutes intervals."""
+        try:
+            access_token = self.ha_client.get_access_token()
+            stats_loader = StatisticsLoader(access_token)
+            weather = Weather(access_token)
+            predictor = Prediction(stats_loader, weather, self.price_history_manager)
+
+            predicted_df = await predictor.calculateSolarProduction()
+            if predicted_df is not None and len(predicted_df) > 0:
+                # Interpolate hourly predictions to slot_minutes intervals
+                predicted_df = predicted_df[['timestamp', 'predicted_kwh']].set_index('timestamp')
+                predicted_df = predicted_df.resample(f'{slot_minutes}min').interpolate(method='linear')
+                predicted_df = predicted_df.reset_index()
+
+                # Convert from kWh per hour to kWh per slot
+                predicted_df['predicted_kwh'] = predicted_df['predicted_kwh'] * (slot_minutes / 60)
+
+                solar = predicted_df[['timestamp', 'predicted_kwh']].to_dict('records')
+                logger.debug(f"☀️ Retrieved {len(solar)} {slot_minutes}-min slots of predicted solar production")
+                return solar
+        except Exception as e:
+            logger.warning(f"⚠️ Could not get predicted solar production: {e}")
         return None

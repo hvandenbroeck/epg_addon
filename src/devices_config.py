@@ -77,6 +77,8 @@ class Device(BaseModel):
     charge_stop: Optional[ActionSet] = None
     discharge_start: Optional[ActionSet] = None
     discharge_stop: Optional[ActionSet] = None
+    solar_only_start: Optional[ActionSet] = None
+    solar_only_stop: Optional[ActionSet] = None
     # Battery-specific configuration (only used when type='battery')
     battery_soc_entity: Optional[str] = Field(default=None, description="Home Assistant entity for battery state of charge (%)")
     battery_capacity_kwh: Optional[float] = Field(default=None, description="Battery capacity in kWh")

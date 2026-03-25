@@ -64,12 +64,13 @@ class Scheduler:
                 logger.error(f"❌ Invalid datetime in schedule: {e}")
                 continue
 
-            # Handle battery charge/discharge entries (e.g., "battery_charge", "battery_discharge")
-            # These map to the same battery device but use different action sets
+            # Handle battery charge/discharge/solar_only entries
+            # e.g., "battery_charge", "battery_discharge", "battery_solar_only"
             is_battery_charge = device.endswith('_charge')
             is_battery_discharge = device.endswith('_discharge')
+            is_battery_solar_only = device.endswith('_solar_only')
             
-            if is_battery_charge or is_battery_discharge:
+            if is_battery_charge or is_battery_discharge or is_battery_solar_only:
                 # Extract the actual device name (e.g., "battery" from "battery_charge")
                 base_device_name = device.rsplit('_', 1)[0]
                 cfg = self.devices.get_device_config(base_device_name)
@@ -82,6 +83,10 @@ class Scheduler:
                     start_actions = cfg.charge_start.model_dump(exclude_none=True) if cfg.charge_start else {}
                     stop_actions = cfg.charge_stop.model_dump(exclude_none=True) if cfg.charge_stop else {}
                     action_type = "charge"
+                elif is_battery_solar_only:
+                    start_actions = cfg.solar_only_start.model_dump(exclude_none=True) if cfg.solar_only_start else {}
+                    stop_actions = cfg.solar_only_stop.model_dump(exclude_none=True) if cfg.solar_only_stop else {}
+                    action_type = "solar_only"
                 else:
                     start_actions = cfg.discharge_start.model_dump(exclude_none=True) if cfg.discharge_start else {}
                     stop_actions = cfg.discharge_stop.model_dump(exclude_none=True) if cfg.discharge_stop else {}

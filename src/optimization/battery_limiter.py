@@ -26,16 +26,19 @@ def limit_battery_cycles(
     max_soc_percent: float,
     prices: list[float] | None = None,
     predicted_power_usage: list[dict] | None = None,
+    predicted_solar_production: list[dict] | None = None,
     device_name: str = "battery",
     previous_limited_charge_times: list[str] | None = None,
     previous_limited_discharge_times: list[str] | None = None,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str]]:
     """
     Limit battery charge and discharge times based on battery capacity and SOC constraints.
     
     Prioritizes cheapest slots for charging and most expensive for discharging,
-    while respecting SOC constraints over time.
-    
+    while respecting SOC constraints over time.  Solar predictions are used to
+    detect ``solar_only`` slots where the battery can be charged from excess solar
+    production without requiring grid power.
+
     Args:
         charge_times: List of charge start times (strings like "HH:MM")
         discharge_times: List of discharge start times (strings like "HH:MM") 
@@ -48,6 +51,8 @@ def limit_battery_cycles(
         max_soc_percent: Maximum battery SOC in percent
         prices: List of prices per slot (used to prioritize cheap charge / expensive discharge)
         predicted_power_usage: List of dicts with 'timestamp' and 'predicted_kwh' keys, or None
+        predicted_solar_production: List of dicts with 'timestamp' and 'predicted_kwh' keys
+            representing predicted solar production per slot, or None
         device_name: Name for logging purposes
         previous_limited_charge_times: Previously limited charge times (HH:MM strings) used to
             determine which past slots to preserve. If None, falls back to charge_times.
@@ -55,11 +60,11 @@ def limit_battery_cycles(
             determine which past slots to preserve. If None, falls back to discharge_times.
 
     Returns:
-        Tuple of (limited_charge_times, limited_discharge_times)
+        Tuple of (limited_charge_times, limited_discharge_times, solar_only_times)
     """
     logger.info(f"🔋 {device_name}: Input charge_times: {charge_times}")
     if not charge_times and not discharge_times:
-        return [], []
+        return [], [], []
     
     # Use current SOC or assume 0 % charged
     if current_soc is None:
@@ -121,7 +126,7 @@ def limit_battery_cycles(
         limited_charge_times = sorted([slot_idx_to_time(s) for s in past_charge_slots])
         limited_discharge_times = sorted([slot_idx_to_time(s) for s in past_discharge_slots])
         logger.info(f"🔋 {device_name}: No future slots, preserving {len(limited_charge_times)} past charge and {len(limited_discharge_times)} past discharge slots")
-        return limited_charge_times, limited_discharge_times
+        return limited_charge_times, limited_discharge_times, []
     
     # Energy per slot when charging at full speed
     slot_hours = slot_minutes / 60
@@ -145,7 +150,55 @@ def limit_battery_cycles(
                 # Reduce predicted usage by the discharge buffer percentage
                 logger.debug(f"🔋 {device_name}: Predicted usage for slot {slot_idx} before buffer: {pred['predicted_kwh']:.2f} kWh")
                 usage_by_slot[slot_idx] = pred['predicted_kwh'] * slot_hours * discharge_buffer_multiplier
-    
+
+    # Build predicted solar production lookup (slot_idx -> kWh solar per slot)
+    # The predicted_kwh values are already in kWh per slot (same units as charge_energy_per_slot)
+    solar_by_slot = {}
+
+    if predicted_solar_production:
+        for pred in predicted_solar_production:
+            pred_time = pred['timestamp']
+            if isinstance(pred_time, str):
+                pred_time = datetime.fromisoformat(pred_time.replace('Z', '+00:00'))
+            if hasattr(pred_time, 'replace'):
+                pred_time = pred_time.replace(tzinfo=None)
+            slot_idx = int((pred_time - horizon_start).total_seconds() / 60 / slot_minutes)
+            if slot_idx >= 0:
+                solar_by_slot[slot_idx] = pred['predicted_kwh']
+
+    # Calculate net effective usage per slot in the same scale as usage_by_slot.
+    # usage_by_slot values are scaled by slot_hours, so solar must also be scaled
+    # by slot_hours before subtracting to maintain consistent units.
+    net_usage_by_slot = {
+        slot: max(0.0, usage - solar_by_slot.get(slot, 0.0) * slot_hours)
+        for slot, usage in usage_by_slot.items()
+    }
+
+    # Calculate solar excess per slot in kWh (solar minus usage, both in kWh per slot).
+    # usage_by_slot values have slot_hours applied, so divide to recover kWh per slot.
+    solar_excess_by_slot = {
+        slot: max(0.0, solar - usage_by_slot.get(slot, 0.0) / slot_hours)
+        for slot, solar in solar_by_slot.items()
+    }
+
+    # ===== SOLAR_ONLY DETECTION (placed before greedy SOC selection) =====
+    # Identify future charge slots where expected solar excess is sufficient to fully charge
+    # the battery at its rated speed - these slots do not need grid charging.
+    solar_only_slots = set()
+    if solar_by_slot:
+        solar_only_slots = {
+            slot for slot in charge_slots
+            if solar_excess_by_slot.get(slot, 0.0) >= charge_energy_per_slot
+        }
+        if solar_only_slots:
+            logger.info(
+                f"☀️ {device_name}: Detected {len(solar_only_slots)} solar_only slots "
+                f"(solar excess ≥ {charge_energy_per_slot:.3f} kWh/slot) – removing from grid charge schedule"
+            )
+            charge_slots -= solar_only_slots
+        else:
+            logger.debug(f"☀️ {device_name}: No solar_only slots detected")
+
     # Sort charge slots by price (cheapest first), discharge by price (most expensive first)
     if prices:
         charge_by_price = sorted(charge_slots, key=lambda s: prices[s] if s < len(prices) else float('inf'))
@@ -156,10 +209,14 @@ def limit_battery_cycles(
         discharge_by_price = sorted(discharge_slots)
     
     def simulate_soc(selected_charge, selected_discharge):
+        """Simulate SOC over time and return final SOC, feasibility, and energy statistics.
 
-        """Simulate SOC over time and return final SOC, feasibility, and energy statistics."""
-        
-        all_slots = sorted(selected_charge | selected_discharge) #Sort over time
+        Accounts for:
+        - Grid charging in selected_charge slots
+        - Battery discharging using net usage (usage minus solar) in selected_discharge slots
+        - Passive solar charging in solar_only slots (battery charged from excess solar)
+        """
+        all_slots = sorted(selected_charge | selected_discharge | solar_only_slots)
         soc = current_soc
         total_charged_kwh = 0
         total_discharged_kwh = 0
@@ -174,12 +231,22 @@ def limit_battery_cycles(
                 total_charged_kwh += energy
             elif slot_idx in selected_discharge:
                 available = battery_capacity_kwh * (soc - min_soc_percent) / 100
-                # Use battery's predicted usage
-                discharge_energy = min(usage_by_slot.get(slot_idx, 0), available)
+                # Use net usage (power usage minus solar contribution) so that solar
+                # covering load reduces the depth of discharge from the battery.
+                # Falls back to 0 if the slot has no usage prediction.
+                discharge_energy = min(net_usage_by_slot.get(slot_idx, 0), available)
                 if available < charge_energy_per_slot * 0.1:
                     return None, False, 0, 0  # Can't discharge - battery empty
                 soc -= (discharge_energy / battery_capacity_kwh) * 100
                 total_discharged_kwh += discharge_energy
+            elif slot_idx in solar_only_slots:
+                # Passive solar charging: excess solar charges the battery without grid power.
+                # solar_excess_by_slot values are in kWh per slot (same units as charge_energy_per_slot).
+                solar_excess = solar_excess_by_slot.get(slot_idx, 0.0)
+                headroom = battery_capacity_kwh * (max_soc_percent - soc) / 100
+                passive_charge = min(solar_excess, headroom)
+                if passive_charge > 0:
+                    soc += (passive_charge / battery_capacity_kwh) * 100
         
         return soc, True, total_charged_kwh, total_discharged_kwh
     
@@ -260,6 +327,7 @@ def limit_battery_cycles(
     # Convert back to time strings
     limited_charge_times = sorted([slot_idx_to_time(s) for s in final_charge_slots])
     limited_discharge_times = sorted([slot_idx_to_time(s) for s in final_discharge_slots])
+    solar_only_times = sorted([slot_idx_to_time(s) for s in solar_only_slots])
     
     # Log results with price info if available
     final_soc, _, total_charged, total_discharged = simulate_soc(selected_charge, selected_discharge)
@@ -271,8 +339,10 @@ def limit_battery_cycles(
     if prices and selected_discharge:
         avg_discharge_price = sum(prices[s] for s in selected_discharge if s < len(prices)) / len(selected_discharge)
         logger.info(f"🔋 {device_name}: Selected {len(selected_discharge)} discharge slots (avg price: {avg_discharge_price:.4f}, total: {total_discharged:.2f} kWh)")
+    if solar_only_times:
+        logger.info(f"☀️ {device_name}: {len(solar_only_times)} solar_only slots (battery charged from excess solar)")
     
-    logger.info(f"🔋 {device_name}: Final - {len(limited_charge_times)} charge, {len(limited_discharge_times)} discharge slots")
+    logger.info(f"🔋 {device_name}: Final - {len(limited_charge_times)} charge, {len(limited_discharge_times)} discharge, {len(solar_only_times)} solar_only slots")
     logger.info(f"🔋 {device_name}: Energy balance: {energy_balance:+.2f} kWh, final_soc: {final_soc:.1f}% (started at {current_soc:.1f}%)")
     
-    return limited_charge_times, limited_discharge_times
+    return limited_charge_times, limited_discharge_times, solar_only_times
