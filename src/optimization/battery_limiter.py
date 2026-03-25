@@ -130,6 +130,7 @@ def limit_battery_cycles(
     # Build predicted usage lookup (slot_idx -> kWh usage per slot)
     # Apply discharge buffer to reduce predicted usage
     usage_by_slot = {}
+
     if predicted_power_usage:
         discharge_buffer_percent = CONFIG['options'].get('battery_discharge_buffer_percent', 20)
         discharge_buffer_multiplier = 1.0 - (discharge_buffer_percent / 100.0)
@@ -142,6 +143,7 @@ def limit_battery_cycles(
             slot_idx = int((pred_time - horizon_start).total_seconds() / 60 / slot_minutes)
             if slot_idx >= 0:
                 # Reduce predicted usage by the discharge buffer percentage
+                logger.debug(f"🔋 {device_name}: Predicted usage for slot {slot_idx} before buffer: {pred['predicted_kwh']:.2f} kWh")
                 usage_by_slot[slot_idx] = pred['predicted_kwh'] * slot_hours * discharge_buffer_multiplier
     
     # Sort charge slots by price (cheapest first), discharge by price (most expensive first)

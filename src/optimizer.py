@@ -544,7 +544,8 @@ class HeatpumpOptimizer:
             predicted_df = await predictor.calculatePowerUsage()
             if predicted_df is not None and len(predicted_df) > 0:
                 # Interpolate hourly predictions to slot_minutes intervals
-                predicted_df = predicted_df.set_index('timestamp')
+                # Only keep predicted_kwh to avoid interpolation errors on non-numeric columns (e.g. date)
+                predicted_df = predicted_df[['timestamp', 'predicted_kwh']].set_index('timestamp')
                 predicted_df = predicted_df.resample(f'{slot_minutes}min').interpolate(method='linear')
                 predicted_df = predicted_df.reset_index()
                 

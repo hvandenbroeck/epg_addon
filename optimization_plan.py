@@ -59,6 +59,7 @@ async def main():
     
     prediction = Prediction(statistics_loader, weather, price_history_manager)
     await prediction.calculatePowerUsage()
+    await prediction.calculateSolarProduction()
 
     # Create APScheduler instance
     scheduler = AsyncIOScheduler()

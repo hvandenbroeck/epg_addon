@@ -295,3 +295,171 @@ class Prediction:
         logger.info("💾 Merged historical data saved to: /app/merged_historical_data.csv")
         
         return results_df
+
+    async def calculateSolarProduction(self):
+        """
+        Predict solar production for the remaining hours of today and all of tomorrow using
+        historical solar production data and weather features (shortwave_radiation, cloud_cover,
+        hour, day-of-year).
+        Returns a DataFrame with hourly predictions, or None if no solar data is available.
+        """
+        # 1. Get historical energy data (contains solar_production_per_hour)
+        logger.info("📊 Fetching historical solar production data...")
+        usage_df = await self.statistics_loader.fetch_statistics(days_back=self.days_back)
+
+        if 'solar_production_per_hour' not in usage_df.columns or usage_df['solar_production_per_hour'].isna().all():
+            logger.warning("⚠️ No solar production data available, skipping solar prediction")
+            return None
+
+        usage_df['timestamp'] = pd.to_datetime(usage_df['timestamp'])
+        usage_df['hour'] = usage_df['timestamp'].dt.hour
+        usage_df['dayofyear'] = usage_df['timestamp'].dt.dayofyear
+        usage_df['date'] = usage_df['timestamp'].dt.date
+
+        logger.info(f"✅ Loaded {len(usage_df)} hourly solar production records")
+
+        # 2. Get historical hourly weather data (includes shortwave_radiation after the update)
+        logger.info("🌤️ Fetching historical weather data for solar prediction...")
+        weather_df = await self.weather.getHistoricalHourlyWeather(days_back=self.days_back)
+
+        if len(weather_df) == 0:
+            logger.error("❌ No weather data available")
+            raise Exception("No weather data available")
+
+        logger.info(f"✅ Loaded {len(weather_df)} hourly weather records")
+
+        # 3. Merge on aligned timestamp
+        usage_df['timestamp_aligned'] = usage_df['timestamp'].dt.floor('h').dt.tz_localize(None)
+        weather_df['timestamp_aligned'] = weather_df['timestamp'].dt.floor('h').dt.tz_localize(None)
+
+        merged_df = usage_df.merge(
+            weather_df[['timestamp_aligned', 'cloud_cover', 'shortwave_radiation']],
+            on='timestamp_aligned',
+            how='left'
+        )
+
+        # Fill missing weather values
+        merged_df['cloud_cover'] = merged_df['cloud_cover'].ffill().bfill()
+        merged_df['shortwave_radiation'] = merged_df['shortwave_radiation'].ffill().bfill()
+
+        # Drop rows where target is missing or negative
+        merged_df = merged_df.dropna(subset=['solar_production_per_hour'])
+        merged_df = merged_df[merged_df['solar_production_per_hour'] >= 0]
+
+        logger.info(f"✅ Solar training dataset: {len(merged_df)} hourly records")
+
+        # 4. Features and target
+        feature_cols = ['hour', 'dayofyear', 'shortwave_radiation', 'cloud_cover']
+        features = merged_df[feature_cols].copy()
+        target = merged_df['solar_production_per_hour'].copy()
+
+        valid_mask = ~(features.isna().any(axis=1) | target.isna())
+        features = features[valid_mask]
+        target = target[valid_mask]
+
+        logger.info(f"📈 Solar training dataset: {len(features)} samples with features: {feature_cols}")
+
+        # 5. Train/validation split (last 7 days for validation)
+        split_date = merged_df['timestamp'].max() - pd.Timedelta(days=7)
+        train_mask = merged_df.loc[valid_mask, 'timestamp'] < split_date
+        val_mask = merged_df.loc[valid_mask, 'timestamp'] >= split_date
+
+        features_train = features[train_mask]
+        target_train = target[train_mask]
+        features_val = features[val_mask]
+        target_val = target[val_mask]
+
+        logger.info(f"📊 Solar training samples: {len(features_train)}, Validation samples: {len(features_val)}")
+
+        # 6. Train LightGBM model
+        logger.info("🤖 Training LightGBM model for solar production...")
+        lgb_solar = lgb.LGBMRegressor(
+            n_estimators=200,
+            max_depth=6,
+            learning_rate=0.05,
+            num_leaves=31,
+            random_state=42
+        )
+        lgb_solar.fit(features_train, target_train)
+        logger.info("✅ Solar model training complete")
+
+        # 7. Evaluate
+        val_pred = lgb_solar.predict(features_val)
+        mae = mean_absolute_error(target_val, val_pred)
+        logger.info(f"📊 Solar validation MAE (hourly): {mae:.3f} kWh")
+
+        # 8. Forecast weather for today (remaining) + tomorrow
+        logger.info("🌤️ Fetching weather forecast for solar prediction...")
+        forecast_df = await self.weather.getUpcomingHourlyWeather()
+
+        if len(forecast_df) == 0:
+            logger.error("❌ No weather forecast available")
+            raise Exception("No weather forecast available")
+
+        forecast_df['dayofyear'] = pd.to_datetime(forecast_df['timestamp']).dt.dayofyear
+        future_features = forecast_df[feature_cols].copy()
+
+        # 9. Predict and clip negatives (solar can't produce negative energy)
+        predictions = lgb_solar.predict(future_features)
+        predictions = np.maximum(predictions, 0.0)
+
+        # 10. Build results DataFrame
+        today = datetime.now().date()
+        tomorrow = today + timedelta(days=1)
+
+        results_df = forecast_df[['hour', 'timestamp', 'cloud_cover', 'shortwave_radiation', 'date']].copy()
+        results_df['predicted_kwh'] = predictions
+
+        today_predictions = results_df[results_df['date'] == today]['predicted_kwh']
+        tomorrow_predictions = results_df[results_df['date'] == tomorrow]['predicted_kwh']
+        today_total = today_predictions.sum() if len(today_predictions) > 0 else 0
+        tomorrow_total = tomorrow_predictions.sum()
+        total_predicted = predictions.sum()
+
+        # 11. Log results
+        logger.info("=" * 80)
+        logger.info("☀️  SOLAR PRODUCTION PREDICTION (TODAY + TOMORROW)")
+        logger.info("=" * 80)
+
+        if len(today_predictions) > 0:
+            logger.info(f"\n📌 TODAY ({today.strftime('%A, %B %d, %Y')}) - Remaining {len(today_predictions)} hours")
+            logger.info(f"Predicted Production: {today_total:.2f} kWh")
+            logger.info("-" * 80)
+            logger.info(f"{'Hour':<6} {'Time':<8} {'Radiation':<12} {'Cloud':<8} {'Predicted':<12}")
+            logger.info("-" * 80)
+
+            for _, row in results_df[results_df['date'] == today].iterrows():
+                hour_str = f"{int(row['hour']):02d}:00"
+                time_str = row['timestamp'].strftime('%H:%M')
+                rad_str = f"{row['shortwave_radiation']:.0f} W/m²"
+                cloud_str = f"{row['cloud_cover']:.0f}%"
+                pred_str = f"{row['predicted_kwh']:.3f} kWh"
+                logger.info(f"{hour_str:<6} {time_str:<8} {rad_str:<12} {cloud_str:<8} {pred_str:<12}")
+
+        logger.info(f"\n📌 TOMORROW ({tomorrow.strftime('%A, %B %d, %Y')})")
+        logger.info(f"Predicted Production: {tomorrow_total:.2f} kWh")
+        logger.info("-" * 80)
+        logger.info(f"{'Hour':<6} {'Time':<8} {'Radiation':<12} {'Cloud':<8} {'Predicted':<12}")
+        logger.info("-" * 80)
+
+        for _, row in results_df[results_df['date'] == tomorrow].iterrows():
+            hour_str = f"{int(row['hour']):02d}:00"
+            time_str = row['timestamp'].strftime('%H:%M')
+            rad_str = f"{row['shortwave_radiation']:.0f} W/m²"
+            cloud_str = f"{row['cloud_cover']:.0f}%"
+            pred_str = f"{row['predicted_kwh']:.3f} kWh"
+            logger.info(f"{hour_str:<6} {time_str:<8} {rad_str:<12} {cloud_str:<8} {pred_str:<12}")
+
+        logger.info("-" * 80)
+        logger.info(f"Total Predicted Production: {total_predicted:.2f} kWh")
+        logger.info(f"Validation MAE: {mae:.3f} kWh per hour")
+
+        peak_row = results_df.loc[results_df['predicted_kwh'].idxmax()]
+        logger.info(f"Peak hour: {int(peak_row['hour']):02d}:00 ({peak_row['predicted_kwh']:.3f} kWh)")
+        logger.info("=" * 80)
+
+        # Export to CSV
+        results_df.to_csv("/app/solar_predictions.csv", index=False)
+        logger.info("💾 Solar predictions saved to: /app/solar_predictions.csv")
+
+        return results_df

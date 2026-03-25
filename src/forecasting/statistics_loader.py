@@ -106,6 +106,12 @@ class StatisticsLoader:
         for col in cols_minus:
             df["energy_used_per_hour"] -= df[col].diff()
 
+        # Calculate hourly solar production
+        cols_solar = [col for col in entities.get("solar_production", []) if col in df.columns]
+        df["solar_production_per_hour"] = 0.0
+        for col in cols_solar:
+            df["solar_production_per_hour"] += df[col].diff()
+
         return df
 
     @staticmethod
@@ -134,14 +140,12 @@ class StatisticsLoader:
         for source in result.get("energy_sources", []):
             source_type = source.get("type")
             if source_type == "grid":
-                for flow in source.get("flow_from", []):
-                    sensor = flow.get("stat_energy_from")
-                    if sensor:
-                        entities["grid_import"].append(sensor)
-                for flow in source.get("flow_to", []):
-                    sensor = flow.get("stat_energy_to")
-                    if sensor:
-                        entities["grid_export"].append(sensor)
+                sensor_from = source.get("stat_energy_from")
+                if sensor_from:
+                    entities["grid_import"].append(sensor_from)
+                sensor_to = source.get("stat_energy_to")
+                if sensor_to:
+                    entities["grid_export"].append(sensor_to)
             elif source_type == "solar":
                 sensor = source.get("stat_energy_from")
                 if sensor:

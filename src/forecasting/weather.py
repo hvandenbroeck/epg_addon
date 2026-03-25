@@ -65,7 +65,7 @@ class Weather:
         openmeteo_url = (
             f"https://api.open-meteo.com/v1/forecast?"
             f"latitude={self.lat}&longitude={self.lon}"
-            f"&hourly=temperature_2m,cloud_cover"
+            f"&hourly=temperature_2m,cloud_cover,shortwave_radiation"
             f"&start_date={start_date}&end_date={end_date}"
             f"&timezone=auto"
         )
@@ -81,11 +81,13 @@ class Weather:
         times = forecast["hourly"]["time"]
         temperatures = forecast["hourly"]["temperature_2m"]
         cloud_cover = forecast["hourly"]["cloud_cover"]
+        shortwave_radiation = forecast["hourly"]["shortwave_radiation"]
         
         df = pd.DataFrame({
             'timestamp': pd.to_datetime(times),
             'temperature': temperatures,
-            'cloud_cover': cloud_cover
+            'cloud_cover': cloud_cover,
+            'shortwave_radiation': shortwave_radiation
         })
         df['hour'] = df['timestamp'].dt.hour
         df['date'] = df['timestamp'].dt.date
@@ -121,7 +123,7 @@ class Weather:
             f"https://archive-api.open-meteo.com/v1/archive?"
             f"latitude={self.lat}&longitude={self.lon}"
             f"&start_date={start_date.isoformat()}&end_date={end_date.isoformat()}"
-            f"&hourly=temperature_2m,cloud_cover"
+            f"&hourly=temperature_2m,cloud_cover,shortwave_radiation"
             f"&timezone=auto"
         )
 
@@ -145,7 +147,8 @@ class Weather:
         df = pd.DataFrame({
             'timestamp': pd.to_datetime(times),
             'temperature': temperatures,
-            'cloud_cover': cloud_cover
+            'cloud_cover': cloud_cover,
+            'shortwave_radiation': data["hourly"]["shortwave_radiation"]
         })
         df['hour'] = df['timestamp'].dt.hour
         df['date'] = df['timestamp'].dt.date
