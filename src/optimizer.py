@@ -279,19 +279,6 @@ class HeatpumpOptimizer:
         # We store ORIGINAL times from price optimization (for display) and LIMITED times (for scheduling)
         original_battery_times = {}  # Store original times before SOC limiting
         discharge_price_context = {}  # Store price context for preserving discharge decisions
-
-        # Fetch solar predictions before running battery price optimization so that
-        # solar_only detection inside limit_battery_cycles can skip unnecessary grid-charge
-        # scheduling for slots that are already covered by expected solar production.
-        predicted_solar = await self._get_predicted_solar(slot_minutes)
-        if predicted_solar:
-            total_solar_kwh = sum(p['predicted_kwh'] for p in predicted_solar)
-            logger.info(
-                f"☀️ Solar predictions available: {len(predicted_solar)} slots, "
-                f"total predicted production = {total_solar_kwh:.2f} kWh"
-            )
-        else:
-            logger.info("☀️ No solar predictions available – proceeding without solar_only detection")
         
         battery_devices = devices_config.get_devices_by_type('battery')
         for bat_device in battery_devices:
@@ -411,6 +398,10 @@ class HeatpumpOptimizer:
         """Recalculate battery cycle limits based on current SOC.
         
         Called after optimization and every 15 minutes to adapt to actual SOC changes.
+
+        Solar-only mode is evaluated globally: when total predicted solar production
+        exceeds total predicted power usage, battery charging and discharging are
+        disabled entirely and a solar_only schedule entry is added instead.
         """
         logger.info("🔋 Recalculating battery cycle limits based on current SOC...")
         
@@ -435,8 +426,33 @@ class HeatpumpOptimizer:
         prices = schedule_doc['prices']
         slot_minutes = schedule_doc.get('slot_minutes', 15)
         original_battery_schedule = schedule_doc.get('original_battery_schedule', [])
+
+        # ===== SOLAR-ONLY STATE EVALUATION =====
+        # Compare total predicted solar production vs total predicted power usage.
+        # When solar exceeds usage, there is enough renewable energy to cover all needs,
+        # so battery grid-charging and discharging should be suspended.
         predicted_usage = await self._get_predicted_usage(slot_minutes)
         predicted_solar = await self._get_predicted_solar(slot_minutes)
+
+        solar_only_mode = False
+        if predicted_solar and predicted_usage:
+            total_solar_kwh = sum(p['predicted_kwh'] for p in predicted_solar)
+            total_usage_kwh = sum(p['predicted_kwh'] for p in predicted_usage)
+            logger.info(
+                f"☀️ Solar prediction: {total_solar_kwh:.2f} kWh | "
+                f"Usage prediction: {total_usage_kwh:.2f} kWh"
+            )
+            if total_solar_kwh > total_usage_kwh:
+                solar_only_mode = True
+                logger.info(
+                    f"☀️ Solar-only mode ACTIVATED "
+                    f"(solar {total_solar_kwh:.2f} kWh > usage {total_usage_kwh:.2f} kWh) – "
+                    "battery charge/discharge suspended"
+                )
+            else:
+                logger.info("☀️ Solar-only mode not active – proceeding with normal battery optimization")
+        else:
+            logger.info("☀️ Insufficient solar/usage predictions – proceeding with normal battery optimization")
         
         # Keep all non-battery entries from current schedule
         new_schedule = [
@@ -448,6 +464,23 @@ class HeatpumpOptimizer:
         
         # Process each battery device
         for bat_device in devices_config.get_devices_by_type('battery'):
+
+            if solar_only_mode:
+                # Solar-only mode: skip charge/discharge entirely and add a solar_only entry
+                # spanning the full optimization horizon so the inverter can be configured
+                # to allow passive solar charging.
+                new_schedule.append({
+                    "device": f"{bat_device.name}_solar_only",
+                    "start": horizon_start.isoformat(),
+                    "stop": horizon_end.isoformat(),
+                })
+                logger.info(
+                    f"☀️ {bat_device.name}: Added solar_only entry "
+                    f"({horizon_start} → {horizon_end})"
+                )
+                continue
+
+            # Normal mode: apply SOC-based cycle limiting
             # Get current SOC (or use 50% as fallback)
             current_soc = await self._get_battery_soc(bat_device)
             
@@ -465,7 +498,7 @@ class HeatpumpOptimizer:
             
             # Apply SOC-based cycle limiting if battery config is complete
             if bat_device.battery_capacity_kwh and bat_device.battery_charge_speed_kw:
-                limited_charge, limited_discharge, solar_only_times = limit_battery_cycles(
+                limited_charge, limited_discharge = limit_battery_cycles(
                     charge_times=original_charge,
                     discharge_times=original_discharge,
                     slot_minutes=slot_minutes,
@@ -477,7 +510,6 @@ class HeatpumpOptimizer:
                     max_soc_percent=bat_device.battery_max_soc_percent or 80.0,
                     prices=prices,
                     predicted_power_usage=predicted_usage,
-                    predicted_solar_production=predicted_solar,
                     device_name=bat_device.name,
                     previous_limited_charge_times=prev_limited_charge,
                     previous_limited_discharge_times=prev_limited_discharge,
@@ -485,17 +517,17 @@ class HeatpumpOptimizer:
             else:
                 # Use original times if battery not fully configured
                 logger.warning(f"⚠️ {bat_device.name}: Missing battery config, using original times")
-                limited_charge, limited_discharge, solar_only_times = original_charge, original_discharge, []
+                limited_charge, limited_discharge = original_charge, original_discharge
             
             # Add limited times to schedule
             new_schedule.extend(self._times_to_schedule(limited_charge, f"{bat_device.name}_charge", horizon_start, slot_minutes))
             new_schedule.extend(self._times_to_schedule(limited_discharge, f"{bat_device.name}_discharge", horizon_start, slot_minutes))
-            new_schedule.extend(self._times_to_schedule(solar_only_times, f"{bat_device.name}_solar_only", horizon_start, slot_minutes))
         
         # Merge and save updated schedule
         new_schedule = merge_sequential_timeslots([new_schedule])
         schedule_doc['schedule'] = new_schedule
         schedule_doc['last_soc_recalc'] = datetime.now().isoformat()
+        schedule_doc['solar_only_mode'] = solar_only_mode
         
         with TinyDB('db.json') as db:
             db.upsert(schedule_doc, Query().id == "schedule")
