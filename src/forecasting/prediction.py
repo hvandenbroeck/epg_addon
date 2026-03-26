@@ -4,6 +4,7 @@ import lightgbm as lgb
 from datetime import datetime, timedelta
 import logging
 from sklearn.metrics import mean_absolute_error
+from tinydb import TinyDB, Query
 from ..config import CONFIG
 
 logger = logging.getLogger(__name__)
@@ -293,7 +294,29 @@ class Prediction:
         # Export full merged dataset for analysis
         merged_df.to_csv("/app/merged_historical_data.csv", index=False)
         logger.info("💾 Merged historical data saved to: /app/merged_historical_data.csv")
-        
+
+        # Save predictions to TinyDB for web UI
+        usage_records = []
+        for _, row in results_df.iterrows():
+            record = {
+                'timestamp': row['timestamp'].isoformat(),
+                'hour': int(row['hour']),
+                'date': row['date'].isoformat(),
+                'predicted_kwh': float(row['predicted_kwh']),
+                'temperature': float(row['temperature']) if pd.notna(row['temperature']) else None,
+                'cloud_cover': float(row['cloud_cover']) if pd.notna(row['cloud_cover']) else None,
+            }
+            if has_price_data and 'price' in row:
+                record['price'] = float(row['price']) if pd.notna(row['price']) else None
+            usage_records.append(record)
+        with TinyDB('db.json') as db:
+            db.upsert({
+                'id': 'prediction_usage',
+                'records': usage_records,
+                'updated_at': datetime.now().isoformat()
+            }, Query().id == 'prediction_usage')
+        logger.info("💾 Usage predictions saved to TinyDB")
+
         return results_df
 
     async def calculateSolarProduction(self):
@@ -461,5 +484,24 @@ class Prediction:
         # Export to CSV
         results_df.to_csv("/app/solar_predictions.csv", index=False)
         logger.info("💾 Solar predictions saved to: /app/solar_predictions.csv")
+
+        # Save solar predictions to TinyDB for web UI
+        solar_records = []
+        for _, row in results_df.iterrows():
+            solar_records.append({
+                'timestamp': row['timestamp'].isoformat(),
+                'hour': int(row['hour']),
+                'date': row['date'].isoformat(),
+                'predicted_kwh': float(row['predicted_kwh']),
+                'cloud_cover': float(row['cloud_cover']) if pd.notna(row['cloud_cover']) else None,
+                'shortwave_radiation': float(row['shortwave_radiation']) if pd.notna(row['shortwave_radiation']) else None,
+            })
+        with TinyDB('db.json') as db:
+            db.upsert({
+                'id': 'prediction_solar',
+                'records': solar_records,
+                'updated_at': datetime.now().isoformat()
+            }, Query().id == 'prediction_solar')
+        logger.info("💾 Solar predictions saved to TinyDB")
 
         return results_df

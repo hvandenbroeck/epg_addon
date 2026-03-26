@@ -347,6 +347,102 @@ def get_gantt():
 
 
 
+@app.route('/api/predictions_chart')
+def get_predictions_chart():
+    """Generate and return a Plotly line chart for predicted usage and solar production."""
+    with TinyDB('db.json') as db:
+        usage_docs = db.search(Query().id == 'prediction_usage')
+        solar_docs = db.search(Query().id == 'prediction_solar')
+
+    has_usage = bool(usage_docs and usage_docs[0].get('records'))
+    has_solar = bool(solar_docs and solar_docs[0].get('records'))
+
+    if not has_usage and not has_solar:
+        fig = go.Figure()
+        fig.update_layout(title="No prediction data available yet")
+        return fig.to_html(include_plotlyjs=True, full_html=False)
+
+    fig = go.Figure()
+
+    if has_usage:
+        records = usage_docs[0]['records']
+        times = [r['timestamp'] for r in records]
+        kwh = [r['predicted_kwh'] for r in records]
+        fig.add_trace(go.Scatter(
+            x=times,
+            y=kwh,
+            mode='lines+markers',
+            name='Predicted Usage (kWh)',
+            line=dict(color='#FF6B6B', width=2),
+            marker=dict(size=4),
+            hovertemplate='<b>Usage</b><br>Time: %{x}<br>Predicted: %{y:.3f} kWh<extra></extra>'
+        ))
+
+    if has_solar:
+        records = solar_docs[0]['records']
+        times = [r['timestamp'] for r in records]
+        kwh = [r['predicted_kwh'] for r in records]
+        fig.add_trace(go.Scatter(
+            x=times,
+            y=kwh,
+            mode='lines+markers',
+            name='Predicted Solar (kWh)',
+            line=dict(color='#F4D03F', width=2),
+            marker=dict(size=4),
+            hovertemplate='<b>Solar</b><br>Time: %{x}<br>Predicted: %{y:.3f} kWh<extra></extra>'
+        ))
+
+    # Add "Now" line
+    now = datetime.now()
+    fig.add_vline(
+        x=now,
+        line=dict(color='red', width=2, dash='dash')
+    )
+    fig.add_annotation(
+        x=now,
+        y=1,
+        yref='paper',
+        text='Now',
+        showarrow=False,
+        yanchor='bottom',
+        font=dict(color='red', size=10)
+    )
+
+    fig.update_layout(
+        title='Hourly Predictions: Usage & Solar Production',
+        xaxis_title='Time',
+        yaxis_title='kWh',
+        height=400,
+        margin=dict(l=50, r=20, t=60, b=60),
+        autosize=True,
+        hovermode='x unified',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+        font=dict(size=10)
+    )
+    fig.update_xaxes(
+        tickformat='%Y-%m-%d %H:%M',
+        tickangle=-45,
+        showspikes=True,
+        spikemode='across+toaxis',
+        spikesnap='cursor',
+        spikecolor='rgba(100,100,100,0.5)',
+        spikethickness=1,
+        spikedash='dot'
+    )
+
+    config = {
+        'responsive': True,
+        'displayModeBar': True,
+        'modeBarButtonsToRemove': ['select2d', 'lasso2d', 'autoScale2d', 'pan2d', 'zoom2d', 'zoomIn2d', 'zoomOut2d'],
+        'scrollZoom': False,
+        'displaylogo': False
+    }
+
+    html_output = fig.to_html(include_plotlyjs=True, full_html=False, config=config)
+    html_output = html_output.replace('<div', '<div style="cursor: crosshair;"', 1)
+    return html_output
+
+
 # Generic route to download any file from /data
 @app.route('/download/<path:filename>')
 def download_file(filename):

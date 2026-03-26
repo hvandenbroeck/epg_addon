@@ -36,6 +36,9 @@
     <div id="timeline">
         <div class="loading">Loading schedule...</div>
     </div>
+    <div id="predictionsChart">
+        <div class="loading">Loading predictions...</div>
+    </div>
     <div class="links">
         <a href="download/tomorrow_features.csv" download>Download tomorrow_features.csv</a>
         <a href="download/merged_historical_data.csv" download>Download merged_historical_data.csv</a>
@@ -290,17 +293,43 @@
                 });
         }
 
+        function updatePredictionsChart() {
+            fetch('api/predictions_chart')
+                .then(response => response.text())
+                .then(html => {
+                    const container = document.getElementById('predictionsChart');
+                    container.innerHTML = html;
+
+                    // Execute only inline scripts (Plotly init code); skip external src to avoid duplicates
+                    const scripts = container.querySelectorAll('script');
+                    scripts.forEach(script => {
+                        if (!script.src) {
+                            const newScript = document.createElement('script');
+                            newScript.textContent = script.textContent;
+                            document.body.appendChild(newScript);
+                        }
+                    });
+                })
+                .catch(error => {
+                    console.error('Error fetching predictions chart:', error);
+                    document.getElementById('predictionsChart').innerHTML =
+                        '<div class="loading">Error loading predictions</div>';
+                });
+        }
+
         // Update on load
         updatePeak();
         updateDeviceLimits();
         updateBatteryThresholds();
         updateChart();
+        updatePredictionsChart();
         
         // Update peak and device limits every 30 seconds, chart every minute
         setInterval(updatePeak, 30000);
         setInterval(updateDeviceLimits, 30000);
         setInterval(updateBatteryThresholds, 60000);
         setInterval(updateChart, 60000);
+        setInterval(updatePredictionsChart, 300000);
     </script>
 </body>
 </html>
