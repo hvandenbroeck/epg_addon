@@ -388,6 +388,9 @@ class HeatpumpOptimizer:
         
         logger.info(f"✅ Optimization complete. Schedule saved to TinyDB.")
         
+        # Save power usage and solar production predictions to database
+        await self._save_predictions()
+        
         # Run initial battery cycle limiting based on current SOC
         await self.recalculate_battery_limits()
         
@@ -558,3 +561,54 @@ class HeatpumpOptimizer:
         except Exception as e:
             logger.warning(f"⚠️ Could not get predicted power usage: {e}")
         return None
+
+    async def _save_predictions(self):
+        """Compute power usage and solar production predictions and save them to TinyDB."""
+        try:
+            access_token = self.ha_client.get_access_token()
+            stats_loader = StatisticsLoader(access_token)
+            weather = Weather(access_token)
+            predictor = Prediction(stats_loader, weather, self.price_history_manager)
+
+            usage_records = []
+            solar_records = []
+
+            try:
+                usage_df = await predictor.calculatePowerUsage()
+                if usage_df is not None and not usage_df.empty:
+                    usage_records = [
+                        {
+                            'timestamp': row['timestamp'].isoformat() if hasattr(row['timestamp'], 'isoformat') else str(row['timestamp']),
+                            'predicted_kwh': float(row['predicted_kwh'])
+                        }
+                        for _, row in usage_df[['timestamp', 'predicted_kwh']].iterrows()
+                    ]
+                    logger.info(f"📈 Saved {len(usage_records)} hourly power usage predictions to database")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not compute power usage predictions: {e}")
+
+            try:
+                solar_df = await predictor.calculateSolarProduction()
+                if solar_df is not None and not solar_df.empty:
+                    solar_records = [
+                        {
+                            'timestamp': row['timestamp'].isoformat() if hasattr(row['timestamp'], 'isoformat') else str(row['timestamp']),
+                            'predicted_kwh': float(row['predicted_kwh'])
+                        }
+                        for _, row in solar_df[['timestamp', 'predicted_kwh']].iterrows()
+                    ]
+                    logger.info(f"☀️ Saved {len(solar_records)} hourly solar production predictions to database")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not compute solar predictions: {e}")
+
+            with TinyDB('db.json') as db:
+                db.upsert({
+                    'id': 'predictions',
+                    'usage': usage_records,
+                    'solar': solar_records,
+                    'updated_at': datetime.now().isoformat()
+                }, Query().id == 'predictions')
+
+            logger.info("✅ Predictions saved to TinyDB.")
+        except Exception as e:
+            logger.error(f"❌ Could not save predictions: {e}")
