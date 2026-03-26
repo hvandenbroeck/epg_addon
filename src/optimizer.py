@@ -312,9 +312,17 @@ class HeatpumpOptimizer:
             original_battery_times[f"{device_name}_charge_planned"] = list(bat_charge_times) if bat_charge_times else []
             original_battery_times[f"{device_name}_discharge_planned"] = list(bat_discharge_times) if bat_discharge_times else []
             
+            # When deep discharge is configured, use the same discharge candidates as deep discharge candidates.
+            # The battery limiter will split them: regular discharge slots use min_soc_percent as the SOC floor,
+            # while deep discharge slots use deep_discharge_min_soc. No slot will be both (discharge takes priority).
+            if bat_device.battery_deep_discharge_min_soc is not None:
+                original_battery_times[f"{device_name}_deep_discharge_planned"] = list(bat_discharge_times) if bat_discharge_times else []
+            
             # Store in results (will be overwritten with limited times below)
             results[f"{device_name}_charge"] = bat_charge_times
             results[f"{device_name}_discharge"] = bat_discharge_times
+            if bat_device.battery_deep_discharge_min_soc is not None:
+                results[f"{device_name}_deep_discharge"] = list(bat_discharge_times) if bat_discharge_times else []
 
         # ===== EV OPTIMIZATION (iterate over all EV devices) =====
         ev_devices = devices_config.get_devices_by_type('ev')
@@ -336,9 +344,10 @@ class HeatpumpOptimizer:
                 block_hours = device.block_hours if device.block_hours is not None else 1.0
                 device_block_minutes[device.name] = int(block_hours * 60)
             elif device.type == 'battery':
-                # Battery has separate charge and discharge entries
+                # Battery has separate charge, discharge, and deep discharge entries
                 device_block_minutes[f"{device.name}_charge"] = slot_minutes  # Single slot
                 device_block_minutes[f"{device.name}_discharge"] = slot_minutes  # Single slot
+                device_block_minutes[f"{device.name}_deep_discharge"] = slot_minutes  # Single slot
             elif device.type == 'ev':
                 device_block_minutes[device.name] = slot_minutes  # Single slot
         
@@ -428,7 +437,8 @@ class HeatpumpOptimizer:
         new_schedule = [
             entry for entry in schedule_doc.get('schedule', [])
             if not (entry.get('device', '').endswith('_charge') or 
-                   entry.get('device', '').endswith('_discharge'))
+                   entry.get('device', '').endswith('_discharge') or
+                   entry.get('device', '').endswith('_deep_discharge'))
         ]
         
         # Process each battery device
@@ -439,18 +449,20 @@ class HeatpumpOptimizer:
             # Extract original times from stored schedule (already filtered for future slots)
             original_charge = self._extract_times(original_battery_schedule, f"{bat_device.name}_charge_planned", horizon_start, slot_minutes)
             original_discharge = self._extract_times(original_battery_schedule, f"{bat_device.name}_discharge_planned", horizon_start, slot_minutes)
+            original_deep_discharge = self._extract_times(original_battery_schedule, f"{bat_device.name}_deep_discharge_planned", horizon_start, slot_minutes)
 
             # Extract previously limited times from current schedule to preserve past planned slots
             current_schedule = schedule_doc.get('schedule', [])
             prev_limited_charge = self._extract_times(current_schedule, f"{bat_device.name}_charge", horizon_start, slot_minutes)
             prev_limited_discharge = self._extract_times(current_schedule, f"{bat_device.name}_discharge", horizon_start, slot_minutes)
+            prev_limited_deep_discharge = self._extract_times(current_schedule, f"{bat_device.name}_deep_discharge", horizon_start, slot_minutes)
 
-            if original_charge or original_discharge:
-                logger.debug(f"🕐 {bat_device.name}: Processing {len(original_charge)} charge and {len(original_discharge)} discharge future slots")
+            if original_charge or original_discharge or original_deep_discharge:
+                logger.debug(f"🕐 {bat_device.name}: Processing {len(original_charge)} charge, {len(original_discharge)} discharge and {len(original_deep_discharge)} deep discharge future slots")
             
             # Apply SOC-based cycle limiting if battery config is complete
             if bat_device.battery_capacity_kwh and bat_device.battery_charge_speed_kw:
-                limited_charge, limited_discharge = limit_battery_cycles(
+                limited_charge, limited_discharge, limited_deep_discharge = limit_battery_cycles(
                     charge_times=original_charge,
                     discharge_times=original_discharge,
                     slot_minutes=slot_minutes,
@@ -465,15 +477,19 @@ class HeatpumpOptimizer:
                     device_name=bat_device.name,
                     previous_limited_charge_times=prev_limited_charge,
                     previous_limited_discharge_times=prev_limited_discharge,
+                    deep_discharge_times=original_deep_discharge if bat_device.battery_deep_discharge_min_soc is not None else None,
+                    deep_discharge_min_soc=bat_device.battery_deep_discharge_min_soc,
+                    previous_limited_deep_discharge_times=prev_limited_deep_discharge if bat_device.battery_deep_discharge_min_soc is not None else None,
                 )
             else:
                 # Use original times if battery not fully configured
                 logger.warning(f"⚠️ {bat_device.name}: Missing battery config, using original times")
-                limited_charge, limited_discharge = original_charge, original_discharge
+                limited_charge, limited_discharge, limited_deep_discharge = original_charge, original_discharge, original_deep_discharge
             
             # Add limited times to schedule
             new_schedule.extend(self._times_to_schedule(limited_charge, f"{bat_device.name}_charge", horizon_start, slot_minutes))
             new_schedule.extend(self._times_to_schedule(limited_discharge, f"{bat_device.name}_discharge", horizon_start, slot_minutes))
+            new_schedule.extend(self._times_to_schedule(limited_deep_discharge, f"{bat_device.name}_deep_discharge", horizon_start, slot_minutes))
         
         # Merge and save updated schedule
         new_schedule = merge_sequential_timeslots([new_schedule])

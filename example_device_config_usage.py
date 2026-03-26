@@ -120,6 +120,14 @@ battery_device = Device(
     ]),
     discharge_stop=ActionSet(entity=[
         EntityAction(service="number/set_value", entity_id="number.battery_min_soc", value=90)
+    ]),
+    # Battery-specific actions for deep discharging (optional, enables deep discharge mode)
+    battery_deep_discharge_min_soc=5.0,  # Allow SOC to drop to 5% during deep discharge
+    deep_discharge_start=ActionSet(entity=[
+        EntityAction(service="number/set_value", entity_id="number.battery_min_soc", value=5)
+    ]),
+    deep_discharge_stop=ActionSet(entity=[
+        EntityAction(service="number/set_value", entity_id="number.battery_min_soc", value=90)
     ])
 )
 
