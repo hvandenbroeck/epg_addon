@@ -39,6 +39,7 @@
     </div>
     <div class="prediction-chart-section">
         <h2>Power Predictions</h2>
+        <div id="predictionTotals" style="display:flex;gap:24px;margin-bottom:8px;font-size:14px;color:#555;"></div>
         <div id="predictionChart">
             <div class="loading">Loading predictions...</div>
         </div>
@@ -316,6 +317,13 @@
                         return;
                     }
 
+                    // Compute and display totals
+                    const totalUsage = usageData.reduce((s, p) => s + (p[1] || 0), 0);
+                    const totalSolar = solarData.reduce((s, p) => s + (p[1] || 0), 0);
+                    const totalsEl = document.getElementById('predictionTotals');
+                    totalsEl.innerHTML = (usageData.length > 0 ? `<span>🔌 Total predicted usage: <strong>${totalUsage.toFixed(1)} kWh</strong></span>` : '') +
+                                         (solarData.length > 0 ? `<span>☀️ Total predicted solar: <strong>${totalSolar.toFixed(1)} kWh</strong></span>` : '');
+
                     const seriesData = [
                             { name: 'Predicted Usage (kWh)', data: usageData },
                             { name: 'Predicted Solar (kWh)', data: solarData }
@@ -335,7 +343,8 @@
                         },
                         yaxis: {
                             title: { text: 'kWh' },
-                            min: 0
+                            min: 0,
+                            labels: { formatter: val => val.toFixed(1) }
                         },
                         stroke: { curve: 'smooth', width: 2 },
                         colors: ['#FF6B6B', '#FFA726'],
