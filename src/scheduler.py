@@ -64,14 +64,18 @@ class Scheduler:
                 logger.error(f"❌ Invalid datetime in schedule: {e}")
                 continue
 
-            # Handle battery charge/discharge entries (e.g., "battery_charge", "battery_discharge")
+            # Handle battery charge/discharge entries (e.g., "battery_charge", "battery_discharge", "battery_deep_discharge")
             # These map to the same battery device but use different action sets
             is_battery_charge = device.endswith('_charge')
-            is_battery_discharge = device.endswith('_discharge')
+            is_battery_discharge = device.endswith('_discharge') and not device.endswith('_deep_discharge')
+            is_battery_deep_discharge = device.endswith('_deep_discharge')
             
-            if is_battery_charge or is_battery_discharge:
+            if is_battery_charge or is_battery_discharge or is_battery_deep_discharge:
                 # Extract the actual device name (e.g., "battery" from "battery_charge")
-                base_device_name = device.rsplit('_', 1)[0]
+                if is_battery_deep_discharge:
+                    base_device_name = device.rsplit('_deep_discharge', 1)[0]
+                else:
+                    base_device_name = device.rsplit('_', 1)[0]
                 cfg = self.devices.get_device_config(base_device_name)
                 if not cfg:
                     logger.warning(f"⚠️ No config for battery device '{base_device_name}'")
@@ -82,6 +86,10 @@ class Scheduler:
                     start_actions = cfg.charge_start.model_dump(exclude_none=True) if cfg.charge_start else {}
                     stop_actions = cfg.charge_stop.model_dump(exclude_none=True) if cfg.charge_stop else {}
                     action_type = "charge"
+                elif is_battery_deep_discharge:
+                    start_actions = cfg.deep_discharge_start.model_dump(exclude_none=True) if cfg.deep_discharge_start else {}
+                    stop_actions = cfg.deep_discharge_stop.model_dump(exclude_none=True) if cfg.deep_discharge_stop else {}
+                    action_type = "deep_discharge"
                 else:
                     start_actions = cfg.discharge_start.model_dump(exclude_none=True) if cfg.discharge_start else {}
                     stop_actions = cfg.discharge_stop.model_dump(exclude_none=True) if cfg.discharge_stop else {}

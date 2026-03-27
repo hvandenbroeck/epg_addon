@@ -77,12 +77,15 @@ class Device(BaseModel):
     charge_stop: Optional[ActionSet] = None
     discharge_start: Optional[ActionSet] = None
     discharge_stop: Optional[ActionSet] = None
+    deep_discharge_start: Optional[ActionSet] = None
+    deep_discharge_stop: Optional[ActionSet] = None
     # Battery-specific configuration (only used when type='battery')
     battery_soc_entity: Optional[str] = Field(default=None, description="Home Assistant entity for battery state of charge (%)")
     battery_capacity_kwh: Optional[float] = Field(default=None, description="Battery capacity in kWh")
     battery_charge_speed_kw: Optional[float] = Field(default=None, description="Battery charge speed in kW")
     battery_min_soc_percent: Optional[float] = Field(default=20.0, description="Minimum battery SOC in percent")
     battery_max_soc_percent: Optional[float] = Field(default=80.0, description="Maximum battery SOC in percent")
+    battery_deep_discharge_min_soc: Optional[float] = Field(default=None, description="Minimum SOC for deep discharge in percent (lower than battery_min_soc_percent). If set, enables deep discharge mode.")
     # WP and HW optimization parameters (only used when type='wp' or type='hw')
     block_hours: Optional[float] = Field(default=None, description="Minimum runtime when turned on (hours)")
     min_gap_hours: Optional[float] = Field(default=None, description="Minimum gap between runs (hours)")

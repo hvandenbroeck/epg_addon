@@ -29,12 +29,18 @@ def limit_battery_cycles(
     device_name: str = "battery",
     previous_limited_charge_times: list[str] | None = None,
     previous_limited_discharge_times: list[str] | None = None,
-) -> tuple[list[str], list[str]]:
+    deep_discharge_min_soc: float | None = None,
+    previous_limited_deep_discharge_times: list[str] | None = None,
+) -> tuple[list[str], list[str], list[str]]:
     """
     Limit battery charge and discharge times based on battery capacity and SOC constraints.
     
     Prioritizes cheapest slots for charging and most expensive for discharging,
     while respecting SOC constraints over time.
+    
+    When deep_discharge_min_soc is set, the top 10% most expensive selected discharge slots
+    are reclassified as deep discharge slots. Deep discharge uses deep_discharge_min_soc as
+    the SOC floor instead of min_soc_percent, allowing the battery to discharge further.
     
     Args:
         charge_times: List of charge start times (strings like "HH:MM")
@@ -53,13 +59,18 @@ def limit_battery_cycles(
             determine which past slots to preserve. If None, falls back to charge_times.
         previous_limited_discharge_times: Previously limited discharge times (HH:MM strings) used to
             determine which past slots to preserve. If None, falls back to discharge_times.
+        deep_discharge_min_soc: Minimum SOC allowed during deep discharge (lower than min_soc_percent).
+            When set, the top 10% most expensive selected discharge slots are reclassified as deep
+            discharge, which use this lower SOC floor. If None, deep discharge is disabled.
+        previous_limited_deep_discharge_times: Previously limited deep discharge times (HH:MM strings)
+            used to determine which past deep discharge slots to preserve.
 
     Returns:
-        Tuple of (limited_charge_times, limited_discharge_times)
+        Tuple of (limited_charge_times, limited_discharge_times, limited_deep_discharge_times)
     """
     logger.info(f"🔋 {device_name}: Input charge_times: {charge_times}")
     if not charge_times and not discharge_times:
-        return [], []
+        return [], [], []
     
     # Use current SOC or assume 0 % charged
     if current_soc is None:
@@ -97,20 +108,31 @@ def limit_battery_cycles(
         if previous_limited_discharge_times is not None
         else discharge_slots
     )
+    prev_deep_discharge_slots = (
+        {time_to_slot_idx(t) for t in previous_limited_deep_discharge_times}
+        if previous_limited_deep_discharge_times is not None
+        else set()
+    )
 
     # Separate past and future slots - preserve all past slots unchanged
     past_charge_slots = {s for s in prev_charge_slots if s < current_slot_idx}
     past_discharge_slots = {s for s in prev_discharge_slots if s < current_slot_idx}
+    past_deep_discharge_slots = {s for s in prev_deep_discharge_slots if s < current_slot_idx}
     future_charge_slots = {s for s in charge_slots if s >= current_slot_idx}
     future_discharge_slots = {s for s in discharge_slots if s >= current_slot_idx}
+
+    # Resolve conflicts in past slots: deep discharge takes priority over regular discharge,
+    # both take priority over charge.
+    past_discharge_slots -= past_deep_discharge_slots  # deep discharge wins over discharge
+    past_charge_slots -= (past_discharge_slots | past_deep_discharge_slots)
     
-    logger.info(f"🔋 {device_name}: Preserving {len(past_charge_slots)} past charge slots and {len(past_discharge_slots)} past discharge slots")
+    logger.info(f"🔋 {device_name}: Preserving {len(past_charge_slots)} past charge slots, {len(past_discharge_slots)} past discharge slots and {len(past_deep_discharge_slots)} past deep discharge slots")
     
     # Only process future slots
     charge_slots = future_charge_slots
     discharge_slots = future_discharge_slots
     
-    # Resolve conflicts - this shouldn't happen, but just in case
+    # Resolve conflicts between charge and discharge - prioritize discharge
     conflicts = charge_slots & discharge_slots
     if conflicts:
         logger.warning(f"⚠️ {device_name}: {len(conflicts)} slots have both charge and discharge, prioritizing discharge")
@@ -120,8 +142,9 @@ def limit_battery_cycles(
         # No future slots to process - return past slots unchanged
         limited_charge_times = sorted([slot_idx_to_time(s) for s in past_charge_slots])
         limited_discharge_times = sorted([slot_idx_to_time(s) for s in past_discharge_slots])
-        logger.info(f"🔋 {device_name}: No future slots, preserving {len(limited_charge_times)} past charge and {len(limited_discharge_times)} past discharge slots")
-        return limited_charge_times, limited_discharge_times
+        limited_deep_discharge_times = sorted([slot_idx_to_time(s) for s in past_deep_discharge_slots])
+        logger.info(f"🔋 {device_name}: No future slots, preserving {len(limited_charge_times)} past charge, {len(limited_discharge_times)} past discharge and {len(limited_deep_discharge_times)} past deep discharge slots")
+        return limited_charge_times, limited_discharge_times, limited_deep_discharge_times
     
     # Energy per slot when charging at full speed
     slot_hours = slot_minutes / 60
@@ -155,11 +178,12 @@ def limit_battery_cycles(
         charge_by_price = sorted(charge_slots)
         discharge_by_price = sorted(discharge_slots)
     
-    def simulate_soc(selected_charge, selected_discharge):
-
+    def simulate_soc(selected_charge, selected_discharge, selected_deep_discharge=None):
         """Simulate SOC over time and return final SOC, feasibility, and energy statistics."""
+        if selected_deep_discharge is None:
+            selected_deep_discharge = set()
         
-        all_slots = sorted(selected_charge | selected_discharge) #Sort over time
+        all_slots = sorted(selected_charge | selected_discharge | selected_deep_discharge)  # Sort over time
         soc = current_soc
         total_charged_kwh = 0
         total_discharged_kwh = 0
@@ -178,6 +202,15 @@ def limit_battery_cycles(
                 discharge_energy = min(usage_by_slot.get(slot_idx, 0), available)
                 if available < charge_energy_per_slot * 0.1:
                     return None, False, 0, 0  # Can't discharge - battery empty
+                soc -= (discharge_energy / battery_capacity_kwh) * 100
+                total_discharged_kwh += discharge_energy
+            elif slot_idx in selected_deep_discharge:
+                # Deep discharge uses a lower SOC floor (deep_discharge_min_soc)
+                deep_floor = deep_discharge_min_soc if deep_discharge_min_soc is not None else min_soc_percent
+                available = battery_capacity_kwh * (soc - deep_floor) / 100
+                discharge_energy = min(usage_by_slot.get(slot_idx, 0), available)
+                if available < charge_energy_per_slot * 0.1:
+                    return None, False, 0, 0  # Can't deep discharge - battery too empty
                 soc -= (discharge_energy / battery_capacity_kwh) * 100
                 total_discharged_kwh += discharge_energy
         
@@ -250,19 +283,35 @@ def limit_battery_cycles(
                     price_str = f", price={d_slot_price:.4f}" if d_slot_price is not None else ""
                     logger.debug(f"🔋 {device_name}: ✓ Re-added discharge slot {d_slot} (now feasible with more charge, final_soc={d_final_soc:.1f}%{price_str})")
     
+    # Split selected discharge slots into regular discharge and deep discharge.
+    # When deep_discharge_min_soc is configured, the top 10% most expensive discharge slots
+    # are reclassified as deep discharge (using the lower SOC floor).
+    selected_deep_discharge = set()
+    if deep_discharge_min_soc is not None and selected_discharge:
+        n_deep = max(1, int(len(selected_discharge) * 0.10))
+        if prices:
+            deep_candidates = sorted(selected_discharge, key=lambda s: -prices[s] if s < len(prices) else float('-inf'))
+        else:
+            deep_candidates = sorted(selected_discharge, reverse=True)
+        selected_deep_discharge = set(deep_candidates[:n_deep])
+        selected_discharge -= selected_deep_discharge
+        logger.info(f"🔋 {device_name}: Reclassified top {n_deep} discharge slot(s) as deep discharge: {sorted(selected_deep_discharge)}")
+    
     # Combine past slots (unchanged) with limited future slots
     final_charge_slots = past_charge_slots | selected_charge
     final_discharge_slots = past_discharge_slots | selected_discharge
+    final_deep_discharge_slots = past_deep_discharge_slots | selected_deep_discharge
     
     logger.debug(f"🔋 {device_name}: Selection complete - {len(selected_charge)} future charge slots, "
-                f"{len(selected_discharge)} future discharge slots added")
+                f"{len(selected_discharge)} future discharge slots, {len(selected_deep_discharge)} future deep discharge slots added")
     
     # Convert back to time strings
     limited_charge_times = sorted([slot_idx_to_time(s) for s in final_charge_slots])
     limited_discharge_times = sorted([slot_idx_to_time(s) for s in final_discharge_slots])
+    limited_deep_discharge_times = sorted([slot_idx_to_time(s) for s in final_deep_discharge_slots])
     
     # Log results with price info if available
-    final_soc, _, total_charged, total_discharged = simulate_soc(selected_charge, selected_discharge)
+    final_soc, _, total_charged, total_discharged = simulate_soc(selected_charge, selected_discharge, selected_deep_discharge)
     energy_balance = total_charged - total_discharged
     
     if prices and selected_charge:
@@ -271,8 +320,11 @@ def limit_battery_cycles(
     if prices and selected_discharge:
         avg_discharge_price = sum(prices[s] for s in selected_discharge if s < len(prices)) / len(selected_discharge)
         logger.info(f"🔋 {device_name}: Selected {len(selected_discharge)} discharge slots (avg price: {avg_discharge_price:.4f}, total: {total_discharged:.2f} kWh)")
+    if prices and selected_deep_discharge:
+        avg_deep_discharge_price = sum(prices[s] for s in selected_deep_discharge if s < len(prices)) / len(selected_deep_discharge)
+        logger.info(f"🔋 {device_name}: Selected {len(selected_deep_discharge)} deep discharge slots (avg price: {avg_deep_discharge_price:.4f})")
     
-    logger.info(f"🔋 {device_name}: Final - {len(limited_charge_times)} charge, {len(limited_discharge_times)} discharge slots")
+    logger.info(f"🔋 {device_name}: Final - {len(limited_charge_times)} charge, {len(limited_discharge_times)} discharge, {len(limited_deep_discharge_times)} deep discharge slots")
     logger.info(f"🔋 {device_name}: Energy balance: {energy_balance:+.2f} kWh, final_soc: {final_soc:.1f}% (started at {current_soc:.1f}%)")
     
-    return limited_charge_times, limited_discharge_times
+    return limited_charge_times, limited_discharge_times, limited_deep_discharge_times
