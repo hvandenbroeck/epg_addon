@@ -104,6 +104,21 @@ def get_device_limits():
         'limits': {}
     })
 
+@app.route('/api/predictions')
+def get_predictions():
+    """Return power usage and solar production predictions"""
+    with TinyDB('db.json') as db:
+        docs = db.search(Query().id == 'predictions')
+
+    if docs:
+        return jsonify(docs[0])
+    return jsonify({
+        'id': 'predictions',
+        'usage': [],
+        'solar': [],
+        'updated_at': ''
+    })
+
 @app.route('/api/gantt')
 def get_gantt():
     """Generate and return Plotly Gantt chart with price histogram as interactive HTML"""

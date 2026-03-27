@@ -169,6 +169,27 @@ body {
     font-style: italic;
 }
 
+/* Prediction Chart Styles */
+.prediction-chart-section {
+    max-width: 1400px;
+    margin: 20px auto;
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.prediction-chart-section h2 {
+    margin: 0 0 20px 0;
+    color: #333;
+    font-size: 24px;
+    text-align: center;
+}
+
+#predictionChart {
+    min-height: 350px;
+}
+
 /* Battery Thresholds Styles */
 .battery-thresholds {
     max-width: 1400px;
