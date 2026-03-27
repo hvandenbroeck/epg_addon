@@ -40,6 +40,8 @@ def get_battery_thresholds():
     if schedule_docs and 'battery_price_thresholds' in schedule_docs[0]:
         thresholds = schedule_docs[0]['battery_price_thresholds']
         updated_at = schedule_docs[0].get('updated_at', '')
+        solar_only_mode = schedule_docs[0].get('solar_only_mode', False)
+        last_soc_recalc = schedule_docs[0].get('last_soc_recalc', '')
         return jsonify({
             'max_charge_price': thresholds.get('max_charge_price'),
             'min_discharge_price': thresholds.get('min_discharge_price'),
@@ -47,7 +49,9 @@ def get_battery_thresholds():
             'charge_percentile': thresholds.get('charge_percentile'),
             'discharge_percentile': thresholds.get('discharge_percentile'),
             'price_diff_threshold': thresholds.get('price_diff_threshold'),
-            'updated_at': updated_at
+            'updated_at': updated_at,
+            'solar_only_mode': solar_only_mode,
+            'last_soc_recalc': last_soc_recalc
         })
     return jsonify({
         'max_charge_price': None,
@@ -56,7 +60,9 @@ def get_battery_thresholds():
         'charge_percentile': None,
         'discharge_percentile': None,
         'price_diff_threshold': None,
-        'updated_at': ''
+        'updated_at': '',
+        'solar_only_mode': False,
+        'last_soc_recalc': ''
     })
 
 @app.route('/api/peak')

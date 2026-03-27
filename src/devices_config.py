@@ -77,6 +77,8 @@ class Device(BaseModel):
     charge_stop: Optional[ActionSet] = None
     discharge_start: Optional[ActionSet] = None
     discharge_stop: Optional[ActionSet] = None
+    solar_only_start: Optional[ActionSet] = None
+    solar_only_stop: Optional[ActionSet] = None
     # Battery-specific configuration (only used when type='battery')
     battery_soc_entity: Optional[str] = Field(default=None, description="Home Assistant entity for battery state of charge (%)")
     battery_capacity_kwh: Optional[float] = Field(default=None, description="Battery capacity in kWh")
@@ -241,6 +243,28 @@ def load_default_config() -> DevicesConfig:
                 EntityAction(service="select/select_option", entity_id="select.deye_prog6_charge", option="No Grid or Gen"),
             ]),
             discharge_stop=ActionSet(entity=[
+                EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=50),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=50),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=50),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=50),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=50),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=50),
+            ]),
+            solar_only_start=ActionSet(entity=[
+                EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=10),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=10),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=10),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=10),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=10),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=10),
+                EntityAction(service="select/select_option", entity_id="select.deye_prog1_charge", option="No Grid or Gen"),
+                EntityAction(service="select/select_option", entity_id="select.deye_prog2_charge", option="No Grid or Gen"),
+                EntityAction(service="select/select_option", entity_id="select.deye_prog3_charge", option="No Grid or Gen"),
+                EntityAction(service="select/select_option", entity_id="select.deye_prog4_charge", option="No Grid or Gen"),
+                EntityAction(service="select/select_option", entity_id="select.deye_prog5_charge", option="No Grid or Gen"),
+                EntityAction(service="select/select_option", entity_id="select.deye_prog6_charge", option="No Grid or Gen"),
+            ]),
+            solar_only_stop=ActionSet(entity=[
                 EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=50),
                 EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=50),
                 EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=50),

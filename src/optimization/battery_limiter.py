@@ -159,7 +159,7 @@ def limit_battery_cycles(
 
         """Simulate SOC over time and return final SOC, feasibility, and energy statistics."""
         
-        all_slots = sorted(selected_charge | selected_discharge) #Sort over time
+        all_slots = sorted(selected_charge | selected_discharge)  # Sort over time
         soc = current_soc
         total_charged_kwh = 0
         total_discharged_kwh = 0

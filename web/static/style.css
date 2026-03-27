@@ -271,6 +271,61 @@ body {
     font-size: 12px;
     color: #999;
 }
+
+/* Solar-Only Mode Banner */
+.solar-only-banner {
+    max-width: 1400px;
+    margin: 20px auto;
+    background: linear-gradient(135deg, #fffde7, #fff9c4);
+    border: 2px solid #f9a825;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    padding: 30px 20px;
+    text-align: center;
+    display: none;
+}
+
+.solar-only-banner.active {
+    display: block;
+}
+
+.solar-only-icon {
+    font-size: 56px;
+    line-height: 1;
+    margin-bottom: 12px;
+}
+
+.solar-only-title {
+    font-size: 22px;
+    font-weight: bold;
+    color: #e65100;
+    margin-bottom: 12px;
+}
+
+.solar-only-description {
+    font-size: 15px;
+    color: #5d4037;
+    max-width: 640px;
+    margin: 0 auto 16px auto;
+    line-height: 1.6;
+}
+
+.solar-only-badge {
+    display: inline-block;
+    background: #f9a825;
+    color: #4e2500;
+    font-size: 13px;
+    font-weight: bold;
+    padding: 6px 18px;
+    border-radius: 20px;
+    letter-spacing: 0.5px;
+}
+
+.solar-only-timestamp {
+    margin-top: 14px;
+    font-size: 12px;
+    color: #999;
+}
 /* Tab Navigation */
 .tab-navigation {
     max-width: 1400px;

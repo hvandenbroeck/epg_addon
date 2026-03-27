@@ -22,11 +22,23 @@
         <div class="peak-label" style="margin-top: 10px; font-size: 14px;">Max Peak: <span id="maxPeak">--</span> kW</div>
         <div class="peak-timestamp" id="peakTimestamp">Loading...</div>
     </div>
-    <div class="battery-thresholds">
+    <div class="battery-thresholds" id="batteryThresholdsBlock">
         <h2>Battery Price Thresholds</h2>
         <div id="batteryThresholdsContent">
             <div class="loading">Loading thresholds...</div>
         </div>
+    </div>
+    <div class="solar-only-banner" id="solarOnlyBanner">
+        <div class="solar-only-icon">☀️</div>
+        <div class="solar-only-title">Solar-Powered Battery Mode</div>
+        <div class="solar-only-description">
+            Plenty of solar energy is expected today. Your battery will charge naturally
+            from surplus solar production throughout the day, and discharge automatically
+            when additional power is needed beyond what the panels can provide.
+            Grid charging and forced discharge are suspended.
+        </div>
+        <div class="solar-only-badge">⚡ Grid charging &amp; forced discharge suspended</div>
+        <div class="solar-only-timestamp" id="solarOnlyTimestamp"></div>
     </div>
     <div class="device-limits">
         <h2>Device Load Limits</h2>
@@ -226,6 +238,31 @@
             fetch('api/battery_thresholds')
                 .then(response => response.json())
                 .then(data => {
+                    const solarOnlyMode = data.solar_only_mode || false;
+                    const thresholdsBlock = document.getElementById('batteryThresholdsBlock');
+                    const solarOnlyBanner = document.getElementById('solarOnlyBanner');
+
+                    if (solarOnlyMode) {
+                        // Hide thresholds, show solar-only banner
+                        thresholdsBlock.style.display = 'none';
+                        solarOnlyBanner.classList.add('active');
+
+                        // Populate the last-evaluated timestamp
+                        const lastRecalc = data.last_soc_recalc || data.updated_at || '';
+                        const tsEl = document.getElementById('solarOnlyTimestamp');
+                        if (lastRecalc) {
+                            const date = new Date(lastRecalc);
+                            tsEl.textContent = 'Last evaluated: ' + date.toLocaleString();
+                        } else {
+                            tsEl.textContent = '';
+                        }
+                        return;
+                    }
+
+                    // Normal mode: show thresholds, hide banner
+                    thresholdsBlock.style.display = '';
+                    solarOnlyBanner.classList.remove('active');
+
                     const container = document.getElementById('batteryThresholdsContent');
                     
                     if (!data.max_charge_price && !data.min_discharge_price) {
