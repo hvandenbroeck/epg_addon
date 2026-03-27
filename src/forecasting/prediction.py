@@ -4,6 +4,7 @@ import lightgbm as lgb
 from datetime import datetime, timedelta
 import logging
 from sklearn.metrics import mean_absolute_error
+from tinydb import TinyDB, Query
 from ..config import CONFIG
 
 logger = logging.getLogger(__name__)
@@ -294,6 +295,24 @@ class Prediction:
         merged_df.to_csv("/app/merged_historical_data.csv", index=False)
         logger.info("💾 Merged historical data saved to: /app/merged_historical_data.csv")
         
+        # Save predictions to TinyDB for web UI
+        usage_records = [
+            {
+                'timestamp': row['timestamp'].isoformat() if hasattr(row['timestamp'], 'isoformat') else str(row['timestamp']),
+                'predicted_kwh': float(row['predicted_kwh'])
+            }
+            for _, row in results_df[['timestamp', 'predicted_kwh']].iterrows()
+        ]
+        with TinyDB('db.json') as db:
+            existing = db.get(Query().id == 'predictions') or {}
+            existing.update({
+                'id': 'predictions',
+                'usage': usage_records,
+                'updated_at': datetime.now().isoformat()
+            })
+            db.upsert(existing, Query().id == 'predictions')
+        logger.info(f"📈 Saved {len(usage_records)} hourly power usage predictions to database")
+        
         return results_df
 
     async def calculateSolarProduction(self):
@@ -461,5 +480,23 @@ class Prediction:
         # Export to CSV
         results_df.to_csv("/app/solar_predictions.csv", index=False)
         logger.info("💾 Solar predictions saved to: /app/solar_predictions.csv")
+
+        # Save solar predictions to TinyDB for web UI
+        solar_records = [
+            {
+                'timestamp': row['timestamp'].isoformat() if hasattr(row['timestamp'], 'isoformat') else str(row['timestamp']),
+                'predicted_kwh': float(row['predicted_kwh'])
+            }
+            for _, row in results_df[['timestamp', 'predicted_kwh']].iterrows()
+        ]
+        with TinyDB('db.json') as db:
+            existing = db.get(Query().id == 'predictions') or {}
+            existing.update({
+                'id': 'predictions',
+                'solar': solar_records,
+                'updated_at': datetime.now().isoformat()
+            })
+            db.upsert(existing, Query().id == 'predictions')
+        logger.info(f"☀️ Saved {len(solar_records)} hourly solar production predictions to database")
 
         return results_df
