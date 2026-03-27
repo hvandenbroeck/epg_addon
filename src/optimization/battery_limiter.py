@@ -29,7 +29,6 @@ def limit_battery_cycles(
     device_name: str = "battery",
     previous_limited_charge_times: list[str] | None = None,
     previous_limited_discharge_times: list[str] | None = None,
-    deep_discharge_times: list[str] | None = None,
     deep_discharge_min_soc: float | None = None,
     previous_limited_deep_discharge_times: list[str] | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
@@ -38,6 +37,10 @@ def limit_battery_cycles(
     
     Prioritizes cheapest slots for charging and most expensive for discharging,
     while respecting SOC constraints over time.
+    
+    When deep_discharge_min_soc is set, the top 10% most expensive selected discharge slots
+    are reclassified as deep discharge slots. Deep discharge uses deep_discharge_min_soc as
+    the SOC floor instead of min_soc_percent, allowing the battery to discharge further.
     
     Args:
         charge_times: List of charge start times (strings like "HH:MM")
@@ -56,19 +59,17 @@ def limit_battery_cycles(
             determine which past slots to preserve. If None, falls back to charge_times.
         previous_limited_discharge_times: Previously limited discharge times (HH:MM strings) used to
             determine which past slots to preserve. If None, falls back to discharge_times.
-        deep_discharge_times: List of deep discharge candidate times (HH:MM strings). When provided
-            and deep_discharge_min_soc is set, these slots are processed with a lower SOC floor.
-            A slot cannot be both in discharge_times and deep_discharge_times simultaneously.
         deep_discharge_min_soc: Minimum SOC allowed during deep discharge (lower than min_soc_percent).
-            If None, deep discharge is disabled.
+            When set, the top 10% most expensive selected discharge slots are reclassified as deep
+            discharge, which use this lower SOC floor. If None, deep discharge is disabled.
         previous_limited_deep_discharge_times: Previously limited deep discharge times (HH:MM strings)
-            used to determine which past slots to preserve. If None, falls back to deep_discharge_times.
+            used to determine which past deep discharge slots to preserve.
 
     Returns:
         Tuple of (limited_charge_times, limited_discharge_times, limited_deep_discharge_times)
     """
     logger.info(f"🔋 {device_name}: Input charge_times: {charge_times}")
-    if not charge_times and not discharge_times and not deep_discharge_times:
+    if not charge_times and not discharge_times:
         return [], [], []
     
     # Use current SOC or assume 0 % charged
@@ -94,7 +95,6 @@ def limit_battery_cycles(
     # Convert to slot indices
     charge_slots = {time_to_slot_idx(t) for t in charge_times} if charge_times else set()
     discharge_slots = {time_to_slot_idx(t) for t in discharge_times} if discharge_times else set()
-    deep_discharge_slots_input = {time_to_slot_idx(t) for t in deep_discharge_times} if deep_discharge_times else set()
 
     # Past slots are taken from the previously limited schedule so that we preserve
     # what was actually planned, not what the optimizer re-suggests for the past.
@@ -111,7 +111,7 @@ def limit_battery_cycles(
     prev_deep_discharge_slots = (
         {time_to_slot_idx(t) for t in previous_limited_deep_discharge_times}
         if previous_limited_deep_discharge_times is not None
-        else deep_discharge_slots_input
+        else set()
     )
 
     # Separate past and future slots - preserve all past slots unchanged
@@ -120,46 +120,25 @@ def limit_battery_cycles(
     past_deep_discharge_slots = {s for s in prev_deep_discharge_slots if s < current_slot_idx}
     future_charge_slots = {s for s in charge_slots if s >= current_slot_idx}
     future_discharge_slots = {s for s in discharge_slots if s >= current_slot_idx}
-    future_deep_discharge_slots = {s for s in deep_discharge_slots_input if s >= current_slot_idx}
 
-    # Resolve conflicts in past slots: discharge takes priority over deep discharge,
-    # and discharge takes priority over charge
-    past_dd_conflicts = past_discharge_slots & past_deep_discharge_slots
-    if past_dd_conflicts:
-        past_deep_discharge_slots -= past_dd_conflicts
-    past_charge_conflicts = past_charge_slots & past_discharge_slots
-    if past_charge_conflicts:
-        past_charge_slots -= past_charge_conflicts
-    past_charge_dd_conflicts = past_charge_slots & past_deep_discharge_slots
-    if past_charge_dd_conflicts:
-        past_charge_slots -= past_charge_dd_conflicts
+    # Resolve conflicts in past slots: deep discharge takes priority over regular discharge,
+    # both take priority over charge.
+    past_discharge_slots -= past_deep_discharge_slots  # deep discharge wins over discharge
+    past_charge_slots -= (past_discharge_slots | past_deep_discharge_slots)
     
-    logger.info(f"🔋 {device_name}: Preserving {len(past_charge_slots)} past charge slots and {len(past_discharge_slots)} past discharge slots and {len(past_deep_discharge_slots)} past deep discharge slots")
+    logger.info(f"🔋 {device_name}: Preserving {len(past_charge_slots)} past charge slots, {len(past_discharge_slots)} past discharge slots and {len(past_deep_discharge_slots)} past deep discharge slots")
     
     # Only process future slots
     charge_slots = future_charge_slots
     discharge_slots = future_discharge_slots
-    deep_discharge_slots = future_deep_discharge_slots if (deep_discharge_min_soc is not None) else set()
     
     # Resolve conflicts between charge and discharge - prioritize discharge
     conflicts = charge_slots & discharge_slots
     if conflicts:
         logger.warning(f"⚠️ {device_name}: {len(conflicts)} slots have both charge and discharge, prioritizing discharge")
         charge_slots -= conflicts
-
-    # Resolve conflicts between discharge and deep discharge - discharge takes priority
-    dd_conflicts = discharge_slots & deep_discharge_slots
-    if dd_conflicts:
-        logger.warning(f"⚠️ {device_name}: {len(dd_conflicts)} slots have both discharge and deep discharge, prioritizing regular discharge")
-        deep_discharge_slots -= dd_conflicts
-
-    # Resolve conflicts between charge and deep discharge - deep discharge takes priority
-    charge_dd_conflicts = charge_slots & deep_discharge_slots
-    if charge_dd_conflicts:
-        logger.warning(f"⚠️ {device_name}: {len(charge_dd_conflicts)} slots have both charge and deep discharge, prioritizing deep discharge")
-        charge_slots -= charge_dd_conflicts
     
-    if not charge_slots and not discharge_slots and not deep_discharge_slots:
+    if not charge_slots and not discharge_slots:
         # No future slots to process - return past slots unchanged
         limited_charge_times = sorted([slot_idx_to_time(s) for s in past_charge_slots])
         limited_discharge_times = sorted([slot_idx_to_time(s) for s in past_discharge_slots])
@@ -194,12 +173,10 @@ def limit_battery_cycles(
     if prices:
         charge_by_price = sorted(charge_slots, key=lambda s: prices[s] if s < len(prices) else float('inf'))
         discharge_by_price = sorted(discharge_slots, key=lambda s: -prices[s] if s < len(prices) else float('-inf'))
-        deep_discharge_by_price = sorted(deep_discharge_slots, key=lambda s: -prices[s] if s < len(prices) else float('-inf'))
     else:
         # Without prices, just use time order
         charge_by_price = sorted(charge_slots)
         discharge_by_price = sorted(discharge_slots)
-        deep_discharge_by_price = sorted(deep_discharge_slots)
     
     def simulate_soc(selected_charge, selected_discharge, selected_deep_discharge=None):
         """Simulate SOC over time and return final SOC, feasibility, and energy statistics."""
@@ -242,18 +219,16 @@ def limit_battery_cycles(
     # Greedy selection: add slots in price order if they keep the schedule feasible
     selected_charge = set()
     selected_discharge = set()
-    selected_deep_discharge = set()
     
     logger.info(f"🔋 {device_name}: Starting SOC limiting - current_soc={current_soc:.1f}%, "
-                f"{len(charge_slots)} charge candidates, {len(discharge_slots)} discharge candidates, "
-                f"{len(deep_discharge_slots)} deep discharge candidates")
+                f"{len(charge_slots)} charge candidates, {len(discharge_slots)} discharge candidates")
     
     # First add discharge slots (most expensive first)
     logger.debug(f"🔋 {device_name}: Phase 1 - Adding discharge slots (most expensive first)")
     for slot_idx in discharge_by_price:
         candidate = selected_discharge | {slot_idx}
         slot_price = prices[slot_idx] if prices and slot_idx < len(prices) else None
-        final_soc, feasible, charged_kwh, discharged_kwh = simulate_soc(selected_charge, candidate, selected_deep_discharge)
+        final_soc, feasible, charged_kwh, discharged_kwh = simulate_soc(selected_charge, candidate)
         if feasible:
             selected_discharge = candidate
             price_str = f", price={slot_price:.4f}" if slot_price is not None else ""
@@ -265,29 +240,14 @@ def limit_battery_cycles(
     # Get charge buffer percentage from config (default 20%)
     charge_buffer_percent = CONFIG['options'].get('battery_charge_buffer_percent', 20)
     
-    # Phase 1b: Add deep discharge slots (most expensive first, using deep_discharge_min_soc as floor)
-    if deep_discharge_slots:
-        logger.debug(f"🔋 {device_name}: Phase 1b - Adding deep discharge slots (most expensive first)")
-        for slot_idx in deep_discharge_by_price:
-            candidate = selected_deep_discharge | {slot_idx}
-            slot_price = prices[slot_idx] if prices and slot_idx < len(prices) else None
-            final_soc, feasible, charged_kwh, discharged_kwh = simulate_soc(selected_charge, selected_discharge, candidate)
-            if feasible:
-                selected_deep_discharge = candidate
-                price_str = f", price={slot_price:.4f}" if slot_price is not None else ""
-                logger.debug(f"🔋 {device_name}: ✓ Added deep discharge slot {slot_idx}, final_soc={final_soc:.1f}%{price_str}")
-            else:
-                price_str = f", price={slot_price:.4f}" if slot_price is not None else ""
-                logger.debug(f"🔋 {device_name}: ✗ Rejected deep discharge slot {slot_idx} (SOC constraint violated{price_str})")
-    
     logger.debug(f"🔋 {device_name}: Phase 2 - Adding charge slots (cheapest first, buffer={charge_buffer_percent}%)")
-    logger.debug(f"🔋 {device_name}: Initial state: {len(selected_discharge)} discharge slots, {len(selected_deep_discharge)} deep discharge slots selected")
+    logger.debug(f"🔋 {device_name}: Initial state: {len(selected_discharge)} discharge slots selected")
     
     # Then add charge slots (cheapest first) - but only if economically viable
     for slot_idx in charge_by_price:
         candidate = selected_charge | {slot_idx}
         slot_price = prices[slot_idx] if prices and slot_idx < len(prices) else None
-        final_soc, feasible, charged_kwh, discharged_kwh = simulate_soc(candidate, selected_discharge, selected_deep_discharge)
+        final_soc, feasible, charged_kwh, discharged_kwh = simulate_soc(candidate, selected_discharge)
         
         if not feasible:
             price_str = f", price={slot_price:.4f}" if slot_price is not None else ""
@@ -316,23 +276,26 @@ def limit_battery_cycles(
         for d_slot in discharge_by_price:
             if d_slot not in selected_discharge:
                 d_candidate = selected_discharge | {d_slot}
-                d_final_soc, d_feasible, d_charged_kwh, d_discharged_kwh = simulate_soc(selected_charge, d_candidate, selected_deep_discharge)
+                d_final_soc, d_feasible, d_charged_kwh, d_discharged_kwh = simulate_soc(selected_charge, d_candidate)
                 if d_feasible:
                     selected_discharge = d_candidate
                     d_slot_price = prices[d_slot] if prices and d_slot < len(prices) else None
                     price_str = f", price={d_slot_price:.4f}" if d_slot_price is not None else ""
                     logger.debug(f"🔋 {device_name}: ✓ Re-added discharge slot {d_slot} (now feasible with more charge, final_soc={d_final_soc:.1f}%{price_str})")
-        
-        # Re-check if we can add more deep discharge slots now that we have more charge
-        for dd_slot in deep_discharge_by_price:
-            if dd_slot not in selected_deep_discharge:
-                dd_candidate = selected_deep_discharge | {dd_slot}
-                dd_final_soc, dd_feasible, dd_charged_kwh, dd_discharged_kwh = simulate_soc(selected_charge, selected_discharge, dd_candidate)
-                if dd_feasible:
-                    selected_deep_discharge = dd_candidate
-                    dd_slot_price = prices[dd_slot] if prices and dd_slot < len(prices) else None
-                    price_str = f", price={dd_slot_price:.4f}" if dd_slot_price is not None else ""
-                    logger.debug(f"🔋 {device_name}: ✓ Re-added deep discharge slot {dd_slot} (now feasible with more charge, final_soc={dd_final_soc:.1f}%{price_str})")
+    
+    # Split selected discharge slots into regular discharge and deep discharge.
+    # When deep_discharge_min_soc is configured, the top 10% most expensive discharge slots
+    # are reclassified as deep discharge (using the lower SOC floor).
+    selected_deep_discharge = set()
+    if deep_discharge_min_soc is not None and selected_discharge:
+        n_deep = max(1, int(len(selected_discharge) * 0.10))
+        if prices:
+            deep_candidates = sorted(selected_discharge, key=lambda s: -prices[s] if s < len(prices) else float('-inf'))
+        else:
+            deep_candidates = sorted(selected_discharge, reverse=True)
+        selected_deep_discharge = set(deep_candidates[:n_deep])
+        selected_discharge -= selected_deep_discharge
+        logger.info(f"🔋 {device_name}: Reclassified top {n_deep} discharge slot(s) as deep discharge: {sorted(selected_deep_discharge)}")
     
     # Combine past slots (unchanged) with limited future slots
     final_charge_slots = past_charge_slots | selected_charge
