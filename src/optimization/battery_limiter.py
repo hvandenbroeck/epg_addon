@@ -26,6 +26,7 @@ def limit_battery_cycles(
     max_soc_percent: float,
     prices: list[float] | None = None,
     predicted_power_usage: list[dict] | None = None,
+    predicted_solar: list[dict] | None = None,
     device_name: str = "battery",
     previous_limited_charge_times: list[str] | None = None,
     previous_limited_discharge_times: list[str] | None = None,
@@ -48,6 +49,9 @@ def limit_battery_cycles(
         max_soc_percent: Maximum battery SOC in percent
         prices: List of prices per slot (used to prioritize cheap charge / expensive discharge)
         predicted_power_usage: List of dicts with 'timestamp' and 'predicted_kwh' keys, or None
+        predicted_solar: List of dicts with 'timestamp' and 'predicted_kwh' keys for solar
+            production per slot, or None. Solar production reduces net household demand from
+            the battery during discharge slots.
         device_name: Name for logging purposes
         previous_limited_charge_times: Previously limited charge times (HH:MM strings) used to
             determine which past slots to preserve. If None, falls back to charge_times.
@@ -131,20 +135,36 @@ def limit_battery_cycles(
     # Apply discharge buffer to reduce predicted usage
     usage_by_slot = {}
 
+    def _pred_time_to_slot(pred_time_raw):
+        """Parse a prediction timestamp and return its slot index."""
+        t = pred_time_raw
+        if isinstance(t, str):
+            t = datetime.fromisoformat(t.replace('Z', '+00:00'))
+        if hasattr(t, 'replace'):
+            t = t.replace(tzinfo=None)
+        return int((t - horizon_start).total_seconds() / 60 / slot_minutes)
+
     if predicted_power_usage:
         discharge_buffer_percent = CONFIG['options'].get('battery_discharge_buffer_percent', 20)
         discharge_buffer_multiplier = 1.0 - (discharge_buffer_percent / 100.0)
         for pred in predicted_power_usage:
-            pred_time = pred['timestamp']
-            if isinstance(pred_time, str):
-                pred_time = datetime.fromisoformat(pred_time.replace('Z', '+00:00'))
-            if hasattr(pred_time, 'replace'):
-                pred_time = pred_time.replace(tzinfo=None)
-            slot_idx = int((pred_time - horizon_start).total_seconds() / 60 / slot_minutes)
+            slot_idx = _pred_time_to_slot(pred['timestamp'])
             if slot_idx >= 0:
                 # Reduce predicted usage by the discharge buffer percentage
                 logger.debug(f"🔋 {device_name}: Predicted usage for slot {slot_idx} before buffer: {pred['predicted_kwh']:.2f} kWh")
                 usage_by_slot[slot_idx] = pred['predicted_kwh'] * slot_hours * discharge_buffer_multiplier
+
+    # Build predicted solar production lookup (slot_idx -> kWh solar per slot)
+    # Solar production reduces the net household demand that the battery needs to cover.
+    solar_by_slot = {}
+    if predicted_solar:
+        for pred in predicted_solar:
+            slot_idx = _pred_time_to_slot(pred['timestamp'])
+            if slot_idx >= 0:
+                solar_by_slot[slot_idx] = pred['predicted_kwh'] * slot_hours
+
+    if solar_by_slot:
+        logger.debug(f"☀️ {device_name}: Solar production data available for {len(solar_by_slot)} slots")
     
     # Sort charge slots by price (cheapest first), discharge by price (most expensive first)
     if prices:
@@ -174,8 +194,12 @@ def limit_battery_cycles(
                 total_charged_kwh += energy
             elif slot_idx in selected_discharge:
                 available = battery_capacity_kwh * (soc - min_soc_percent) / 100
-                # Use battery's predicted usage
-                discharge_energy = min(usage_by_slot.get(slot_idx, 0), available)
+                # Net demand = predicted usage minus solar production in this slot.
+                # Solar covers part of household demand, reducing how much the battery needs to discharge.
+                gross_usage = usage_by_slot.get(slot_idx, 0)
+                solar_offset = solar_by_slot.get(slot_idx, 0)
+                net_usage = max(0.0, gross_usage - solar_offset)
+                discharge_energy = min(net_usage, available)
                 if available < charge_energy_per_slot * 0.1:
                     return None, False, 0, 0  # Can't discharge - battery empty
                 soc -= (discharge_energy / battery_capacity_kwh) * 100
