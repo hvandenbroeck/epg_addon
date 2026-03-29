@@ -516,6 +516,7 @@ class HeatpumpOptimizer:
                     max_soc_percent=bat_device.battery_max_soc_percent or 80.0,
                     prices=prices,
                     predicted_power_usage=predicted_usage,
+                    predicted_solar=predicted_solar,
                     device_name=bat_device.name,
                     previous_limited_charge_times=prev_limited_charge,
                     previous_limited_discharge_times=prev_limited_discharge,

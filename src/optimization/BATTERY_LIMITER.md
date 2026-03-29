@@ -23,6 +23,9 @@ The algorithm receives:
 - **Current SOC**: Real-time battery state of charge
 - **Prices**: Electricity prices per time slot
 - **Predicted usage**: Optional forecasted power consumption
+- **Predicted solar**: Optional forecasted solar production per slot. When provided, solar
+  production is subtracted from household demand in each discharge slot so that the battery
+  only covers the *net* demand that solar cannot satisfy.
 
 ### Two-Phase Greedy Selection
 
