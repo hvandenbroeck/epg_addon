@@ -14,7 +14,6 @@ The heavy lifting is delegated to specialized modules:
 import logging
 import json
 from datetime import datetime, timedelta
-import pandas as pd
 from tinydb import TinyDB, Query
 
 from .ha_client import HomeAssistantClient
@@ -584,32 +583,6 @@ class HeatpumpOptimizer:
             times, device_key, horizon_start.date(), horizon_start, block_minutes=slot_minutes
         ) if times else []
 
-    @staticmethod
-    def _resample_predictions(predicted_df, slot_minutes):
-        """Resample hourly prediction DataFrame to slot_minutes intervals.
-
-        Normalizes timestamps to timezone-naive UTC before resampling to avoid
-        a "Mixed timezones detected" error when the source data contains a mix of
-        timezone-aware and timezone-naive datetime values.
-
-        Args:
-            predicted_df: DataFrame with 'timestamp' and 'predicted_kwh' columns (hourly).
-            slot_minutes: Target slot duration in minutes.
-
-        Returns:
-            List of dicts with 'timestamp' and 'predicted_kwh' (per-slot kWh).
-        """
-        df = predicted_df[['timestamp', 'predicted_kwh']].copy()
-        # Normalize: interpret all timestamps as UTC, then strip timezone info so pandas
-        # can build a uniform DatetimeIndex required for resampling.
-        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True).dt.tz_convert(None)
-        df = df.set_index('timestamp')
-        df = df.resample(f'{slot_minutes}min').interpolate(method='linear')
-        df = df.reset_index()
-        # Convert from kWh per hour to kWh per slot
-        df['predicted_kwh'] = df['predicted_kwh'] * (slot_minutes / 60)
-        return df[['timestamp', 'predicted_kwh']].to_dict('records')
-
     async def _get_predicted_usage(self, slot_minutes):
         """Get predicted power usage interpolated to slot_minutes intervals."""
         try:
@@ -620,7 +593,16 @@ class HeatpumpOptimizer:
             
             predicted_df = await predictor.calculatePowerUsage()
             if predicted_df is not None and len(predicted_df) > 0:
-                usage = self._resample_predictions(predicted_df, slot_minutes)
+                # Interpolate hourly predictions to slot_minutes intervals
+                # Only keep predicted_kwh to avoid interpolation errors on non-numeric columns (e.g. date)
+                predicted_df = predicted_df[['timestamp', 'predicted_kwh']].set_index('timestamp')
+                predicted_df = predicted_df.resample(f'{slot_minutes}min').interpolate(method='linear')
+                predicted_df = predicted_df.reset_index()
+                
+                # Convert from kWh per hour to kWh per slot
+                predicted_df['predicted_kwh'] = predicted_df['predicted_kwh'] * (slot_minutes / 60)
+                
+                usage = predicted_df[['timestamp', 'predicted_kwh']].to_dict('records')
                 logger.debug(f"🔋 Retrieved {len(usage)} {slot_minutes}-min slots of predicted power usage")
                 return usage
         except Exception as e:
@@ -637,7 +619,15 @@ class HeatpumpOptimizer:
 
             predicted_df = await predictor.calculateSolarProduction()
             if predicted_df is not None and len(predicted_df) > 0:
-                solar = self._resample_predictions(predicted_df, slot_minutes)
+                # Interpolate hourly predictions to slot_minutes intervals
+                predicted_df = predicted_df[['timestamp', 'predicted_kwh']].set_index('timestamp')
+                predicted_df = predicted_df.resample(f'{slot_minutes}min').interpolate(method='linear')
+                predicted_df = predicted_df.reset_index()
+
+                # Convert from kWh per hour to kWh per slot
+                predicted_df['predicted_kwh'] = predicted_df['predicted_kwh'] * (slot_minutes / 60)
+
+                solar = predicted_df[['timestamp', 'predicted_kwh']].to_dict('records')
                 logger.debug(f"☀️ Retrieved {len(solar)} {slot_minutes}-min slots of predicted solar production")
                 return solar
         except Exception as e:
