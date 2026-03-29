@@ -124,6 +124,26 @@
             "value": 80
           }
         ]
+      },
+      "deep_discharge_enabled": true,
+      "deep_discharge_top_percent": 10.0,
+      "deep_discharge_start": {
+        "entity": [
+          {
+            "service": "number/set_value",
+            "entity_id": "number.deye_prog1_capacity",
+            "value": 5
+          }
+        ]
+      },
+      "deep_discharge_stop": {
+        "entity": [
+          {
+            "service": "number/set_value",
+            "entity_id": "number.deye_prog1_capacity",
+            "value": 80
+          }
+        ]
       }
     },
     {
