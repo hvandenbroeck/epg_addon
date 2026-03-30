@@ -10,7 +10,7 @@ This package contains optimization algorithms for different device types:
 from .thermal import optimize_thermal_device, optimize_wp, optimize_hw
 from .battery import optimize_battery, optimize_bat_discharge
 from .ev import optimize_ev
-from .battery_limiter import limit_battery_cycles, compute_soc_trajectory
+from .battery_limiter import limit_battery_cycles
 
 __all__ = [
     'optimize_thermal_device',
@@ -20,5 +20,4 @@ __all__ = [
     'optimize_bat_discharge',
     'optimize_ev',
     'limit_battery_cycles',
-    'compute_soc_trajectory',
 ]

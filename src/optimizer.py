@@ -20,7 +20,8 @@ from .ha_client import HomeAssistantClient
 from .device_state_manager import DeviceStateManager
 from .devices import Devices
 from .scheduler import Scheduler
-from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, optimize_ev, limit_battery_cycles, compute_soc_trajectory
+from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, optimize_ev, limit_battery_cycles
+from .forecasting import compute_soc_trajectory
 from .utils import slot_to_time, slots_to_iso_ranges, merge_sequential_timeslots, time_to_slot
 from .config import CONFIG
 from .price_fetcher import EntsoeePriceFetcher
@@ -669,7 +670,7 @@ class HeatpumpOptimizer:
 
         Builds the slot-index sets and slot lookups, then delegates the actual
         SOC simulation to :func:`compute_soc_trajectory` from
-        ``optimization.battery_limiter``.
+        ``forecasting.soc_prediction``.
 
         Args:
             bat_device: Battery device configuration object.
