@@ -464,7 +464,12 @@ class HeatpumpOptimizer:
         ]
         
         # Process each battery device
+        battery_current_socs = {}
         for bat_device in devices_config.get_devices_by_type('battery'):
+
+            # Get current SOC (or use 50% as fallback) for all modes
+            current_soc = await self._get_battery_soc(bat_device)
+            battery_current_socs[bat_device.name] = current_soc
 
             if solar_only_mode:
                 # Solar-only mode: skip charge/discharge entirely and add a solar_only entry
@@ -482,8 +487,6 @@ class HeatpumpOptimizer:
                 continue
 
             # Normal mode: apply SOC-based cycle limiting
-            # Get current SOC (or use 50% as fallback)
-            current_soc = await self._get_battery_soc(bat_device)
             
             # Extract original times from stored schedule (already filtered for future slots)
             original_charge = self._extract_times(original_battery_schedule, f"{bat_device.name}_charge_planned", horizon_start, slot_minutes)
@@ -543,6 +546,14 @@ class HeatpumpOptimizer:
             db.upsert(schedule_doc, Query().id == "schedule")
         
         logger.info(f"✅ Battery limits recalculated ({len(new_schedule)} entries)")
+
+        # Compute and persist predicted battery SOC for all battery devices
+        self._save_battery_soc_predictions(
+            battery_current_socs, new_schedule,
+            horizon_start, horizon_end, slot_minutes,
+            predicted_usage, predicted_solar
+        )
+
         await self.scheduler_instance.schedule_actions()
 
     async def _get_battery_soc(self, bat_device):
@@ -642,3 +653,188 @@ class HeatpumpOptimizer:
         except Exception as e:
             logger.warning(f"⚠️ Could not get predicted solar production: {e}")
         return None
+
+    def _compute_battery_soc_prediction(
+        self,
+        bat_device,
+        current_soc: float,
+        schedule: list,
+        horizon_start: datetime,
+        horizon_end: datetime,
+        slot_minutes: int,
+        predicted_usage: list | None,
+        predicted_solar: list | None,
+    ) -> list[dict]:
+        """Compute predicted battery SOC over the horizon from now to horizon_end.
+
+        Simulates the battery state of charge slot-by-slot based on the schedule
+        (charge / discharge / solar-only entries), estimated power consumption and
+        solar production predictions.
+
+        Args:
+            bat_device: Battery device configuration object.
+            current_soc: Current battery state of charge in percent (0–100).
+            schedule: Merged schedule list (ISO start/stop entries).
+            horizon_start: Start of the optimization horizon.
+            horizon_end: End of the optimization horizon.
+            slot_minutes: Duration of each time slot in minutes.
+            predicted_usage: Per-slot kWh usage predictions (from _get_predicted_usage).
+            predicted_solar: Per-slot kWh solar predictions (from _get_predicted_solar).
+
+        Returns:
+            List of dicts with 'timestamp' (ISO string) and 'soc_percent' (float) keys,
+            covering the range from the current time to horizon_end.
+        """
+        if not bat_device.battery_capacity_kwh or not bat_device.battery_charge_speed_kw:
+            return []
+
+        capacity_kwh = bat_device.battery_capacity_kwh
+        charge_speed_kw = bat_device.battery_charge_speed_kw
+        min_soc = bat_device.battery_min_soc_percent or 20.0
+        max_soc = bat_device.battery_max_soc_percent or 80.0
+        slot_hours = slot_minutes / 60
+        charge_energy_per_slot = charge_speed_kw * slot_hours
+
+        # Strip timezone info to work with naive datetimes
+        now = datetime.now().replace(tzinfo=None)
+        if hasattr(horizon_start, 'tzinfo') and horizon_start.tzinfo is not None:
+            horizon_start = horizon_start.replace(tzinfo=None)
+        if hasattr(horizon_end, 'tzinfo') and horizon_end.tzinfo is not None:
+            horizon_end = horizon_end.replace(tzinfo=None)
+
+        current_slot_idx = max(0, int((now - horizon_start).total_seconds() / 60 / slot_minutes))
+        total_slots = int((horizon_end - horizon_start).total_seconds() / 60 / slot_minutes)
+
+        # Build slot-index sets for each schedule action type
+        charge_slots: set[int] = set()
+        discharge_slots: set[int] = set()
+        solar_only_slots: set[int] = set()
+
+        for entry in schedule:
+            device = entry.get('device', '')
+            if device == f"{bat_device.name}_charge":
+                slot_set = charge_slots
+            elif device in (f"{bat_device.name}_discharge", f"{bat_device.name}_deep_discharge"):
+                slot_set = discharge_slots
+            elif device == f"{bat_device.name}_solar_only":
+                slot_set = solar_only_slots
+            else:
+                continue
+
+            start_dt = datetime.fromisoformat(entry['start'])
+            stop_dt = datetime.fromisoformat(entry['stop'])
+            if hasattr(start_dt, 'tzinfo') and start_dt.tzinfo is not None:
+                start_dt = start_dt.replace(tzinfo=None)
+            if hasattr(stop_dt, 'tzinfo') and stop_dt.tzinfo is not None:
+                stop_dt = stop_dt.replace(tzinfo=None)
+
+            t = start_dt
+            while t < stop_dt:
+                idx = int((t - horizon_start).total_seconds() / 60 / slot_minutes)
+                if 0 <= idx < total_slots:
+                    slot_set.add(idx)
+                t += timedelta(minutes=slot_minutes)
+
+        # Build kWh-per-slot lookups for usage and solar
+        # predicted_usage / predicted_solar already carry kWh per slot (converted by _get_predicted_usage)
+        def _build_slot_lookup(predictions: list | None) -> dict[int, float]:
+            result: dict[int, float] = {}
+            if not predictions:
+                return result
+            for pred in predictions:
+                t = pred['timestamp']
+                if isinstance(t, str):
+                    t = datetime.fromisoformat(t.replace('Z', '+00:00'))
+                if hasattr(t, 'tzinfo') and t.tzinfo is not None:
+                    t = t.replace(tzinfo=None)
+                idx = int((t - horizon_start).total_seconds() / 60 / slot_minutes)
+                if idx >= 0:
+                    result[idx] = float(pred['predicted_kwh'])
+            return result
+
+        usage_by_slot = _build_slot_lookup(predicted_usage)
+        solar_by_slot = _build_slot_lookup(predicted_solar)
+
+        # Simulate SOC from the current slot forward
+        soc = float(current_soc)
+        records: list[dict] = []
+
+        for slot_idx in range(current_slot_idx, total_slots + 1):
+            timestamp = horizon_start + timedelta(minutes=slot_idx * slot_minutes)
+            records.append({
+                'timestamp': timestamp.isoformat(),
+                'soc_percent': round(soc, 1),
+            })
+
+            if slot_idx >= total_slots:
+                break
+
+            if slot_idx in charge_slots:
+                headroom = capacity_kwh * max(0.0, max_soc - soc) / 100
+                energy = min(charge_energy_per_slot, headroom)
+                soc = min(max_soc, soc + (energy / capacity_kwh) * 100)
+
+            elif slot_idx in discharge_slots:
+                available = capacity_kwh * max(0.0, soc - min_soc) / 100
+                gross_usage = usage_by_slot.get(slot_idx, 0.0)
+                solar_offset = solar_by_slot.get(slot_idx, 0.0)
+                net_usage = max(0.0, gross_usage - solar_offset)
+                discharge_energy = min(net_usage, available)
+                soc = max(min_soc, soc - (discharge_energy / capacity_kwh) * 100)
+
+            elif slot_idx in solar_only_slots:
+                # Passive solar charging: excess solar (beyond consumption) charges the battery
+                gross_usage = usage_by_slot.get(slot_idx, 0.0)
+                solar = solar_by_slot.get(slot_idx, 0.0)
+                excess_solar = max(0.0, solar - gross_usage)
+                headroom = capacity_kwh * max(0.0, max_soc - soc) / 100
+                energy = min(excess_solar, charge_energy_per_slot, headroom)
+                soc = min(max_soc, soc + (energy / capacity_kwh) * 100)
+
+        return records
+
+    def _save_battery_soc_predictions(
+        self,
+        battery_current_socs: dict,
+        schedule: list,
+        horizon_start: datetime,
+        horizon_end: datetime,
+        slot_minutes: int,
+        predicted_usage: list | None,
+        predicted_solar: list | None,
+    ) -> None:
+        """Compute and persist predicted battery SOC for all battery devices.
+
+        Saves the SOC trajectory as 'battery_soc' in the TinyDB predictions document
+        so the web UI can display it on the power prediction chart.
+        """
+        battery_devices = devices_config.get_devices_by_type('battery')
+        if not battery_devices:
+            return
+
+        try:
+            with TinyDB('db.json') as db:
+                predictions_doc = db.get(Query().id == 'predictions') or {
+                    'id': 'predictions', 'usage': [], 'solar': [], 'updated_at': ''
+                }
+
+                for bat_device in battery_devices:
+                    current_soc = battery_current_socs.get(bat_device.name, 50.0)
+                    soc_records = self._compute_battery_soc_prediction(
+                        bat_device, current_soc, schedule,
+                        horizon_start, horizon_end, slot_minutes,
+                        predicted_usage, predicted_solar,
+                    )
+                    if soc_records:
+                        # Use a device-specific key; 'battery_soc' for single-device setups
+                        predictions_doc[f'battery_soc_{bat_device.name}'] = soc_records
+                        # Also write to generic key so the UI works without knowing device names
+                        predictions_doc['battery_soc'] = soc_records
+                        logger.info(
+                            f"🔋 {bat_device.name}: Saved {len(soc_records)} SOC prediction data points"
+                        )
+
+                predictions_doc['updated_at'] = datetime.now().isoformat()
+                db.upsert(predictions_doc, Query().id == 'predictions')
+        except Exception as e:
+            logger.warning(f"⚠️ Could not save battery SOC predictions: {e}")

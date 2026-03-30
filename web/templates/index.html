@@ -344,8 +344,9 @@
                     const container = document.getElementById('predictionChart');
                     const usageData = (data.usage || []).map(r => [new Date(r.timestamp).getTime(), r.predicted_kwh]);
                     const solarData = (data.solar || []).map(r => [new Date(r.timestamp).getTime(), r.predicted_kwh]);
+                    const batterySocData = (data.battery_soc || []).map(r => [new Date(r.timestamp).getTime(), r.soc_percent]);
 
-                    if (usageData.length === 0 && solarData.length === 0) {
+                    if (usageData.length === 0 && solarData.length === 0 && batterySocData.length === 0) {
                         container.innerHTML = '<div class="no-limits">No prediction data available yet</div>';
                         if (predictionChartInstance) {
                             predictionChartInstance.destroy();
@@ -358,13 +359,37 @@
                     const totalUsage = usageData.reduce((s, p) => s + (p[1] || 0), 0);
                     const totalSolar = solarData.reduce((s, p) => s + (p[1] || 0), 0);
                     const totalsEl = document.getElementById('predictionTotals');
-                    totalsEl.innerHTML = (usageData.length > 0 ? `<span>🔌 Total predicted usage: <strong>${totalUsage.toFixed(1)} kWh</strong></span>` : '') +
-                                         (solarData.length > 0 ? `<span>☀️ Total predicted solar: <strong>${totalSolar.toFixed(1)} kWh</strong></span>` : '');
+                    totalsEl.innerHTML =
+                        (usageData.length > 0 ? `<span>🔌 Total predicted usage: <strong>${totalUsage.toFixed(1)} kWh</strong></span>` : '') +
+                        (solarData.length > 0 ? `<span>☀️ Total predicted solar: <strong>${totalSolar.toFixed(1)} kWh</strong></span>` : '') +
+                        (batterySocData.length > 0 ? `<span>🔋 Starting SOC: <strong>${batterySocData[0][1].toFixed(0)} %</strong></span>` : '');
+
+                    const hasBatterySoc = batterySocData.length > 0;
 
                     const seriesData = [
-                            { name: 'Predicted Usage (kWh)', data: usageData },
-                            { name: 'Predicted Solar (kWh)', data: solarData }
-                        ];
+                        { name: 'Predicted Usage (kWh)', data: usageData, yAxisIndex: 0 },
+                        { name: 'Predicted Solar (kWh)', data: solarData, yAxisIndex: 0 },
+                        ...(hasBatterySoc ? [{ name: 'Battery SOC (%)', data: batterySocData, yAxisIndex: 1 }] : [])
+                    ];
+
+                    const yaxisConfig = [
+                        {
+                            title: { text: 'kWh' },
+                            min: 0,
+                            labels: { formatter: val => val.toFixed(1) }
+                        },
+                        ...(hasBatterySoc ? [{
+                            opposite: true,
+                            title: { text: 'Battery SOC (%)' },
+                            min: 0,
+                            max: 100,
+                            labels: { formatter: val => val.toFixed(0) + ' %' }
+                        }] : [])
+                    ];
+
+                    const colors = ['#FF6B6B', '#FFA726', ...(hasBatterySoc ? ['#45B7D1'] : [])];
+                    const strokeWidths = [2, 2, ...(hasBatterySoc ? [2] : [])];
+                    const strokeDashArrays = [0, 0, ...(hasBatterySoc ? [4] : [])];
 
                     const options = {
                         chart: {
@@ -379,17 +404,19 @@
                             type: 'datetime',
                             labels: { datetimeUTC: false }
                         },
-                        yaxis: {
-                            title: { text: 'kWh' },
-                            min: 0,
-                            labels: { formatter: val => val.toFixed(1) }
-                        },
-                        stroke: { curve: 'smooth', width: 2 },
-                        colors: ['#FF6B6B', '#FFA726'],
+                        yaxis: yaxisConfig,
+                        stroke: { curve: 'smooth', width: strokeWidths, dashArray: strokeDashArrays },
+                        colors: colors,
                         legend: { position: 'top' },
                         tooltip: {
                             x: { format: 'dd MMM HH:mm' },
-                            y: { formatter: val => val !== null ? val.toFixed(3) + ' kWh' : 'N/A' }
+                            y: {
+                                formatter: function(val, { seriesIndex, w }) {
+                                    if (val === null || val === undefined) return 'N/A';
+                                    if (w.config.series[seriesIndex].name === 'Battery SOC (%)') return val.toFixed(1) + ' %';
+                                    return val.toFixed(3) + ' kWh';
+                                }
+                            }
                         },
                         annotations: {
                             xaxis: [{
@@ -402,7 +429,7 @@
                     };
 
                     if (predictionChartInstance) {
-                        predictionChartInstance.updateSeries(seriesData);
+                        predictionChartInstance.updateOptions(options, true, false);
                     } else {
                         container.innerHTML = '';
                         predictionChartInstance = new ApexCharts(container, options);
