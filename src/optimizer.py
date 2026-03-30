@@ -20,7 +20,7 @@ from .ha_client import HomeAssistantClient
 from .device_state_manager import DeviceStateManager
 from .devices import Devices
 from .scheduler import Scheduler
-from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, optimize_ev, limit_battery_cycles
+from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, optimize_ev, limit_battery_cycles, compute_soc_trajectory
 from .utils import slot_to_time, slots_to_iso_ranges, merge_sequential_timeslots, time_to_slot
 from .config import CONFIG
 from .price_fetcher import EntsoeePriceFetcher
@@ -667,9 +667,9 @@ class HeatpumpOptimizer:
     ) -> list[dict]:
         """Compute predicted battery SOC over the horizon from now to horizon_end.
 
-        Simulates the battery state of charge slot-by-slot based on the schedule
-        (charge / discharge / solar-only entries), estimated power consumption and
-        solar production predictions.
+        Builds the slot-index sets and slot lookups, then delegates the actual
+        SOC simulation to :func:`compute_soc_trajectory` from
+        ``optimization.battery_limiter``.
 
         Args:
             bat_device: Battery device configuration object.
@@ -687,13 +687,6 @@ class HeatpumpOptimizer:
         """
         if not bat_device.battery_capacity_kwh or not bat_device.battery_charge_speed_kw:
             return []
-
-        capacity_kwh = bat_device.battery_capacity_kwh
-        charge_speed_kw = bat_device.battery_charge_speed_kw
-        min_soc = bat_device.battery_min_soc_percent or 20.0
-        max_soc = bat_device.battery_max_soc_percent or 80.0
-        slot_hours = slot_minutes / 60
-        charge_energy_per_slot = charge_speed_kw * slot_hours
 
         # Strip timezone info to work with naive datetimes
         now = datetime.now().replace(tzinfo=None)
@@ -755,43 +748,30 @@ class HeatpumpOptimizer:
         usage_by_slot = _build_slot_lookup(predicted_usage)
         solar_by_slot = _build_slot_lookup(predicted_solar)
 
-        # Simulate SOC from the current slot forward
-        soc = float(current_soc)
-        records: list[dict] = []
+        # Delegate the actual SOC simulation to the shared compute_soc_trajectory function
+        trajectory = compute_soc_trajectory(
+            charge_slots=charge_slots,
+            discharge_slots=discharge_slots,
+            current_soc=current_soc,
+            battery_capacity_kwh=bat_device.battery_capacity_kwh,
+            battery_charge_speed_kw=bat_device.battery_charge_speed_kw,
+            min_soc_percent=bat_device.battery_min_soc_percent or 20.0,
+            max_soc_percent=bat_device.battery_max_soc_percent or 80.0,
+            slot_minutes=slot_minutes,
+            start_slot=current_slot_idx,
+            total_slots=total_slots,
+            usage_by_slot=usage_by_slot,
+            solar_by_slot=solar_by_slot,
+            solar_only_slots=solar_only_slots,
+        )
 
-        for slot_idx in range(current_slot_idx, total_slots + 1):
-            timestamp = horizon_start + timedelta(minutes=slot_idx * slot_minutes)
-            records.append({
-                'timestamp': timestamp.isoformat(),
-                'soc_percent': round(soc, 1),
-            })
-
-            if slot_idx >= total_slots:
-                break
-
-            if slot_idx in charge_slots:
-                headroom = capacity_kwh * max(0.0, max_soc - soc) / 100
-                energy = min(charge_energy_per_slot, headroom)
-                soc = min(max_soc, soc + (energy / capacity_kwh) * 100)
-
-            elif slot_idx in discharge_slots:
-                available = capacity_kwh * max(0.0, soc - min_soc) / 100
-                gross_usage = usage_by_slot.get(slot_idx, 0.0)
-                solar_offset = solar_by_slot.get(slot_idx, 0.0)
-                net_usage = max(0.0, gross_usage - solar_offset)
-                discharge_energy = min(net_usage, available)
-                soc = max(min_soc, soc - (discharge_energy / capacity_kwh) * 100)
-
-            elif slot_idx in solar_only_slots:
-                # Passive solar charging: excess solar (beyond consumption) charges the battery
-                gross_usage = usage_by_slot.get(slot_idx, 0.0)
-                solar = solar_by_slot.get(slot_idx, 0.0)
-                excess_solar = max(0.0, solar - gross_usage)
-                headroom = capacity_kwh * max(0.0, max_soc - soc) / 100
-                energy = min(excess_solar, charge_energy_per_slot, headroom)
-                soc = min(max_soc, soc + (energy / capacity_kwh) * 100)
-
-        return records
+        return [
+            {
+                'timestamp': (horizon_start + timedelta(minutes=slot_idx * slot_minutes)).isoformat(),
+                'soc_percent': soc_pct,
+            }
+            for slot_idx, soc_pct in trajectory
+        ]
 
     def _save_battery_soc_predictions(
         self,
