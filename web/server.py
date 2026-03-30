@@ -117,11 +117,19 @@ def get_predictions():
         docs = db.search(Query().id == 'predictions')
 
     if docs:
-        return jsonify(docs[0])
+        doc = docs[0]
+        return jsonify({
+            'id': doc.get('id', 'predictions'),
+            'usage': doc.get('usage', []),
+            'solar': doc.get('solar', []),
+            'battery_soc': doc.get('battery_soc', {}),
+            'updated_at': doc.get('updated_at', '')
+        })
     return jsonify({
         'id': 'predictions',
         'usage': [],
         'solar': [],
+        'battery_soc': {},
         'updated_at': ''
     })
 

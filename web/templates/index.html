@@ -345,7 +345,16 @@
                     const usageData = (data.usage || []).map(r => [new Date(r.timestamp).getTime(), r.predicted_kwh]);
                     const solarData = (data.solar || []).map(r => [new Date(r.timestamp).getTime(), r.predicted_kwh]);
 
-                    if (usageData.length === 0 && solarData.length === 0) {
+                    // Flatten battery SOC data: use the first device's predictions if multiple exist
+                    const batterySocRaw = data.battery_soc || {};
+                    const socDeviceNames = Object.keys(batterySocRaw);
+                    const socSeriesData = socDeviceNames.map(name => ({
+                        name: `Battery SOC ${socDeviceNames.length > 1 ? name + ' ' : ''}(%)`.trim(),
+                        yAxisIndex: 1,
+                        data: (batterySocRaw[name] || []).map(r => [new Date(r.timestamp).getTime(), r.soc_percent])
+                    })).filter(s => s.data.length > 0);
+
+                    if (usageData.length === 0 && solarData.length === 0 && socSeriesData.length === 0) {
                         container.innerHTML = '<div class="no-limits">No prediction data available yet</div>';
                         if (predictionChartInstance) {
                             predictionChartInstance.destroy();
@@ -361,10 +370,37 @@
                     totalsEl.innerHTML = (usageData.length > 0 ? `<span>🔌 Total predicted usage: <strong>${totalUsage.toFixed(1)} kWh</strong></span>` : '') +
                                          (solarData.length > 0 ? `<span>☀️ Total predicted solar: <strong>${totalSolar.toFixed(1)} kWh</strong></span>` : '');
 
+                    // kWh series use left y-axis (index 0); SOC series use right y-axis (index 1)
                     const seriesData = [
-                            { name: 'Predicted Usage (kWh)', data: usageData },
-                            { name: 'Predicted Solar (kWh)', data: solarData }
-                        ];
+                        { name: 'Predicted Usage (kWh)', data: usageData },
+                        { name: 'Predicted Solar (kWh)', data: solarData },
+                        ...socSeriesData
+                    ];
+
+                    const hasSoc = socSeriesData.length > 0;
+                    const socColors = ['#45B7D1', '#2E86AB', '#1B5E7B'];
+
+                    const yaxisConfig = [
+                        {
+                            title: { text: 'kWh' },
+                            min: 0,
+                            labels: { formatter: val => val !== null ? val.toFixed(1) : '' }
+                        },
+                        {
+                            opposite: true,
+                            title: { text: 'Battery SOC (%)' },
+                            min: 0,
+                            max: 100,
+                            show: hasSoc,
+                            labels: { formatter: val => val !== null ? val.toFixed(0) + '%' : '' }
+                        }
+                    ];
+
+                    // Assign each series to the correct y-axis
+                    const seriesYAxis = [
+                        { seriesName: 'Predicted Usage (kWh)', axisBorderShow: false },
+                        { seriesName: 'Predicted Solar (kWh)', axisBorderShow: false }
+                    ];
 
                     const options = {
                         chart: {
@@ -379,17 +415,22 @@
                             type: 'datetime',
                             labels: { datetimeUTC: false }
                         },
-                        yaxis: {
-                            title: { text: 'kWh' },
-                            min: 0,
-                            labels: { formatter: val => val.toFixed(1) }
-                        },
+                        yaxis: yaxisConfig,
                         stroke: { curve: 'smooth', width: 2 },
-                        colors: ['#FF6B6B', '#FFA726'],
+                        colors: ['#FF6B6B', '#FFA726', ...socColors.slice(0, socSeriesData.length)],
                         legend: { position: 'top' },
                         tooltip: {
                             x: { format: 'dd MMM HH:mm' },
-                            y: { formatter: val => val !== null ? val.toFixed(3) + ' kWh' : 'N/A' }
+                            y: {
+                                formatter: function(val, opts) {
+                                    if (val === null || val === undefined) return 'N/A';
+                                    const seriesName = opts && opts.seriesIndex !== undefined
+                                        ? seriesData[opts.seriesIndex]?.name || ''
+                                        : '';
+                                    if (seriesName.includes('SOC')) return val.toFixed(1) + '%';
+                                    return val.toFixed(3) + ' kWh';
+                                }
+                            }
                         },
                         annotations: {
                             xaxis: [{
@@ -402,12 +443,12 @@
                     };
 
                     if (predictionChartInstance) {
-                        predictionChartInstance.updateSeries(seriesData);
-                    } else {
-                        container.innerHTML = '';
-                        predictionChartInstance = new ApexCharts(container, options);
-                        predictionChartInstance.render();
+                        predictionChartInstance.destroy();
+                        predictionChartInstance = null;
                     }
+                    container.innerHTML = '';
+                    predictionChartInstance = new ApexCharts(container, options);
+                    predictionChartInstance.render();
 
                     if (data.updated_at) {
                         const ts = new Date(data.updated_at).toLocaleString();

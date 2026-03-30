@@ -29,6 +29,7 @@ from .forecasting.price_history import PriceHistoryManager
 from .forecasting.statistics_loader import StatisticsLoader
 from .forecasting.weather import Weather
 from .forecasting.prediction import Prediction
+from .forecasting.battery_soc_prediction import predict_battery_soc
 from .runtime_calculator import RuntimeCalculator
 
 logger = logging.getLogger(__name__)
@@ -462,6 +463,9 @@ class HeatpumpOptimizer:
                    entry.get('device', '').endswith('_deep_discharge') or
                    entry.get('device', '').endswith('_solar_only'))
         ]
+
+        # Accumulate SOC predictions for all battery devices
+        battery_soc_predictions: dict[str, list[dict]] = {}
         
         # Process each battery device
         for bat_device in devices_config.get_devices_by_type('battery'):
@@ -532,7 +536,30 @@ class HeatpumpOptimizer:
             new_schedule.extend(self._times_to_schedule(limited_charge, f"{bat_device.name}_charge", horizon_start, slot_minutes))
             new_schedule.extend(self._times_to_schedule(limited_discharge, f"{bat_device.name}_discharge", horizon_start, slot_minutes))
             new_schedule.extend(self._times_to_schedule(limited_deep_discharge, f"{bat_device.name}_deep_discharge", horizon_start, slot_minutes))
-        
+
+            # Compute battery SOC prediction for this device
+            if bat_device.battery_capacity_kwh and bat_device.battery_charge_speed_kw:
+                try:
+                    soc_prediction = predict_battery_soc(
+                        charge_times=limited_charge,
+                        discharge_times=limited_discharge,
+                        deep_discharge_times=limited_deep_discharge,
+                        slot_minutes=slot_minutes,
+                        horizon_start=horizon_start,
+                        horizon_end=horizon_end,
+                        current_soc=current_soc,
+                        battery_capacity_kwh=bat_device.battery_capacity_kwh,
+                        battery_charge_speed_kw=bat_device.battery_charge_speed_kw,
+                        min_soc_percent=bat_device.battery_min_soc_percent or 20.0,
+                        max_soc_percent=bat_device.battery_max_soc_percent or 80.0,
+                        device_name=bat_device.name,
+                        predicted_power_usage=predicted_usage,
+                        predicted_solar=predicted_solar,
+                    )
+                    battery_soc_predictions[bat_device.name] = soc_prediction
+                except Exception as e:
+                    logger.warning(f"⚠️ {bat_device.name}: Could not compute SOC prediction: {e}")
+
         # Merge and save updated schedule
         new_schedule = merge_sequential_timeslots([new_schedule])
         schedule_doc['schedule'] = new_schedule
@@ -541,6 +568,19 @@ class HeatpumpOptimizer:
         
         with TinyDB('db.json') as db:
             db.upsert(schedule_doc, Query().id == "schedule")
+
+        # Save battery SOC predictions alongside usage/solar predictions
+        if battery_soc_predictions:
+            with TinyDB('db.json') as db:
+                existing = db.get(Query().id == 'predictions') or {}
+                existing.update({
+                    'id': 'predictions',
+                    'battery_soc': battery_soc_predictions,
+                    'updated_at': datetime.now().isoformat()
+                })
+                db.upsert(existing, Query().id == 'predictions')
+            total_points = sum(len(v) for v in battery_soc_predictions.values())
+            logger.info(f"🔋 Saved battery SOC predictions for {len(battery_soc_predictions)} device(s) ({total_points} data points)")
         
         logger.info(f"✅ Battery limits recalculated ({len(new_schedule)} entries)")
         await self.scheduler_instance.schedule_actions()
