@@ -232,7 +232,7 @@ class PriceHistoryManager:
         # Convert to DataFrame
         df = pd.DataFrame(records)
         df = df[['date', 'hour', 'timestamp', 'price']].copy()
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
         df = df.sort_values('timestamp').reset_index(drop=True)
         
         logger.info(f"✅ Retrieved {len(df)} hourly price records from database")
