@@ -120,13 +120,24 @@ def predict_battery_soc(
         elif slot_idx in discharge_slots or slot_idx in deep_discharge_slots:
             gross_usage = usage_by_slot.get(slot_idx, 0.0)
             solar_offset = solar_by_slot.get(slot_idx, 0.0)
-            net_usage = max(0.0, gross_usage - solar_offset)
             if slot_idx in deep_discharge_slots:
-                # Deep discharge can draw at full speed (down to min_soc)
-                net_usage = max(net_usage, charge_energy_per_slot)
-            available = battery_capacity_kwh * (soc - min_soc_percent) / 100
-            discharge_energy = min(net_usage, max(0.0, available))
-            soc -= (discharge_energy / battery_capacity_kwh) * 100
+                # Deep discharge ignores excess solar and draws at full speed (down to min_soc)
+                net_usage = max(gross_usage - solar_offset, charge_energy_per_slot)
+                available = battery_capacity_kwh * (soc - min_soc_percent) / 100
+                discharge_energy = min(net_usage, max(0.0, available))
+                soc -= (discharge_energy / battery_capacity_kwh) * 100
+            else:
+                net_energy = gross_usage - solar_offset
+                if net_energy < 0:
+                    # Excess solar charges the battery even during a discharge slot
+                    excess_solar = -net_energy
+                    headroom = battery_capacity_kwh * (max_soc_percent - soc) / 100
+                    charge_energy = min(excess_solar, max(0.0, headroom), charge_energy_per_slot)
+                    soc += (charge_energy / battery_capacity_kwh) * 100
+                else:
+                    available = battery_capacity_kwh * (soc - min_soc_percent) / 100
+                    discharge_energy = min(net_energy, max(0.0, available))
+                    soc -= (discharge_energy / battery_capacity_kwh) * 100
 
         # Keep SOC within valid bounds
         soc = max(min_soc_percent, min(max_soc_percent, soc))
