@@ -79,11 +79,6 @@ class Device(BaseModel):
     discharge_stop: Optional[ActionSet] = None
     solar_only_start: Optional[ActionSet] = None
     solar_only_stop: Optional[ActionSet] = None
-    # Deep discharge actions - activated on the highest-priced discharge slots (only used when type='battery')
-    deep_discharge_enabled: bool = Field(default=True, description="Enable deep discharge mode for top-priced discharge slots")
-    deep_discharge_top_percent: float = Field(default=10.0, description="Percentage of highest-priced discharge slots to use deep discharge (0-100)")
-    deep_discharge_start: Optional[ActionSet] = None
-    deep_discharge_stop: Optional[ActionSet] = None
     # Battery-specific configuration (only used when type='battery')
     battery_soc_entity: Optional[str] = Field(default=None, description="Home Assistant entity for battery state of charge (%)")
     battery_capacity_kwh: Optional[float] = Field(default=None, description="Battery capacity in kWh")
@@ -234,12 +229,12 @@ def load_default_config() -> DevicesConfig:
                 EntityAction(service="select/select_option", entity_id="select.deye_prog6_charge", option="No Grid or Gen"),
             ]),
             discharge_start=ActionSet(entity=[
-                EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=25),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=25),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=25),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=25),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=25),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=25),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=10),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=10),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=10),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=10),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=10),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=10),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog1_charge", option="No Grid or Gen"),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog2_charge", option="No Grid or Gen"),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog3_charge", option="No Grid or Gen"),
@@ -270,30 +265,6 @@ def load_default_config() -> DevicesConfig:
                 EntityAction(service="select/select_option", entity_id="select.deye_prog6_charge", option="No Grid or Gen"),
             ]),
             solar_only_stop=ActionSet(entity=[
-                EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=50),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=50),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=50),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=50),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=50),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=50),
-            ]),
-            deep_discharge_enabled=True,
-            deep_discharge_top_percent=10.0,
-            deep_discharge_start=ActionSet(entity=[
-                EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=10),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=10),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=10),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=10),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=10),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=10),
-                EntityAction(service="select/select_option", entity_id="select.deye_prog1_charge", option="No Grid or Gen"),
-                EntityAction(service="select/select_option", entity_id="select.deye_prog2_charge", option="No Grid or Gen"),
-                EntityAction(service="select/select_option", entity_id="select.deye_prog3_charge", option="No Grid or Gen"),
-                EntityAction(service="select/select_option", entity_id="select.deye_prog4_charge", option="No Grid or Gen"),
-                EntityAction(service="select/select_option", entity_id="select.deye_prog5_charge", option="No Grid or Gen"),
-                EntityAction(service="select/select_option", entity_id="select.deye_prog6_charge", option="No Grid or Gen"),
-            ]),
-            deep_discharge_stop=ActionSet(entity=[
                 EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=50),
                 EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=50),
                 EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=50),

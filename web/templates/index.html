@@ -328,6 +328,98 @@
                 });
         }
 
+        let predictionChartInstance = null;
+
+        function updatePredictionChart() {
+            fetch('api/predictions')
+                .then(response => response.json())
+                .then(data => {
+                    const container = document.getElementById('predictionChart');
+                    const usageData = (data.usage || []).map(r => [new Date(r.timestamp).getTime(), r.predicted_kwh]);
+                    const solarData = (data.solar || []).map(r => [new Date(r.timestamp).getTime(), r.predicted_kwh]);
+
+                    if (usageData.length === 0 && solarData.length === 0) {
+                        container.innerHTML = '<div class="no-limits">No prediction data available yet</div>';
+                        if (predictionChartInstance) {
+                            predictionChartInstance.destroy();
+                            predictionChartInstance = null;
+                        }
+                        return;
+                    }
+
+                    // Compute and display totals
+                    const totalUsage = usageData.reduce((s, p) => s + (p[1] || 0), 0);
+                    const totalSolar = solarData.reduce((s, p) => s + (p[1] || 0), 0);
+                    const totalsEl = document.getElementById('predictionTotals');
+                    totalsEl.innerHTML = (usageData.length > 0 ? `<span>🔌 Total predicted usage: <strong>${totalUsage.toFixed(1)} kWh</strong></span>` : '') +
+                                         (solarData.length > 0 ? `<span>☀️ Total predicted solar: <strong>${totalSolar.toFixed(1)} kWh</strong></span>` : '');
+
+                    const seriesData = [
+                            { name: 'Predicted Usage (kWh)', data: usageData },
+                            { name: 'Predicted Solar (kWh)', data: solarData }
+                        ];
+
+                    const options = {
+                        chart: {
+                            type: 'line',
+                            height: 350,
+                            toolbar: { show: false },
+                            animations: { enabled: false }
+                        },
+                        series: seriesData,
+                        xaxis: {
+                            type: 'datetime',
+                            labels: { datetimeUTC: false }
+                        },
+                        yaxis: {
+                            title: { text: 'kWh' },
+                            min: 0,
+                            labels: { formatter: val => val.toFixed(1) }
+                        },
+                        stroke: { curve: 'smooth', width: 2 },
+                        colors: ['#FF6B6B', '#FFA726'],
+                        legend: { position: 'top' },
+                        tooltip: {
+                            x: { format: 'dd MMM HH:mm' },
+                            y: { formatter: val => val !== null ? val.toFixed(3) + ' kWh' : 'N/A' }
+                        },
+                        annotations: {
+                            xaxis: [{
+                                x: new Date().getTime(),
+                                borderColor: '#999',
+                                strokeDashArray: 4,
+                                label: { text: 'Now', style: { color: '#fff', background: '#999' } }
+                            }]
+                        }
+                    };
+
+                    if (predictionChartInstance) {
+                        predictionChartInstance.updateSeries(seriesData);
+                    } else {
+                        container.innerHTML = '';
+                        predictionChartInstance = new ApexCharts(container, options);
+                        predictionChartInstance.render();
+                    }
+
+                    if (data.updated_at) {
+                        const ts = new Date(data.updated_at).toLocaleString();
+                        let tsEl = document.getElementById('predictionChartTimestamp');
+                        if (!tsEl) {
+                            tsEl = document.createElement('div');
+                            tsEl.id = 'predictionChartTimestamp';
+                            tsEl.style.cssText = 'text-align:center;font-size:12px;color:#999;margin-top:8px;';
+                            container.parentNode.appendChild(tsEl);
+                        }
+                        tsEl.textContent = 'Last updated: ' + ts;
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching predictions:', error);
+                    document.getElementById('predictionChart').innerHTML =
+                        '<div class="no-limits">Error loading prediction data</div>';
+                });
+        }
+
         // Update on load
         updatePeak();
         updateDeviceLimits();

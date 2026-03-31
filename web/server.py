@@ -163,7 +163,6 @@ def get_gantt():
         'hw': 'HW',  # Shortened for mobile
         'battery_charge': 'Bat+',
         'battery_discharge': 'Bat-',
-        'battery_deep_discharge': 'Bat--',
         'battery': 'Bat',
         'ev': 'EV',
         # Original planned battery times (for display only)
@@ -176,7 +175,6 @@ def get_gantt():
         'HW': '#4ECDC4',
         'Bat+': '#45B7D1',
         'Bat-': '#FFA07A',
-        'Bat--': '#C0392B',
         'Bat': '#95E1D3',
         'EV': '#9B59B6',
         # Lighter/dashed colors for planned (original) battery times

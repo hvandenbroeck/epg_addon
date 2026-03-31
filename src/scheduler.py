@@ -64,21 +64,15 @@ class Scheduler:
                 logger.error(f"❌ Invalid datetime in schedule: {e}")
                 continue
 
-            # Handle battery charge/discharge/deep_discharge/solar_only entries
-            # e.g., "battery_charge", "battery_discharge", "battery_deep_discharge", "battery_solar_only"
+            # Handle battery charge/discharge/solar_only entries
+            # e.g., "battery_charge", "battery_discharge", "battery_solar_only"
             is_battery_charge = device.endswith('_charge')
-            # Check _deep_discharge before _discharge to avoid _deep_discharge matching _discharge
-            is_battery_deep_discharge = device.endswith('_deep_discharge')
-            is_battery_discharge = device.endswith('_discharge') and not is_battery_deep_discharge
+            is_battery_discharge = device.endswith('_discharge')
             is_battery_solar_only = device.endswith('_solar_only')
             
-            if is_battery_charge or is_battery_discharge or is_battery_deep_discharge or is_battery_solar_only:
+            if is_battery_charge or is_battery_discharge or is_battery_solar_only:
                 # Extract the actual device name (e.g., "battery" from "battery_charge")
-                # _deep_discharge needs special handling since rsplit('_', 1) would give "battery_deep"
-                if is_battery_deep_discharge:
-                    base_device_name = device[:-len('_deep_discharge')]
-                else:
-                    base_device_name = device.rsplit('_', 1)[0]
+                base_device_name = device.rsplit('_', 1)[0]
                 cfg = self.devices.get_device_config(base_device_name)
                 if not cfg:
                     logger.warning(f"⚠️ No config for battery device '{base_device_name}'")
@@ -93,15 +87,6 @@ class Scheduler:
                     start_actions = cfg.solar_only_start.model_dump(exclude_none=True) if cfg.solar_only_start else {}
                     stop_actions = cfg.solar_only_stop.model_dump(exclude_none=True) if cfg.solar_only_stop else {}
                     action_type = "solar_only"
-                elif is_battery_deep_discharge:
-                    if cfg.deep_discharge_start:
-                        start_actions = cfg.deep_discharge_start.model_dump(exclude_none=True)
-                        stop_actions = cfg.deep_discharge_stop.model_dump(exclude_none=True) if cfg.deep_discharge_stop else {}
-                    else:
-                        logger.warning(f"⚠️ {base_device_name}: deep_discharge_start not configured, falling back to discharge actions")
-                        start_actions = cfg.discharge_start.model_dump(exclude_none=True) if cfg.discharge_start else {}
-                        stop_actions = cfg.discharge_stop.model_dump(exclude_none=True) if cfg.discharge_stop else {}
-                    action_type = "deep_discharge"
                 else:
                     start_actions = cfg.discharge_start.model_dump(exclude_none=True) if cfg.discharge_start else {}
                     stop_actions = cfg.discharge_stop.model_dump(exclude_none=True) if cfg.discharge_stop else {}
