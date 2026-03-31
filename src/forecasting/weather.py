@@ -65,7 +65,7 @@ class Weather:
         openmeteo_url = (
             f"https://api.open-meteo.com/v1/forecast?"
             f"latitude={self.lat}&longitude={self.lon}"
-            f"&hourly=temperature_2m,cloud_cover,shortwave_radiation"
+            f"&hourly=temperature_2m,shortwave_radiation"
             f"&start_date={start_date}&end_date={end_date}"
             f"&timezone=auto"
         )
@@ -80,13 +80,11 @@ class Weather:
         # Extract hourly data
         times = forecast["hourly"]["time"]
         temperatures = forecast["hourly"]["temperature_2m"]
-        cloud_cover = forecast["hourly"]["cloud_cover"]
         shortwave_radiation = forecast["hourly"]["shortwave_radiation"]
         
         df = pd.DataFrame({
             'timestamp': pd.to_datetime(times),
             'temperature': temperatures,
-            'cloud_cover': cloud_cover,
             'shortwave_radiation': shortwave_radiation
         })
         df['hour'] = df['timestamp'].dt.hour
@@ -104,7 +102,7 @@ class Weather:
     async def getHistoricalHourlyWeather(self, days_back=365):
         """
         Returns a DataFrame with historical hourly weather data.
-        Columns: 'timestamp', 'hour', 'date', 'temperature' (Celsius), 'cloud_cover' (%)
+        Columns: 'timestamp', 'hour', 'date', 'temperature' (Celsius), 'shortwave_radiation' (W/m²)
         
         Args:
             days_back: Number of days of historical data to retrieve
@@ -123,7 +121,7 @@ class Weather:
             f"https://archive-api.open-meteo.com/v1/archive?"
             f"latitude={self.lat}&longitude={self.lon}"
             f"&start_date={start_date.isoformat()}&end_date={end_date.isoformat()}"
-            f"&hourly=temperature_2m,cloud_cover,shortwave_radiation"
+            f"&hourly=temperature_2m,shortwave_radiation"
             f"&timezone=auto"
         )
 
@@ -139,7 +137,6 @@ class Weather:
         # Extract hourly data and create DataFrame
         times = data["hourly"]["time"]
         temperatures = data["hourly"]["temperature_2m"]
-        cloud_cover = data["hourly"]["cloud_cover"]
         
         logger.debug(f"Received {len(times)} hourly historical data points")
         
@@ -147,7 +144,6 @@ class Weather:
         df = pd.DataFrame({
             'timestamp': pd.to_datetime(times),
             'temperature': temperatures,
-            'cloud_cover': cloud_cover,
             'shortwave_radiation': data["hourly"]["shortwave_radiation"]
         })
         df['hour'] = df['timestamp'].dt.hour
