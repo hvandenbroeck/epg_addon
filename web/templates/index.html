@@ -3,7 +3,7 @@
 <head>
     <title>Energy Optimizer</title>
     <link rel="stylesheet" href="static/style.css">
-    <script src="https://cdn.jsdelivr.net/npm/apexcharts@3"></script>
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
 <body>
     <!-- Tab Navigation -->
@@ -48,13 +48,6 @@
     </div>
     <div id="timeline">
         <div class="loading">Loading schedule...</div>
-    </div>
-    <div class="prediction-chart-section">
-        <h2>Power Predictions</h2>
-        <div id="predictionTotals" style="display:flex;gap:24px;margin-bottom:8px;font-size:14px;color:#555;"></div>
-        <div id="predictionChart">
-            <div class="loading">Loading predictions...</div>
-        </div>
     </div>
     <div class="links">
         <a href="download/tomorrow_features.csv" download>Download tomorrow_features.csv</a>
@@ -432,14 +425,12 @@
         updateDeviceLimits();
         updateBatteryThresholds();
         updateChart();
-        updatePredictionChart();
         
         // Update peak and device limits every 30 seconds, chart every minute
         setInterval(updatePeak, 30000);
         setInterval(updateDeviceLimits, 30000);
         setInterval(updateBatteryThresholds, 60000);
         setInterval(updateChart, 60000);
-        setInterval(updatePredictionChart, 300000);
     </script>
 </body>
 </html>

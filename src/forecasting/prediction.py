@@ -85,7 +85,7 @@ class Prediction:
         
         # Merge usage and weather
         merged_df = usage_df.merge(
-            weather_df[['timestamp_aligned', 'temperature', 'cloud_cover']], 
+            weather_df[['timestamp_aligned', 'temperature', 'shortwave_radiation']], 
             on='timestamp_aligned', 
             how='left'
         )
@@ -104,7 +104,7 @@ class Prediction:
         
         # Fill missing weather data
         merged_df['temperature'] = merged_df['temperature'].ffill().bfill()
-        merged_df['cloud_cover'] = merged_df['cloud_cover'].ffill().bfill()
+        merged_df['shortwave_radiation'] = merged_df['shortwave_radiation'].ffill().bfill()
         
         # Drop rows with missing target variable
         merged_df = merged_df.dropna(subset=['energy_used_per_hour'])
@@ -112,7 +112,7 @@ class Prediction:
         logger.info(f"✅ Merged dataset has {len(merged_df)} hourly records")
         
         # 5. Prepare features and target
-        feature_cols = ['hour', 'dayofweek', 'temperature', 'cloud_cover']
+        feature_cols = ['hour', 'dayofweek', 'temperature', 'shortwave_radiation']
         if has_price_data:
             feature_cols.append('price')
         
@@ -169,7 +169,7 @@ class Prediction:
         logger.info(f"✅ Retrieved {len(combined_weather_df)} hours of forecast")
         
         # 10. Prepare features for all forecast hours
-        future_df = combined_weather_df[['hour', 'temperature', 'cloud_cover', 'date']].copy()
+        future_df = combined_weather_df[['hour', 'temperature', 'shortwave_radiation', 'date']].copy()
         future_df['dayofweek'] = future_df['date'].apply(lambda d: pd.Timestamp(d).dayofweek)
         
         # Add price data if available (use similar day prices as proxy)
@@ -200,7 +200,7 @@ class Prediction:
         predictions = lgb_reg.predict(future_features)
         
         # 12. Create results DataFrame
-        results_df = combined_weather_df[['hour', 'timestamp', 'temperature', 'cloud_cover', 'date']].copy()
+        results_df = combined_weather_df[['hour', 'timestamp', 'temperature', 'shortwave_radiation', 'date']].copy()
         results_df['predicted_kwh'] = predictions
         
         if has_price_data:
@@ -226,23 +226,23 @@ class Prediction:
             logger.info("-" * 80)
             
             if has_price_data:
-                logger.info(f"{'Hour':<6} {'Time':<8} {'Temp':<8} {'Cloud':<8} {'Predicted':<12} {'Price (€/kWh)':<15}")
+                logger.info(f"{'Hour':<6} {'Time':<8} {'Temp':<8} {'Solar':<10} {'Predicted':<12} {'Price (€/kWh)':<15}")
             else:
-                logger.info(f"{'Hour':<6} {'Time':<8} {'Temp':<8} {'Cloud':<8} {'Predicted':<12}")
+                logger.info(f"{'Hour':<6} {'Time':<8} {'Temp':<8} {'Solar':<10} {'Predicted':<12}")
             logger.info("-" * 80)
             
             for _, row in results_df[results_df['date'] == today].iterrows():
                 hour_str = f"{int(row['hour']):02d}:00"
                 time_str = row['timestamp'].strftime('%H:%M')
                 temp_str = f"{row['temperature']:.1f}°C"
-                cloud_str = f"{row['cloud_cover']:.0f}%"
+                solar_str = f"{row['shortwave_radiation']:.0f}W/m²"
                 pred_str = f"{row['predicted_kwh']:.3f} kWh"
                 
                 if has_price_data:
                     price_str = f"€{row['price']:.4f}"
-                    logger.info(f"{hour_str:<6} {time_str:<8} {temp_str:<8} {cloud_str:<8} {pred_str:<12} {price_str:<15}")
+                    logger.info(f"{hour_str:<6} {time_str:<8} {temp_str:<8} {solar_str:<10} {pred_str:<12} {price_str:<15}")
                 else:
-                    logger.info(f"{hour_str:<6} {time_str:<8} {temp_str:<8} {cloud_str:<8} {pred_str:<12}")
+                    logger.info(f"{hour_str:<6} {time_str:<8} {temp_str:<8} {solar_str:<10} {pred_str:<12}")
         
         # Log tomorrow's hours
         logger.info(f"\n📌 TOMORROW ({tomorrow.strftime('%A, %B %d, %Y')})")
@@ -250,23 +250,23 @@ class Prediction:
         logger.info("-" * 80)
         
         if has_price_data:
-            logger.info(f"{'Hour':<6} {'Time':<8} {'Temp':<8} {'Cloud':<8} {'Predicted':<12} {'Price (€/kWh)':<15}")
+            logger.info(f"{'Hour':<6} {'Time':<8} {'Temp':<8} {'Solar':<10} {'Predicted':<12} {'Price (€/kWh)':<15}")
         else:
-            logger.info(f"{'Hour':<6} {'Time':<8} {'Temp':<8} {'Cloud':<8} {'Predicted':<12}")
+            logger.info(f"{'Hour':<6} {'Time':<8} {'Temp':<8} {'Solar':<10} {'Predicted':<12}")
         logger.info("-" * 80)
         
         for _, row in results_df[results_df['date'] == tomorrow].iterrows():
             hour_str = f"{int(row['hour']):02d}:00"
             time_str = row['timestamp'].strftime('%H:%M')
             temp_str = f"{row['temperature']:.1f}°C"
-            cloud_str = f"{row['cloud_cover']:.0f}%"
+            solar_str = f"{row['shortwave_radiation']:.0f}W/m²"
             pred_str = f"{row['predicted_kwh']:.3f} kWh"
             
             if has_price_data:
                 price_str = f"€{row['price']:.4f}"
-                logger.info(f"{hour_str:<6} {time_str:<8} {temp_str:<8} {cloud_str:<8} {pred_str:<12} {price_str:<15}")
+                logger.info(f"{hour_str:<6} {time_str:<8} {temp_str:<8} {solar_str:<10} {pred_str:<12} {price_str:<15}")
             else:
-                logger.info(f"{hour_str:<6} {time_str:<8} {temp_str:<8} {cloud_str:<8} {pred_str:<12}")
+                logger.info(f"{hour_str:<6} {time_str:<8} {temp_str:<8} {solar_str:<10} {pred_str:<12}")
         
         # Summary
         logger.info("-" * 80)
