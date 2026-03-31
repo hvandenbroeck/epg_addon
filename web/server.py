@@ -117,31 +117,46 @@ def get_predictions():
         docs = db.search(Query().id == 'predictions')
 
     if docs:
-        return jsonify(docs[0])
+        doc = docs[0]
+        return jsonify({
+            'id': doc.get('id', 'predictions'),
+            'usage': doc.get('usage', []),
+            'solar': doc.get('solar', []),
+            'battery_soc': doc.get('battery_soc', {}),
+            'updated_at': doc.get('updated_at', '')
+        })
     return jsonify({
         'id': 'predictions',
         'usage': [],
         'solar': [],
+        'battery_soc': {},
         'updated_at': ''
     })
 
 @app.route('/api/gantt')
 def get_gantt():
-    """Generate and return Plotly Gantt chart with price histogram as interactive HTML"""
+    """Generate and return Plotly chart: Gantt schedule, price histogram, and power predictions sharing one x-axis"""
     with TinyDB('db.json') as db:
         schedule_docs = db.search(Query().id == 'schedule')
-    
+        prediction_docs = db.search(Query().id == 'predictions')
+
     if not schedule_docs or not schedule_docs[0].get('schedule'):
         fig = go.Figure()
         fig.update_layout(title="No schedule data available")
-        return fig.to_html(include_plotlyjs=True, full_html=False)
-    
+        return fig.to_html(include_plotlyjs=False, full_html=False)
+
     schedule = schedule_docs[0]['schedule']
     original_battery_schedule = schedule_docs[0].get('original_battery_schedule', [])
     prices = schedule_docs[0].get('prices', [])
     horizon_start = schedule_docs[0].get('horizon_start')
     slot_minutes = schedule_docs[0].get('slot_minutes', 15)
-    
+
+    # Load predictions
+    predictions = prediction_docs[0] if prediction_docs else {}
+    usage_data = predictions.get('usage', [])
+    solar_data = predictions.get('solar', [])
+    battery_soc = predictions.get('battery_soc', {})
+
     # Device labels and colors
     device_labels = {
         'wp': 'HP',  # Shortened for mobile
@@ -155,7 +170,7 @@ def get_gantt():
         'battery_charge_planned': 'Bat+ Plan',
         'battery_discharge_planned': 'Bat- Plan'
     }
-    
+
     device_colors = {
         'HP': '#FF6B6B',
         'HW': '#4ECDC4',
@@ -168,16 +183,16 @@ def get_gantt():
         'Bat+ Plan': '#A8D8E6',  # Lighter blue
         'Bat- Plan': '#FFD4B8'   # Lighter orange
     }
-    
+
     # Prepare data for timeline
     df_list = []
-    
+
     # First add original battery schedule (planned times) - these appear first/on top
     for entry in original_battery_schedule:
         device = entry.get('device')
         start = entry.get('start')
         stop = entry.get('stop')
-        
+
         if device and start and stop:
             task_name = device_labels.get(device, device)
             df_list.append({
@@ -186,13 +201,13 @@ def get_gantt():
                 'Finish': pd.to_datetime(stop),
                 'Type': 'Planned'
             })
-    
+
     # Then add actual schedule entries
     for entry in schedule:
         device = entry.get('device')
         start = entry.get('start')
         stop = entry.get('stop')
-        
+
         if device and start and stop:
             task_name = device_labels.get(device, device)
             df_list.append({
@@ -201,14 +216,24 @@ def get_gantt():
                 'Finish': pd.to_datetime(stop),
                 'Type': 'Actual'
             })
-    
+
     if not df_list:
         fig = go.Figure()
         fig.update_layout(title="No valid schedule entries")
-        return fig.to_html(include_plotlyjs=True, full_html=False)
-    
+        return fig.to_html(include_plotlyjs=False, full_html=False)
+
     df = pd.DataFrame(df_list)
-    
+
+    # Build prediction subplot title with totals
+    total_usage = sum(r.get('predicted_kwh', 0) for r in usage_data)
+    total_solar = sum(r.get('predicted_kwh', 0) for r in solar_data)
+    parts = []
+    if usage_data:
+        parts.append(f"Usage: {total_usage:.1f} kWh")
+    if solar_data:
+        parts.append(f"Solar: {total_solar:.1f} kWh")
+    pred_title = "Power Predictions" + (f" ({', '.join(parts)})" if parts else "")
+
     # Create the Gantt chart using px.timeline
     fig_gantt = px.timeline(
         df,
@@ -219,7 +244,7 @@ def get_gantt():
         color_discrete_map=device_colors,
         hover_data={'Type': True}
     )
-    
+
     # Set opacity based on Type (Planned vs Actual)
     for trace in fig_gantt.data:
         task_name = trace.name
@@ -227,44 +252,46 @@ def get_gantt():
         task_df = df[df['Task'] == task_name]
         opacities = [0.5 if t == 'Planned' else 0.9 for t in task_df['Type']]
         trace.marker.opacity = opacities
-    
+
     # Update hover template
     fig_gantt.update_traces(
         hovertemplate="<b>%{y}</b><br>Start: %{base|%Y-%m-%d %H:%M}<br>End: %{x|%Y-%m-%d %H:%M}<br>Type: %{customdata[0]}<extra></extra>"
     )
-    
-    # Create subplots: Gantt chart on top, price histogram below
+
+    # Create subplots: Gantt (row 1), Prices (row 2), Predictions (row 3)
     fig = make_subplots(
-        rows=2, cols=1,
-        row_heights=[0.6, 0.4],
+        rows=3, cols=1,
+        row_heights=[0.35, 0.20, 0.45],
         shared_xaxes=True,
-        vertical_spacing=0.08,
-        subplot_titles=("Energy Optimization Schedule", "Electricity Prices (€/kWh)")
+        vertical_spacing=0.06,
+        subplot_titles=("Energy Optimization Schedule", "Electricity Prices (€/kWh)", pred_title),
+        specs=[[{}], [{}], [{'secondary_y': True}]]
     )
-    
-    # Add Gantt traces to subplot 1
+
+    # Add Gantt traces to row 1
     for trace in fig_gantt.data:
         trace.showlegend = False
         trace.width = 0.8  # Make bars thicker (0-1 range, where 1 is full row height)
         fig.add_trace(trace, row=1, col=1)
-    
+
     # Copy y-axis category order from the gantt chart
     fig.update_yaxes(
         categoryorder=fig_gantt.layout.yaxis.categoryorder,
         categoryarray=fig_gantt.layout.yaxis.categoryarray,
         row=1, col=1
     )
-    
+
     # Set x-axis type to date for proper rendering
     fig.update_xaxes(type='date', row=1, col=1)
-    
-    # Add "Now" line to Gantt chart
+
+    # Add "Now" line
     now = datetime.now()
-    fig.add_vline(
-        x=now.timestamp() * 1000,  # Convert to milliseconds
-        line=dict(color="red", width=2, dash="dash"),
-        row=1, col=1
-    )
+    for row in [1, 2, 3]:
+        fig.add_vline(
+            x=now.timestamp() * 1000,
+            line=dict(color="red", width=2, dash="dash"),
+            row=row, col=1
+        )
     fig.add_annotation(
         x=now,
         y=1,
@@ -275,17 +302,16 @@ def get_gantt():
         font=dict(color="red", size=10),
         row=1, col=1
     )
-    
-    # Add price histogram (subplot 2)
+
+    # Add price histogram (row 2)
     if prices and horizon_start:
         # Create time slots for prices
         start_dt = datetime.fromisoformat(horizon_start)
         price_times = [start_dt + timedelta(minutes=slot_minutes * i) for i in range(len(prices))]
-        
+
         # Convert prices from EUR/kWh to EUR cents/kWh for better readability
         prices_cents = [p * 100 for p in prices]
-        
-        # Create bar chart for prices
+
         fig.add_trace(
             go.Bar(
                 x=price_times,
@@ -297,8 +323,8 @@ def get_gantt():
                     showscale=True,
                     colorbar=dict(
                         title="€ct/kWh",
-                        len=0.3,
-                        y=0.15,
+                        len=0.18,
+                        y=0.54,
                         yanchor='middle'
                     )
                 ),
@@ -307,19 +333,71 @@ def get_gantt():
             ),
             row=2, col=1
         )
-        
-        # Add "Now" line to price chart
-        fig.add_vline(
-            x=now.timestamp() * 1000,
-            line=dict(color="red", width=2, dash="dash"),
-            row=2, col=1
+
+    # Add power prediction traces (row 3)
+    soc_colors = ['#45B7D1', '#2E86AB', '#1B5E7B']
+
+    if usage_data:
+        fig.add_trace(
+            go.Scatter(
+                x=[r['timestamp'] for r in usage_data],
+                y=[r['predicted_kwh'] for r in usage_data],
+                name='Predicted Usage (kWh)',
+                mode='lines',
+                line=dict(color='#FF6B6B', width=2, shape='spline'),
+                hovertemplate='%{y:.3f} kWh<extra>Predicted Usage</extra>',
+                showlegend=True
+            ),
+            row=3, col=1, secondary_y=False
         )
-    
+
+    if solar_data:
+        fig.add_trace(
+            go.Scatter(
+                x=[r['timestamp'] for r in solar_data],
+                y=[r['predicted_kwh'] for r in solar_data],
+                name='Predicted Solar (kWh)',
+                mode='lines',
+                line=dict(color='#FFA726', width=2, shape='spline'),
+                hovertemplate='%{y:.3f} kWh<extra>Predicted Solar</extra>',
+                showlegend=True
+            ),
+            row=3, col=1, secondary_y=False
+        )
+
+    for i, (name, soc_entries) in enumerate(battery_soc.items()):
+        if not soc_entries:
+            continue
+        label = f"Battery SOC{' ' + name if len(battery_soc) > 1 else ''} (%)"
+        fig.add_trace(
+            go.Scatter(
+                x=[r['timestamp'] for r in soc_entries],
+                y=[r['soc_percent'] for r in soc_entries],
+                name=label,
+                mode='lines',
+                line=dict(color=soc_colors[i % len(soc_colors)], width=2, shape='spline'),
+                hovertemplate='%{y:.1f}%<extra>' + label + '</extra>',
+                showlegend=True
+            ),
+            row=3, col=1, secondary_y=True
+        )
+
+    # Configure y-axes for prediction subplot
+    fig.update_yaxes(title_text='kWh', rangemode='tozero', row=3, col=1, secondary_y=False)
+    fig.update_yaxes(title_text='SOC (%)', range=[0, 100], showgrid=False, row=3, col=1, secondary_y=True)
+
     # Update layout
     fig.update_layout(
-        height=700,  # Increased height for two subplots
-        showlegend=False,
-        margin=dict(l=50, r=20, t=60, b=60),
+        height=950,
+        showlegend=True,
+        legend=dict(
+            orientation='h',
+            x=0,
+            y=-0.05,
+            xanchor='left',
+            yanchor='top'
+        ),
+        margin=dict(l=50, r=60, t=60, b=100),
         autosize=True,
         dragmode=False,  # Disable panning
         modebar=dict(
@@ -329,8 +407,8 @@ def get_gantt():
         font=dict(size=10),
         hovermode='closest'  # Use closest for individual tooltips
     )
-    
-    # Update x-axis for both subplots with spike line
+
+    # Update x-axis for all subplots with spike line
     fig.update_xaxes(
         tickformat='%Y-%m-%d %H:%M',
         tickangle=-45,
@@ -341,18 +419,13 @@ def get_gantt():
         spikethickness=1,
         spikedash='dot'
     )
-    
-    # Add title to bottom x-axis
-    fig.update_xaxes(
-        title_text="Time",
-        row=2, col=1
-    )
-    
+
+    # Add title to bottom x-axis (row 3)
+    fig.update_xaxes(title_text="Time", row=3, col=1)
+
     # Update y-axis for price histogram
-    fig.update_yaxes(
-        title_text="€ct/kWh",
-        row=2, col=1
-    )
+    fig.update_yaxes(title_text="€ct/kWh", row=2, col=1)
+
     # Configure for better mobile experience
     config = {
         'responsive': True,
@@ -361,11 +434,11 @@ def get_gantt():
         'scrollZoom': False,  # Disable scroll zoom
         'displaylogo': False
     }
-    
+
     # Generate HTML and add crosshair cursor
-    html_output = fig.to_html(include_plotlyjs=True, full_html=False, config=config)
+    html_output = fig.to_html(include_plotlyjs=False, full_html=False, config=config)
     html_output = html_output.replace('<div', '<div style="cursor: crosshair;"', 1)
-    
+
     return html_output
 
 
