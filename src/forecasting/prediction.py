@@ -352,13 +352,12 @@ class Prediction:
         weather_df['timestamp_aligned'] = weather_df['timestamp'].dt.floor('h').dt.tz_localize(None)
 
         merged_df = usage_df.merge(
-            weather_df[['timestamp_aligned', 'cloud_cover', 'shortwave_radiation']],
+            weather_df[['timestamp_aligned', 'shortwave_radiation']],
             on='timestamp_aligned',
             how='left'
         )
 
         # Fill missing weather values
-        merged_df['cloud_cover'] = merged_df['cloud_cover'].ffill().bfill()
         merged_df['shortwave_radiation'] = merged_df['shortwave_radiation'].ffill().bfill()
 
         # Drop rows where target is missing or negative
@@ -368,7 +367,7 @@ class Prediction:
         logger.info(f"✅ Solar training dataset: {len(merged_df)} hourly records")
 
         # 4. Features and target
-        feature_cols = ['hour', 'dayofyear', 'shortwave_radiation', 'cloud_cover']
+        feature_cols = ['hour', 'dayofyear', 'shortwave_radiation']
         features = merged_df[feature_cols].copy()
         target = merged_df['solar_production_per_hour'].copy()
 
@@ -426,7 +425,7 @@ class Prediction:
         today = datetime.now().date()
         tomorrow = today + timedelta(days=1)
 
-        results_df = forecast_df[['hour', 'timestamp', 'cloud_cover', 'shortwave_radiation', 'date']].copy()
+        results_df = forecast_df[['hour', 'timestamp', 'shortwave_radiation', 'date']].copy()
         results_df['predicted_kwh'] = predictions
 
         today_predictions = results_df[results_df['date'] == today]['predicted_kwh']
@@ -444,30 +443,28 @@ class Prediction:
             logger.info(f"\n📌 TODAY ({today.strftime('%A, %B %d, %Y')}) - Remaining {len(today_predictions)} hours")
             logger.info(f"Predicted Production: {today_total:.2f} kWh")
             logger.info("-" * 80)
-            logger.info(f"{'Hour':<6} {'Time':<8} {'Radiation':<12} {'Cloud':<8} {'Predicted':<12}")
+            logger.info(f"{'Hour':<6} {'Time':<8} {'Radiation':<12} {'Predicted':<12}")
             logger.info("-" * 80)
 
             for _, row in results_df[results_df['date'] == today].iterrows():
                 hour_str = f"{int(row['hour']):02d}:00"
                 time_str = row['timestamp'].strftime('%H:%M')
                 rad_str = f"{row['shortwave_radiation']:.0f} W/m²"
-                cloud_str = f"{row['cloud_cover']:.0f}%"
                 pred_str = f"{row['predicted_kwh']:.3f} kWh"
-                logger.info(f"{hour_str:<6} {time_str:<8} {rad_str:<12} {cloud_str:<8} {pred_str:<12}")
+                logger.info(f"{hour_str:<6} {time_str:<8} {rad_str:<12} {pred_str:<12}")
 
         logger.info(f"\n📌 TOMORROW ({tomorrow.strftime('%A, %B %d, %Y')})")
         logger.info(f"Predicted Production: {tomorrow_total:.2f} kWh")
         logger.info("-" * 80)
-        logger.info(f"{'Hour':<6} {'Time':<8} {'Radiation':<12} {'Cloud':<8} {'Predicted':<12}")
+        logger.info(f"{'Hour':<6} {'Time':<8} {'Radiation':<12} {'Predicted':<12}")
         logger.info("-" * 80)
 
         for _, row in results_df[results_df['date'] == tomorrow].iterrows():
             hour_str = f"{int(row['hour']):02d}:00"
             time_str = row['timestamp'].strftime('%H:%M')
             rad_str = f"{row['shortwave_radiation']:.0f} W/m²"
-            cloud_str = f"{row['cloud_cover']:.0f}%"
             pred_str = f"{row['predicted_kwh']:.3f} kWh"
-            logger.info(f"{hour_str:<6} {time_str:<8} {rad_str:<12} {cloud_str:<8} {pred_str:<12}")
+            logger.info(f"{hour_str:<6} {time_str:<8} {rad_str:<12} {pred_str:<12}")
 
         logger.info("-" * 80)
         logger.info(f"Total Predicted Production: {total_predicted:.2f} kWh")

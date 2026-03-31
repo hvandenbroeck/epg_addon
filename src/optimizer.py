@@ -528,15 +528,12 @@ class HeatpumpOptimizer:
             new_schedule.extend(self._times_to_schedule(limited_charge, f"{bat_device.name}_charge", horizon_start, slot_minutes))
             new_schedule.extend(self._times_to_schedule(limited_discharge, f"{bat_device.name}_discharge", horizon_start, slot_minutes))
         
-            new_schedule.extend(self._times_to_schedule(limited_deep_discharge, f"{bat_device.name}_deep_discharge", horizon_start, slot_minutes))
-
             # Compute battery SOC prediction for this device
             if bat_device.battery_capacity_kwh and bat_device.battery_charge_speed_kw:
                 try:
                     soc_prediction = predict_battery_soc(
                         charge_times=limited_charge,
                         discharge_times=limited_discharge,
-                        deep_discharge_times=limited_deep_discharge,
                         slot_minutes=slot_minutes,
                         horizon_start=horizon_start,
                         horizon_end=horizon_end,
