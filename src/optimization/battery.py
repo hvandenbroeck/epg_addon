@@ -94,6 +94,7 @@ def calculate_discharge_min_soc(
     min_soc_low: float,
     min_soc_medium: float,
     min_soc_high: float,
+    horizon_start=None,
 ) -> dict[str, float]:
     """
     Categorize discharge slots by price (low / medium / high) and return the
@@ -105,7 +106,7 @@ def calculate_discharge_min_soc(
 
     The price boundaries are the 33rd and 67th percentiles of the discharge-slot
     prices.  When all discharge prices are identical the slots all fall into the
-    "high" category and ``min_soc_high`` is used throughout.
+    "low" category and ``min_soc_low`` is used throughout.
 
     Args:
         discharge_times: Horizon-relative time strings in HH:MM format.
@@ -114,10 +115,18 @@ def calculate_discharge_min_soc(
         min_soc_low: Min SOC % applied to the cheapest 33 % of discharge slots.
         min_soc_medium: Min SOC % applied to the middle 33 % of discharge slots.
         min_soc_high: Min SOC % applied to the most expensive 33 % of slots.
+        horizon_start: Optional datetime representing the start of the horizon.
+            When provided, the returned dict is keyed by absolute ISO datetime
+            strings (e.g. ``"2024-01-15T08:00:00"``).  When ``None``, keys are
+            the original HH:MM horizon-relative strings.
 
     Returns:
-        Dict mapping each HH:MM time string to its assigned min SOC percentage.
+        Dict mapping each discharge-slot start time to its assigned min SOC
+        percentage.  Keys are ISO datetime strings when ``horizon_start`` is
+        given, otherwise HH:MM strings.
     """
+    from datetime import timedelta
+
     if not discharge_times:
         return {}
 
@@ -139,24 +148,33 @@ def calculate_discharge_min_soc(
     p33 = float(np.percentile(discharge_price_values, 33))
     p67 = float(np.percentile(discharge_price_values, 67))
 
-    result: dict[str, float] = {}
+    hhmm_result: dict[str, float] = {}
     for time_str, price in slot_prices:
         if price <= p33:
-            result[time_str] = min_soc_low      # Low-cost: keep battery in reserve
+            hhmm_result[time_str] = min_soc_low      # Low-cost: keep battery in reserve
         elif price <= p67:
-            result[time_str] = min_soc_medium   # Medium-cost: moderate reserve
+            hhmm_result[time_str] = min_soc_medium   # Medium-cost: moderate reserve
         else:
-            result[time_str] = min_soc_high     # High-cost: allow full discharge
+            hhmm_result[time_str] = min_soc_high     # High-cost: allow full discharge
 
     logger.info(
         f"🔋 Discharge min SOC categories: "
-        f"{sum(1 for v in result.values() if v == min_soc_low)} low, "
-        f"{sum(1 for v in result.values() if v == min_soc_medium)} medium, "
-        f"{sum(1 for v in result.values() if v == min_soc_high)} high "
+        f"{sum(1 for v in hhmm_result.values() if v == min_soc_low)} low, "
+        f"{sum(1 for v in hhmm_result.values() if v == min_soc_medium)} medium, "
+        f"{sum(1 for v in hhmm_result.values() if v == min_soc_high)} high "
         f"(p33={p33:.4f}, p67={p67:.4f} EUR/kWh)"
     )
 
-    return result
+    if horizon_start is None:
+        return hhmm_result
+
+    # Convert HH:MM keys to absolute ISO datetime strings
+    iso_result: dict[str, float] = {}
+    for time_str, soc_val in hhmm_result.items():
+        h, m = map(int, time_str.split(':'))
+        iso_dt = (horizon_start + timedelta(hours=h, minutes=m)).isoformat()
+        iso_result[iso_dt] = soc_val
+    return iso_result
 
 
 def optimize_bat_discharge(

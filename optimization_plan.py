@@ -79,6 +79,9 @@ async def main():
     # Run initial optimization
     await optimizer.run_optimization()
 
+    # Run initial discharge min SOC calculation
+    await optimizer.recalculate_discharge_min_soc()
+
     # Run initial load watcher
     await load_watcher.run()
 
@@ -129,6 +132,27 @@ async def main():
         id='battery_soc_recalc'
     )
     logger.info("Battery SOC recalculation scheduled every 15 minutes (Europe/Brussels)")
+
+    # Schedule discharge min SOC recalculation every 15 minutes (runs 2 minutes after battery recalc)
+    async def scheduled_discharge_min_soc_recalc():
+        logger.info("🔋 Running scheduled discharge min SOC recalculation...")
+        try:
+            await optimizer.recalculate_discharge_min_soc()
+            logger.info("✅ Discharge min SOC recalculation completed successfully")
+        except Exception as e:
+            logger.error(f"❌ Error during discharge min SOC recalculation: {e}", exc_info=True)
+
+    scheduler.add_job(
+        scheduled_discharge_min_soc_recalc,
+        'cron',
+        minute='12,27,42,57',
+        timezone='Europe/Brussels',
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=60,
+        id='discharge_min_soc_recalc'
+    )
+    logger.info("Discharge min SOC recalculation scheduled every 15 minutes (Europe/Brussels)")
 
     # Schedule load watcher to run every N minutes on the N-minute marks
     load_watcher_interval = CONFIG["options"].get("load_watcher_interval_minutes", 5)
