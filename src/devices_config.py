@@ -79,12 +79,18 @@ class Device(BaseModel):
     discharge_stop: Optional[ActionSet] = None
     solar_only_start: Optional[ActionSet] = None
     solar_only_stop: Optional[ActionSet] = None
+    # Dynamic minimum SOC actions: called at discharge start/stop with {min_soc_percent} context
+    set_min_soc_start: Optional[ActionSet] = None
+    set_min_soc_stop: Optional[ActionSet] = None
     # Battery-specific configuration (only used when type='battery')
     battery_soc_entity: Optional[str] = Field(default=None, description="Home Assistant entity for battery state of charge (%)")
     battery_capacity_kwh: Optional[float] = Field(default=None, description="Battery capacity in kWh")
     battery_charge_speed_kw: Optional[float] = Field(default=None, description="Battery charge speed in kW")
     battery_min_soc_percent: Optional[float] = Field(default=20.0, description="Minimum battery SOC in percent")
     battery_max_soc_percent: Optional[float] = Field(default=80.0, description="Maximum battery SOC in percent")
+    # Per-category min SOC for discharge slots (low/medium cost slots keep more battery in reserve)
+    battery_discharge_low_cost_min_soc: Optional[float] = Field(default=40.0, description="Min SOC % for low-cost discharge slots (bottom 33% of discharge prices)")
+    battery_discharge_medium_cost_min_soc: Optional[float] = Field(default=25.0, description="Min SOC % for medium-cost discharge slots (middle 33% of discharge prices)")
     # WP and HW optimization parameters (only used when type='wp' or type='hw')
     block_hours: Optional[float] = Field(default=None, description="Minimum runtime when turned on (hours)")
     min_gap_hours: Optional[float] = Field(default=None, description="Minimum gap between runs (hours)")

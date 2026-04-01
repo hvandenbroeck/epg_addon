@@ -87,6 +87,78 @@ def optimize_battery(
     return [slot_to_time(i, slot_minutes) for i in sorted(selected_slots)]
 
 
+def calculate_discharge_min_soc(
+    discharge_times: list[str],
+    prices: list[float],
+    slot_minutes: int,
+    min_soc_low: float,
+    min_soc_medium: float,
+    min_soc_high: float,
+) -> dict[str, float]:
+    """
+    Categorize discharge slots by price (low / medium / high) and return the
+    minimum SOC that should be maintained during each slot.
+
+    Lower-cost discharge slots get a *higher* min SOC so the battery is
+    preserved for more expensive future discharge periods.  High-cost slots
+    get the lowest min SOC (``min_soc_high``) to allow maximum extraction.
+
+    The price boundaries are the 33rd and 67th percentiles of the discharge-slot
+    prices.  When all discharge prices are identical the slots all fall into the
+    "high" category and ``min_soc_high`` is used throughout.
+
+    Args:
+        discharge_times: Horizon-relative time strings in HH:MM format.
+        prices: Price per slot (indexed by slot number).
+        slot_minutes: Slot duration in minutes.
+        min_soc_low: Min SOC % applied to the cheapest 33 % of discharge slots.
+        min_soc_medium: Min SOC % applied to the middle 33 % of discharge slots.
+        min_soc_high: Min SOC % applied to the most expensive 33 % of slots.
+
+    Returns:
+        Dict mapping each HH:MM time string to its assigned min SOC percentage.
+    """
+    if not discharge_times:
+        return {}
+
+    def time_to_slot_idx(time_str: str) -> int:
+        hour, minute = map(int, time_str.split(':'))
+        return (hour * 60 + minute) // slot_minutes
+
+    # Pair each time string with its price
+    slot_prices: list[tuple[str, float]] = []
+    for t in discharge_times:
+        slot_idx = time_to_slot_idx(t)
+        price = prices[slot_idx] if slot_idx < len(prices) else 0.0
+        slot_prices.append((t, price))
+
+    if not slot_prices:
+        return {}
+
+    discharge_price_values = [p for _, p in slot_prices]
+    p33 = float(np.percentile(discharge_price_values, 33))
+    p67 = float(np.percentile(discharge_price_values, 67))
+
+    result: dict[str, float] = {}
+    for time_str, price in slot_prices:
+        if price <= p33:
+            result[time_str] = min_soc_low      # Low-cost: keep battery in reserve
+        elif price <= p67:
+            result[time_str] = min_soc_medium   # Medium-cost: moderate reserve
+        else:
+            result[time_str] = min_soc_high     # High-cost: allow full discharge
+
+    logger.info(
+        f"🔋 Discharge min SOC categories: "
+        f"{sum(1 for v in result.values() if v == min_soc_low)} low, "
+        f"{sum(1 for v in result.values() if v == min_soc_medium)} medium, "
+        f"{sum(1 for v in result.values() if v == min_soc_high)} high "
+        f"(p33={p33:.4f}, p67={p67:.4f} EUR/kWh)"
+    )
+
+    return result
+
+
 def optimize_bat_discharge(
     prices: list[float], 
     slot_minutes: int, 

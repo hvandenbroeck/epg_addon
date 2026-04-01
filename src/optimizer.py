@@ -20,7 +20,7 @@ from .ha_client import HomeAssistantClient
 from .device_state_manager import DeviceStateManager
 from .devices import Devices
 from .scheduler import Scheduler
-from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, optimize_ev, limit_battery_cycles
+from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, optimize_ev, limit_battery_cycles, calculate_discharge_min_soc
 from .utils import slot_to_time, slots_to_iso_ranges, merge_sequential_timeslots, time_to_slot
 from .config import CONFIG
 from .price_fetcher import EntsoeePriceFetcher
@@ -465,6 +465,8 @@ class HeatpumpOptimizer:
 
         # Accumulate SOC predictions for all battery devices
         battery_soc_predictions: dict[str, list[dict]] = {}
+        # Accumulate per-slot discharge min SOC: device_name -> {ISO_start: min_soc_percent}
+        battery_discharge_min_soc: dict[str, dict[str, float]] = {}
         
         # Process each battery device
         for bat_device in devices_config.get_devices_by_type('battery'):
@@ -527,7 +529,28 @@ class HeatpumpOptimizer:
             # Add limited times to schedule
             new_schedule.extend(self._times_to_schedule(limited_charge, f"{bat_device.name}_charge", horizon_start, slot_minutes))
             new_schedule.extend(self._times_to_schedule(limited_discharge, f"{bat_device.name}_discharge", horizon_start, slot_minutes))
-        
+
+            # Calculate per-slot minimum SOC for discharge slots based on price category
+            if limited_discharge and (bat_device.set_min_soc_start or bat_device.set_min_soc_stop):
+                min_soc_high = bat_device.battery_min_soc_percent or 20.0
+                min_soc_medium = bat_device.battery_discharge_medium_cost_min_soc if bat_device.battery_discharge_medium_cost_min_soc is not None else 25.0
+                min_soc_low = bat_device.battery_discharge_low_cost_min_soc if bat_device.battery_discharge_low_cost_min_soc is not None else 40.0
+                slot_min_soc = calculate_discharge_min_soc(
+                    discharge_times=limited_discharge,
+                    prices=prices,
+                    slot_minutes=slot_minutes,
+                    min_soc_low=min_soc_low,
+                    min_soc_medium=min_soc_medium,
+                    min_soc_high=min_soc_high,
+                )
+                # Convert horizon-relative HH:MM keys to absolute ISO datetime strings
+                iso_min_soc: dict[str, float] = {}
+                for time_str, soc_val in slot_min_soc.items():
+                    h, m = map(int, time_str.split(':'))
+                    iso_dt = (horizon_start + timedelta(hours=h, minutes=m)).isoformat()
+                    iso_min_soc[iso_dt] = soc_val
+                battery_discharge_min_soc[bat_device.name] = iso_min_soc
+
             # Compute battery SOC prediction for this device
             if bat_device.battery_capacity_kwh and bat_device.battery_charge_speed_kw:
                 try:
@@ -555,6 +578,7 @@ class HeatpumpOptimizer:
         schedule_doc['schedule'] = new_schedule
         schedule_doc['last_soc_recalc'] = datetime.now().isoformat()
         schedule_doc['solar_only_mode'] = solar_only_mode
+        schedule_doc['battery_discharge_min_soc'] = battery_discharge_min_soc
         
         with TinyDB('db.json') as db:
             db.upsert(schedule_doc, Query().id == "schedule")

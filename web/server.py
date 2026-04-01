@@ -150,6 +150,7 @@ def get_gantt():
     prices = schedule_docs[0].get('prices', [])
     horizon_start = schedule_docs[0].get('horizon_start')
     slot_minutes = schedule_docs[0].get('slot_minutes', 15)
+    battery_discharge_min_soc = schedule_docs[0].get('battery_discharge_min_soc', {})
 
     # Load predictions
     predictions = prediction_docs[0] if prediction_docs else {}
@@ -379,6 +380,47 @@ def get_gantt():
             ),
             row=3, col=1, secondary_y=True
         )
+
+    # Add a min SOC step-function trace for each battery device that has discharge min SOC data
+    min_soc_colors = ['#E74C3C', '#C0392B', '#922B21']
+    for j, (dev_name, iso_min_soc_map) in enumerate(battery_discharge_min_soc.items()):
+        if not iso_min_soc_map:
+            continue
+        # Build step function: for each discharge schedule entry belonging to this device,
+        # emit a horizontal segment at the min_soc_percent for its duration.
+        discharge_entries = [
+            e for e in schedule
+            if e.get('device') == f"{dev_name}_discharge"
+        ]
+        step_x = []
+        step_y = []
+        for entry in sorted(discharge_entries, key=lambda e: e['start']):
+            entry_start = entry['start']
+            entry_stop = entry['stop']
+            soc_val = iso_min_soc_map.get(entry_start)
+            if soc_val is None:
+                continue
+            step_x.extend([pd.to_datetime(entry_start), pd.to_datetime(entry_stop)])
+            step_y.extend([soc_val, soc_val])
+        if step_x:
+            min_soc_label = f"Min SOC {dev_name} (%)" if len(battery_discharge_min_soc) > 1 else "Min SOC (%)"
+            fig.add_trace(
+                go.Scatter(
+                    x=step_x,
+                    y=step_y,
+                    name=min_soc_label,
+                    mode='lines',
+                    line=dict(
+                        color=min_soc_colors[j % len(min_soc_colors)],
+                        width=2,
+                        dash='dot',
+                        shape='hv',
+                    ),
+                    hovertemplate='%{y:.1f}%<extra>' + min_soc_label + '</extra>',
+                    showlegend=True,
+                ),
+                row=3, col=1, secondary_y=True
+            )
 
     # Configure y-axes for prediction subplot
     fig.update_yaxes(title_text='kWh', rangemode='tozero', row=3, col=1, secondary_y=False)
