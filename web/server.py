@@ -390,7 +390,6 @@ def get_gantt():
 
     # Add min SOC step lines (one per battery device)
     min_soc_colors = ['#E91E63', '#9C27B0', '#FF5722']
-    category_symbols = {'low': '▼', 'medium': '●', 'high': '▲'}
     for i, (dev_name, slot_list) in enumerate(battery_min_soc.items()):
         if not slot_list:
             continue
