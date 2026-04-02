@@ -20,7 +20,7 @@ from .ha_client import HomeAssistantClient
 from .device_state_manager import DeviceStateManager
 from .devices import Devices
 from .scheduler import Scheduler
-from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, optimize_ev, limit_battery_cycles
+from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, optimize_ev, limit_battery_cycles, calculate_discharge_min_soc
 from .utils import slot_to_time, slots_to_iso_ranges, merge_sequential_timeslots, time_to_slot
 from .config import CONFIG
 from .price_fetcher import EntsoeePriceFetcher
@@ -527,7 +527,7 @@ class HeatpumpOptimizer:
             # Add limited times to schedule
             new_schedule.extend(self._times_to_schedule(limited_charge, f"{bat_device.name}_charge", horizon_start, slot_minutes))
             new_schedule.extend(self._times_to_schedule(limited_discharge, f"{bat_device.name}_discharge", horizon_start, slot_minutes))
-        
+
             # Compute battery SOC prediction for this device
             if bat_device.battery_capacity_kwh and bat_device.battery_charge_speed_kw:
                 try:
@@ -573,6 +573,90 @@ class HeatpumpOptimizer:
             logger.info(f"🔋 Saved battery SOC predictions for {len(battery_soc_predictions)} device(s) ({total_points} data points)")
         
         logger.info(f"✅ Battery limits recalculated ({len(new_schedule)} entries)")
+        await self.scheduler_instance.schedule_actions()
+
+    async def recalculate_discharge_min_soc(self):
+        """Recalculate the minimum SOC for each scheduled discharge slot.
+
+        Reads the current schedule from TinyDB, categorises discharge slots into
+        low/medium/high price groups using historical percentiles, and persists the
+        resulting per-slot min-SOC mapping back to the schedule document so that the
+        scheduler can pass the correct ``min_soc_percent`` context to
+        ``set_min_soc_start`` device actions.
+
+        This method is intended to be called:
+        - After ``recalculate_battery_limits()`` so the discharge slots are up-to-date
+        - As an explicit scheduled job in ``optimization_plan.py``
+        """
+        logger.info("🔋 Recalculating discharge min SOC per slot...")
+
+        with TinyDB('db.json') as db:
+            schedule_doc = db.get(Query().id == "schedule")
+
+        if not schedule_doc or not schedule_doc.get('horizon_start') or not schedule_doc.get('prices'):
+            logger.warning("⚠️ No valid schedule found, skipping discharge min SOC recalculation")
+            return
+
+        horizon_start = datetime.fromisoformat(schedule_doc['horizon_start'])
+        horizon_end = datetime.fromisoformat(schedule_doc['horizon_end'])
+
+        if datetime.now() >= horizon_end:
+            logger.info("📅 Horizon expired, skipping discharge min SOC recalculation")
+            return
+
+        prices = schedule_doc['prices']
+        slot_minutes = schedule_doc.get('slot_minutes', 15)
+        current_schedule = schedule_doc.get('schedule', [])
+
+        # Build per-slot min SOC mapping for each battery device
+        battery_discharge_min_soc: dict[str, dict[str, float]] = {}
+
+        for bat_device in devices_config.get_devices_by_type('battery'):
+            if not (bat_device.set_min_soc_start or bat_device.set_min_soc_stop):
+                continue
+
+            # Extract limited discharge times for this device from the current schedule
+            limited_discharge = self._extract_times(
+                current_schedule, f"{bat_device.name}_discharge", horizon_start, slot_minutes
+            )
+            if not limited_discharge:
+                continue
+
+            min_soc_high = bat_device.battery_min_soc_percent or 20.0
+            min_soc_medium = (
+                bat_device.battery_discharge_medium_cost_min_soc
+                if bat_device.battery_discharge_medium_cost_min_soc is not None
+                else 25.0
+            )
+            min_soc_low = (
+                bat_device.battery_discharge_low_cost_min_soc
+                if bat_device.battery_discharge_low_cost_min_soc is not None
+                else 40.0
+            )
+
+            # calculate_discharge_min_soc returns {ISO_start: min_soc_percent}
+            # when horizon_start is provided (conversion done inside battery.py)
+            iso_min_soc = calculate_discharge_min_soc(
+                discharge_times=limited_discharge,
+                prices=prices,
+                slot_minutes=slot_minutes,
+                min_soc_low=min_soc_low,
+                min_soc_medium=min_soc_medium,
+                min_soc_high=min_soc_high,
+                horizon_start=horizon_start,
+            )
+            battery_discharge_min_soc[bat_device.name] = iso_min_soc
+
+        # Persist the updated mapping to the schedule document
+        schedule_doc['battery_discharge_min_soc'] = battery_discharge_min_soc
+        with TinyDB('db.json') as db:
+            db.upsert(schedule_doc, Query().id == "schedule")
+
+        total_slots = sum(len(v) for v in battery_discharge_min_soc.values())
+        logger.info(
+            f"✅ Discharge min SOC recalculated for {len(battery_discharge_min_soc)} device(s) "
+            f"({total_slots} slots)"
+        )
         await self.scheduler_instance.schedule_actions()
 
     async def _get_battery_soc(self, bat_device):

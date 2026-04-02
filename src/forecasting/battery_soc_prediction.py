@@ -98,6 +98,14 @@ def predict_battery_soc(
     current_slot_idx = max(0, int((now - horizon_start_naive).total_seconds() / 60 / slot_minutes))
     total_slots = int((horizon_end_naive - horizon_start_naive).total_seconds() / 60 / slot_minutes)
 
+    logger.debug(
+        f"🔋 {device_name}: starting SOC simulation — "
+        f"current_soc={current_soc:.1f}%, capacity={battery_capacity_kwh} kWh, "
+        f"charge_speed={battery_charge_speed_kw} kW, slot={slot_minutes} min, "
+        f"slots={current_slot_idx}–{total_slots - 1}, "
+        f"charge_slots={sorted(charge_slots)}, discharge_slots={sorted(discharge_slots)}"
+    )
+
     # Walk forward slot-by-slot, updating the SOC
     soc = current_soc
     results: list[dict] = []
@@ -113,6 +121,10 @@ def predict_battery_soc(
             headroom = battery_capacity_kwh * (max_soc_percent - soc) / 100
             energy = min(charge_energy_per_slot, max(0.0, headroom))
             soc += (energy / battery_capacity_kwh) * 100
+            logger.debug(
+                f"🔋 {device_name}: slot {slot_idx} ({slot_time.strftime('%H:%M')}) "
+                f"CHARGE +{energy:.3f} kWh → SOC {soc:.1f}%"
+            )
         elif slot_idx in discharge_slots:
             gross_usage = usage_by_slot.get(slot_idx, 0.0)
             solar_offset = solar_by_slot.get(slot_idx, 0.0)
@@ -123,13 +135,27 @@ def predict_battery_soc(
                 headroom = battery_capacity_kwh * (max_soc_percent - soc) / 100
                 charge_energy = min(excess_solar, max(0.0, headroom), charge_energy_per_slot)
                 soc += (charge_energy / battery_capacity_kwh) * 100
+                logger.debug(
+                    f"🔋 {device_name}: slot {slot_idx} ({slot_time.strftime('%H:%M')}) "
+                    f"DISCHARGE (excess solar +{charge_energy:.3f} kWh) → SOC {soc:.1f}%"
+                )
             else:
                 available = battery_capacity_kwh * (soc - min_soc_percent) / 100
                 discharge_energy = min(net_energy, max(0.0, available))
                 soc -= (discharge_energy / battery_capacity_kwh) * 100
+                logger.debug(
+                    f"🔋 {device_name}: slot {slot_idx} ({slot_time.strftime('%H:%M')}) "
+                    f"DISCHARGE -{discharge_energy:.3f} kWh "
+                    f"(usage={gross_usage:.3f}, solar={solar_offset:.3f}) → SOC {soc:.1f}%"
+                )
 
         # Keep SOC within valid bounds
-        soc = max(min_soc_percent, min(max_soc_percent, soc))
+        clamped_soc = max(min_soc_percent, min(max_soc_percent, soc))
+        if clamped_soc != soc:
+            logger.debug(
+                f"🔋 {device_name}: slot {slot_idx} SOC clamped {soc:.1f}% → {clamped_soc:.1f}%"
+            )
+        soc = clamped_soc
 
     if results:
         final_soc = results[-1]["soc_percent"]
