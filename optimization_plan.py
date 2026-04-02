@@ -169,7 +169,7 @@ async def main():
             coalesce=True,
             max_instances=1,
             misfire_grace_time=60,
-            id='periodic_device_verification'
+            id='periodic_verification'
         )
         logger.info("Periodic device verification scheduled to run every 5 minutes (Europe/Brussels)")
     else:
