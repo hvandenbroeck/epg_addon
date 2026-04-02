@@ -79,12 +79,16 @@ class Device(BaseModel):
     discharge_stop: Optional[ActionSet] = None
     solar_only_start: Optional[ActionSet] = None
     solar_only_stop: Optional[ActionSet] = None
+    set_min_soc: Optional[ActionSet] = None
     # Battery-specific configuration (only used when type='battery')
     battery_soc_entity: Optional[str] = Field(default=None, description="Home Assistant entity for battery state of charge (%)")
     battery_capacity_kwh: Optional[float] = Field(default=None, description="Battery capacity in kWh")
     battery_charge_speed_kw: Optional[float] = Field(default=None, description="Battery charge speed in kW")
     battery_min_soc_percent: Optional[float] = Field(default=20.0, description="Minimum battery SOC in percent")
     battery_max_soc_percent: Optional[float] = Field(default=80.0, description="Maximum battery SOC in percent")
+    battery_min_soc_low_percent: Optional[float] = Field(default=30.0, description="Min SOC for low-cost price slots (highest floor)")
+    battery_min_soc_medium_percent: Optional[float] = Field(default=20.0, description="Min SOC for medium-cost price slots")
+    battery_min_soc_high_percent: Optional[float] = Field(default=10.0, description="Min SOC for high-cost price slots (lowest floor)")
     # WP and HW optimization parameters (only used when type='wp' or type='hw')
     block_hours: Optional[float] = Field(default=None, description="Minimum runtime when turned on (hours)")
     min_gap_hours: Optional[float] = Field(default=None, description="Minimum gap between runs (hours)")
@@ -271,6 +275,14 @@ def load_default_config() -> DevicesConfig:
                 EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=50),
                 EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=50),
                 EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=50),
+            ]),
+            set_min_soc=ActionSet(entity=[
+                EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value="{min_soc}"),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value="{min_soc}"),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value="{min_soc}"),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value="{min_soc}"),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value="{min_soc}"),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value="{min_soc}"),
             ])
         ),
         Device(

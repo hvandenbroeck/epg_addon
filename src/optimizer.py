@@ -20,7 +20,7 @@ from .ha_client import HomeAssistantClient
 from .device_state_manager import DeviceStateManager
 from .devices import Devices
 from .scheduler import Scheduler
-from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, optimize_ev, limit_battery_cycles
+from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, optimize_ev, limit_battery_cycles, categorize_slots_by_price
 from .utils import slot_to_time, slots_to_iso_ranges, merge_sequential_timeslots, time_to_slot
 from .config import CONFIG
 from .price_fetcher import EntsoeePriceFetcher
@@ -365,6 +365,25 @@ class HeatpumpOptimizer:
                 ))
         original_battery_iso_times_merged = merge_sequential_timeslots(original_iso_times)
 
+        # ===== BATTERY MIN SOC SCHEDULE (per-slot minimum SOC based on price category) =====
+        # Categorize ALL slots by price into low/medium/high groups and assign a minimum SOC
+        # for each. This is stored and used to schedule set_min_soc actions at each slot start.
+        battery_min_soc_schedule: dict[str, list[dict]] = {}
+        for bat_device in battery_devices:
+            if bat_device.set_min_soc:
+                min_soc_slots = categorize_slots_by_price(
+                    prices=prices,
+                    slot_minutes=slot_minutes,
+                    horizon_start=horizon_start,
+                    min_soc_low=bat_device.battery_min_soc_low_percent or 30.0,
+                    min_soc_medium=bat_device.battery_min_soc_medium_percent or 20.0,
+                    min_soc_high=bat_device.battery_min_soc_high_percent or 10.0,
+                )
+                battery_min_soc_schedule[bat_device.name] = min_soc_slots
+                logger.info(
+                    f"🔋 {bat_device.name}: Computed min SOC for {len(min_soc_slots)} slots"
+                )
+
         # Save schedule to TinyDB (without limited times yet - will be added by recalculate)
         with TinyDB('db.json') as db:
             db.upsert({
@@ -384,7 +403,8 @@ class HeatpumpOptimizer:
                     "discharge_percentile": BAT_DISCHARGE_PERCENTILE,
                     "price_diff_threshold": BAT_PRICE_DIFF_THRESHOLD
                 },
-                "discharge_price_context": discharge_price_context  # Preserve min price for discharge threshold calculations
+                "discharge_price_context": discharge_price_context,  # Preserve min price for discharge threshold calculations
+                "battery_min_soc": battery_min_soc_schedule,  # Per-slot min SOC schedule
             }, Query().id == "schedule")
         
         logger.info(f"✅ Optimization complete. Schedule saved to TinyDB.")

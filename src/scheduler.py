@@ -1,6 +1,6 @@
 import logging
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
 from tinydb import TinyDB, Query
 from apscheduler.triggers.date import DateTrigger
@@ -130,5 +130,51 @@ class Scheduler:
                 )
                 scheduled_count += 1
                 logger.info(f"📅 Scheduled {device.upper()} STOP at {end_time.strftime('%Y-%m-%d %H:%M')}")
+
+        # ===== SCHEDULE SET_MIN_SOC JOBS =====
+        # For each battery device with a set_min_soc action, schedule a job at
+        # each future slot time + 10 seconds to apply the minimum SOC value.
+        battery_min_soc = schedule_doc.get("battery_min_soc", {})
+        for device_name, slot_list in battery_min_soc.items():
+            cfg = self.devices.get_device_config(device_name)
+            if not cfg or not cfg.set_min_soc:
+                continue
+            set_min_soc_actions = cfg.set_min_soc.model_dump(exclude_none=True)
+
+            for slot_entry in slot_list:
+                slot_time_str = slot_entry.get("slot_time")
+                min_soc = slot_entry.get("min_soc_percent")
+                category = slot_entry.get("category", "")
+                if slot_time_str is None or min_soc is None:
+                    continue
+                try:
+                    slot_dt = datetime.fromisoformat(slot_time_str)
+                except Exception as e:
+                    logger.error(f"❌ Invalid slot_time '{slot_time_str}': {e}")
+                    continue
+
+                # Fire 10 seconds after the slot starts
+                fire_at = slot_dt + timedelta(seconds=10)
+                if fire_at <= now:
+                    continue  # Skip past slots
+
+                job_id = f"{device_name}_set_min_soc_device_{slot_dt.isoformat()}"
+                context = {"min_soc": int(round(min_soc))}
+                self.scheduler.add_job(
+                    self.devices.execute_device_action,
+                    trigger=DateTrigger(run_date=fire_at),
+                    args=[device_name, set_min_soc_actions, "set_min_soc", fire_at, context],
+                    id=job_id,
+                    replace_existing=True
+                )
+                scheduled_count += 1
+                logger.debug(
+                    f"📅 Scheduled {device_name.upper()} SET_MIN_SOC={int(round(min_soc))}% "
+                    f"({category}) at {fire_at.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+
+            logger.info(
+                f"🔋 {device_name}: Scheduled set_min_soc jobs for future slots"
+            )
 
         logger.info(f"✅ Total actions scheduled: {scheduled_count}")
