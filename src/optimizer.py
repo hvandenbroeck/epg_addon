@@ -196,6 +196,32 @@ class HeatpumpOptimizer:
             WP_BLOCK_HOURS = wp_device.block_hours if wp_device.block_hours is not None else 1.0
             WP_MIN_GAP_HOURS = wp_device.min_gap_hours if wp_device.min_gap_hours is not None else 3.0
             WP_MAX_GAP_HOURS = wp_device.max_gap_hours if wp_device.max_gap_hours is not None else 8.0
+
+            # ===== HEATING SEASON CHECK =====
+            # Skip optimization when the 48h average outdoor temperature exceeds the configured threshold.
+            if wp_device.outside_temp_sensor and wp_device.heating_season_outside_temp_threshold_c is not None:
+                avg_outside_temp = await self.ha_client.get_sensor_history_avg(
+                    wp_device.outside_temp_sensor, hours_back=48
+                )
+                if avg_outside_temp is not None:
+                    threshold = wp_device.heating_season_outside_temp_threshold_c
+                    if avg_outside_temp > threshold:
+                        logger.info(
+                            f"🌡️ {device_name}: Skipping WP optimization — "
+                            f"48h avg outside temp {avg_outside_temp:.1f}°C > threshold {threshold:.1f}°C "
+                            f"(heating season inactive)"
+                        )
+                        continue
+                    else:
+                        logger.info(
+                            f"🌡️ {device_name}: Heating season active — "
+                            f"48h avg outside temp {avg_outside_temp:.1f}°C ≤ threshold {threshold:.1f}°C"
+                        )
+                else:
+                    logger.warning(
+                        f"⚠️ {device_name}: Could not fetch 48h average temperature from "
+                        f"'{wp_device.outside_temp_sensor}', proceeding with optimization"
+                    )
             
             # Calculate expected daily runtime from historical data
             expected_daily_runtime = None

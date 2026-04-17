@@ -93,6 +93,7 @@ class Device(BaseModel):
     inside_temp_sensor: Optional[str] = Field(default=None, description="Inside temperature sensor entity ID")
     outside_temp_sensor: Optional[str] = Field(default=None, description="Outside temperature sensor entity ID")
     heatpump_status_sensor: Optional[str] = Field(default=None, description="Heat pump on/off status sensor entity ID")
+    heating_season_outside_temp_threshold_c: Optional[float] = Field(default=15.0, description="Average outside temperature threshold (°C) over last 48h above which heat pump optimization is skipped")
 
 
 class DevicesConfig(BaseSettings):
@@ -155,7 +156,8 @@ def load_default_config() -> DevicesConfig:
             name="wp",
             type="wp",
             #inside_temp_sensor="sensor.ebusd_700_z2roomtemp",
-            #outside_temp_sensor="sensor.ebusd_700_displayedoutsidetemp",
+            outside_temp_sensor="sensor.ebusd_700_displayedoutsidetemp",
+            heating_season_outside_temp_threshold_c=14.0,
             #heatpump_status_sensor="sensor.ebusd_700_hc2pumpstatus_2",
             enable_load_management=False,
             start=ActionSet(mqtt=[
