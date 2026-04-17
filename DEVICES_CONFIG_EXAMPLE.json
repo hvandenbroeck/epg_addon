@@ -1,5 +1,4 @@
 {
-{
   "devices": [
     {
       "name": "wp",
@@ -181,6 +180,16 @@
             "entity_id": "switch.peblar_ev_charger_1_charging"
           }
         ]
+      },
+      "solar_charge_config": {
+        "production_phase_l1_entity": "sensor.power_production_phase_l1",
+        "production_phase_l2_entity": "sensor.power_production_phase_l2",
+        "production_phase_l3_entity": "sensor.power_production_phase_l3",
+        "consumption_phase_l1_entity": "sensor.power_consumption_phase_l1",
+        "consumption_phase_l2_entity": "sensor.power_consumption_phase_l2",
+        "consumption_phase_l3_entity": "sensor.power_consumption_phase_l3",
+        "phase_switch_threshold_power": 4000,
+        "minimum_ev_charging_power": 1380
       }
     },
     {

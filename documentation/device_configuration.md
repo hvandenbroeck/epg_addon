@@ -141,7 +141,49 @@ for device in devices_config.devices:
     print(f"{device.name} ({device.type})")
 ```
 
-## Troubleshooting
+### Optional – EV Solar Charge Controller
+
+When `solar_charge_config` is provided on an EV device the addon periodically
+reads per-phase solar production and house consumption from Home Assistant,
+calculates the net solar surplus, and adjusts the EV charging current to
+consume exactly that surplus. Automatic phase switching (single ↔ three phase)
+is performed via the device's existing `load_management.apply_limit_actions`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `production_phase_l1_entity` | string | `null` | HA entity for solar production phase L1 (W) |
+| `production_phase_l2_entity` | string | `null` | HA entity for solar production phase L2 (W) |
+| `production_phase_l3_entity` | string | `null` | HA entity for solar production phase L3 (W) |
+| `consumption_phase_l1_entity` | string | `null` | HA entity for house consumption phase L1 excluding the EV (W) |
+| `consumption_phase_l2_entity` | string | `null` | HA entity for house consumption phase L2 excluding the EV (W) |
+| `consumption_phase_l3_entity` | string | `null` | HA entity for house consumption phase L3 excluding the EV (W) |
+| `phase_switch_threshold_power` | number | `4000` | Surplus (W) at or above which three-phase charging is used |
+| `minimum_ev_charging_power` | number | `1380` | Minimum surplus (W) needed to adjust the charge limit (≈ 6 A × 230 V) |
+
+Example:
+
+```json
+{
+  "name": "ev1",
+  "type": "ev",
+  "enable_load_management": true,
+  "load_management": { "...": "..." },
+  "solar_charge_config": {
+    "production_phase_l1_entity": "sensor.power_production_phase_l1",
+    "production_phase_l2_entity": "sensor.power_production_phase_l2",
+    "production_phase_l3_entity": "sensor.power_production_phase_l3",
+    "consumption_phase_l1_entity": "sensor.power_consumption_phase_l1",
+    "consumption_phase_l2_entity": "sensor.power_consumption_phase_l2",
+    "consumption_phase_l3_entity": "sensor.power_consumption_phase_l3",
+    "phase_switch_threshold_power": 4000,
+    "minimum_ev_charging_power": 1380
+  }
+}
+```
+
+Omit the phases you don't need; missing phases default to **0 W**.
+
+
 
 | Problem | Fix |
 |---------|-----|
