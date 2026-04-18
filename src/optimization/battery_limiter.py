@@ -151,17 +151,19 @@ def limit_battery_cycles(
             slot_idx = _pred_time_to_slot(pred['timestamp'])
             if slot_idx >= 0:
                 # Reduce predicted usage by the discharge buffer percentage
+                # Note: pred['predicted_kwh'] is already per-slot kWh (converted upstream)
                 logger.debug(f"🔋 {device_name}: Predicted usage for slot {slot_idx} before buffer: {pred['predicted_kwh']:.2f} kWh")
-                usage_by_slot[slot_idx] = pred['predicted_kwh'] * slot_hours * discharge_buffer_multiplier
+                usage_by_slot[slot_idx] = pred['predicted_kwh'] * discharge_buffer_multiplier
 
     # Build predicted solar production lookup (slot_idx -> kWh solar per slot)
     # Solar production reduces the net household demand that the battery needs to cover.
+    # Note: pred['predicted_kwh'] is already per-slot kWh (converted upstream)
     solar_by_slot = {}
     if predicted_solar:
         for pred in predicted_solar:
             slot_idx = _pred_time_to_slot(pred['timestamp'])
             if slot_idx >= 0:
-                solar_by_slot[slot_idx] = pred['predicted_kwh'] * slot_hours
+                solar_by_slot[slot_idx] = pred['predicted_kwh']
 
     if solar_by_slot:
         logger.debug(f"☀️ {device_name}: Solar production data available for {len(solar_by_slot)} slots")
@@ -198,12 +200,19 @@ def limit_battery_cycles(
                 # Solar covers part of household demand, reducing how much the battery needs to discharge.
                 gross_usage = usage_by_slot.get(slot_idx, 0)
                 solar_offset = solar_by_slot.get(slot_idx, 0)
-                net_usage = max(0.0, gross_usage - solar_offset)
-                discharge_energy = min(net_usage, available)
-                if available < charge_energy_per_slot * 0.1:
-                    return None, False, 0, 0  # Can't discharge - battery empty
-                soc -= (discharge_energy / battery_capacity_kwh) * 100
-                total_discharged_kwh += discharge_energy
+                net_usage = gross_usage - solar_offset
+                if net_usage < 0:
+                    # Excess solar: charge the battery during a discharge slot
+                    headroom = battery_capacity_kwh * (max_soc_percent - soc) / 100
+                    charge_energy = min(-net_usage, max(0.0, headroom), charge_energy_per_slot)
+                    soc += (charge_energy / battery_capacity_kwh) * 100
+                    total_charged_kwh += charge_energy
+                else:
+                    if available < charge_energy_per_slot * 0.1:
+                        return None, False, 0, 0  # Can't discharge - battery empty
+                    discharge_energy = min(net_usage, available)
+                    soc -= (discharge_energy / battery_capacity_kwh) * 100
+                    total_discharged_kwh += discharge_energy
         
         return soc, True, total_charged_kwh, total_discharged_kwh
     

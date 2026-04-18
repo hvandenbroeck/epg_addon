@@ -118,18 +118,34 @@ def predict_battery_soc(
             solar_offset = solar_by_slot.get(slot_idx, 0.0)
             net_energy = gross_usage - solar_offset
             if net_energy < 0:
-                # Excess solar charges the battery even during a discharge slot
+                # Excess solar charges the battery even during a discharge slot.
+                # Solar charging is not capped by max_soc_percent (only grid charging is).
                 excess_solar = -net_energy
-                headroom = battery_capacity_kwh * (max_soc_percent - soc) / 100
+                headroom = battery_capacity_kwh * (100.0 - soc) / 100
                 charge_energy = min(excess_solar, max(0.0, headroom), charge_energy_per_slot)
                 soc += (charge_energy / battery_capacity_kwh) * 100
             else:
                 available = battery_capacity_kwh * (soc - min_soc_percent) / 100
                 discharge_energy = min(net_energy, max(0.0, available))
                 soc -= (discharge_energy / battery_capacity_kwh) * 100
+        else:
+            # Neither scheduled charge nor discharge: model passive solar charging.
+            # When solar production exceeds household usage the excess charges the battery
+            # (typical behaviour for hybrid inverters in idle/passthrough mode).
+            solar_offset = solar_by_slot.get(slot_idx, 0.0)
+            gross_usage = usage_by_slot.get(slot_idx, 0.0)
+            excess_solar = max(0.0, solar_offset - gross_usage)
+            if excess_solar > 0:
+                # Solar charging is not capped by max_soc_percent (only grid charging is).
+                headroom = battery_capacity_kwh * (100.0 - soc) / 100
+                charge_energy = min(excess_solar, max(0.0, headroom), charge_energy_per_slot)
+                soc += (charge_energy / battery_capacity_kwh) * 100
 
-        # Keep SOC within valid bounds
-        soc = max(min_soc_percent, min(max_soc_percent, soc))
+        # Keep SOC within valid bounds.
+        # Upper bound is 100.0 (physical maximum): solar charging is allowed to fill
+        # beyond max_soc_percent and each charging path already caps itself via its own
+        # headroom calculation, so clamping to max_soc_percent here would undo solar gains.
+        soc = max(min_soc_percent, min(100.0, soc))
 
     if results:
         final_soc = results[-1]["soc_percent"]
