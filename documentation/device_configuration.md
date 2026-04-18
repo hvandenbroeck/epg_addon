@@ -141,6 +141,49 @@ for device in devices_config.devices:
     print(f"{device.name} ({device.type})")
 ```
 
+### Optional – EV Solar Charge Controller
+
+The EV solar charge controller adjusts charging current to match the available
+solar surplus. It is configured globally via `config.json` (not per device),
+since the solar production and house consumption sensors are property-wide.
+
+Enable by adding the following keys to `config.json` under `options`:
+
+| Option key | Type | Default | Description |
+|------------|------|---------|-------------|
+| `ev_solar_charge_production_phase_l1_entity` | string | `null` | HA entity for solar production phase L1 (W) |
+| `ev_solar_charge_production_phase_l2_entity` | string | `null` | HA entity for solar production phase L2 (W) |
+| `ev_solar_charge_production_phase_l3_entity` | string | `null` | HA entity for solar production phase L3 (W) |
+| `ev_solar_charge_consumption_phase_l1_entity` | string | `null` | HA entity for house consumption phase L1 excluding the EV (W) |
+| `ev_solar_charge_consumption_phase_l2_entity` | string | `null` | HA entity for house consumption phase L2 excluding the EV (W) |
+| `ev_solar_charge_consumption_phase_l3_entity` | string | `null` | HA entity for house consumption phase L3 excluding the EV (W) |
+| `phase_switch_threshold_power` | number | `4000` | Surplus (W) at or above which three-phase charging is used (shared with load watcher) |
+| `ev_solar_charge_minimum_charging_power` | number | `1380` | Minimum surplus (W) needed to adjust the charge limit (≈ 6 A × 230 V) |
+
+The controller is enabled as soon as at least one production entity is set.
+Omit the phases you don't need; missing phases default to **0 W**.
+
+Example `config.json` snippet:
+
+```json
+{
+  "options": {
+    "ev_solar_charge_production_phase_l1_entity": "sensor.power_production_phase_l1",
+    "ev_solar_charge_production_phase_l2_entity": "sensor.power_production_phase_l2",
+    "ev_solar_charge_production_phase_l3_entity": "sensor.power_production_phase_l3",
+    "ev_solar_charge_consumption_phase_l1_entity": "sensor.power_consumption_phase_l1",
+    "ev_solar_charge_consumption_phase_l2_entity": "sensor.power_consumption_phase_l2",
+    "ev_solar_charge_consumption_phase_l3_entity": "sensor.power_consumption_phase_l3",
+    "phase_switch_threshold_power": 4000,
+    "ev_solar_charge_minimum_charging_power": 1380
+  }
+}
+```
+
+The controller runs on the same schedule as the load watcher and applies
+limits to **all** configured EV devices via their existing
+`load_management.apply_limit_actions`.
+
 ## Troubleshooting
 
 | Problem | Fix |

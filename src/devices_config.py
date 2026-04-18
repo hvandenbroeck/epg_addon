@@ -94,7 +94,6 @@ class Device(BaseModel):
     outside_temp_sensor: Optional[str] = Field(default=None, description="Outside temperature sensor entity ID")
     heatpump_status_sensor: Optional[str] = Field(default=None, description="Heat pump on/off status sensor entity ID")
 
-
 class DevicesConfig(BaseSettings):
     """Main devices configuration."""
     model_config = SettingsConfigDict(

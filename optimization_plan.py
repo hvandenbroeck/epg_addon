@@ -9,6 +9,9 @@ from src.optimizer import HeatpumpOptimizer
 from src.load_watcher import LoadWatcher
 from src.device_verifier import DeviceVerifier
 from src.devices import Devices
+from src.optimization import EvSolarChargeController
+from src.optimization.ev_solar_charge import is_solar_charge_enabled
+from src.devices_config import devices_config
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 from src.forecasting import StatisticsLoader, Weather, Prediction, HAEnergyDashboardFetcher, PriceHistoryManager
@@ -76,11 +79,25 @@ async def main():
     # Create load watcher instance
     load_watcher = LoadWatcher(args.token)
 
+    # Create solar charge controller (shares the optimizer's HA client and Devices instance)
+    from tinydb import TinyDB
+    _solar_db = TinyDB('db.json')
+    solar_charge_controller = EvSolarChargeController(
+        get_state_func=optimizer.ha_client.get_state,
+        devices_instance=optimizer.devices,
+        db=_solar_db,
+    )
+    ev_devices = devices_config.get_devices_by_type('ev')
+
     # Run initial optimization
     await optimizer.run_optimization()
 
     # Run initial load watcher
     await load_watcher.run()
+
+    # Run initial solar charge controller pass (if enabled in config)
+    if is_solar_charge_enabled() and ev_devices:
+        await solar_charge_controller.run_all(ev_devices)
 
     # Test WS API 
     fetcher = HAEnergyDashboardFetcher(args.token)
@@ -152,6 +169,33 @@ async def main():
     )
     logger.info(f"Load watcher scheduled to run every {load_watcher_interval} minutes on the {load_watcher_interval}-minute marks (Europe/Brussels)")
 
+    # Schedule solar charge controller to run on the same interval as the load watcher
+    if is_solar_charge_enabled() and ev_devices:
+        async def scheduled_solar_charge():
+            logger.info("☀️ Running scheduled EV solar charge controller...")
+            try:
+                await solar_charge_controller.run_all(ev_devices)
+            except Exception as e:
+                logger.error(f"❌ Error during EV solar charge controller: {e}", exc_info=True)
+
+        scheduler.add_job(
+            scheduled_solar_charge,
+            'cron',
+            minute=f'*/{load_watcher_interval}',
+            timezone='Europe/Brussels',
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=60,
+            id='ev_solar_charge',
+        )
+        logger.info(
+            f"EV solar charge controller scheduled to run every {load_watcher_interval} minutes "
+            f"(Europe/Brussels) for {len(ev_devices)} device(s): "
+            f"{[d.name for d in ev_devices]}"
+        )
+    else:
+        logger.info("EV solar charge controller not scheduled (not enabled in config or no EV devices configured)")
+
     # Schedule device verification - periodic check every 5 minutes if enabled in config
     if CONFIG["options"].get("periodic_verification_enabled", True):
         async def scheduled_periodic_verification():
@@ -192,6 +236,7 @@ async def main():
         # Cleanup on shutdown
         logger.info("Cleaning up resources...")
         load_watcher.close()
+        _solar_db.close()
         scheduler.shutdown(wait=False)
 
 if __name__ == "__main__":
