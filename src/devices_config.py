@@ -93,6 +93,8 @@ class Device(BaseModel):
     inside_temp_sensor: Optional[str] = Field(default=None, description="Inside temperature sensor entity ID")
     outside_temp_sensor: Optional[str] = Field(default=None, description="Outside temperature sensor entity ID")
     heatpump_status_sensor: Optional[str] = Field(default=None, description="Heat pump on/off status sensor entity ID")
+    # EV-specific options (only used when type='ev')
+    solar_charge_only: bool = Field(default=False, description="When True, the EV charger is controlled by solar surplus only; price-based scheduling and the load watcher are bypassed")
 
 class DevicesConfig(BaseSettings):
     """Main devices configuration."""
@@ -275,6 +277,7 @@ def load_default_config() -> DevicesConfig:
         Device(
             name="ev",
             type="ev",
+            solar_charge_only=True,
             enable_load_management=True,
             load_management=LoadManagement(
                 instantaneous_load_entity="sensor.peblar_ev_charger_vermogen",

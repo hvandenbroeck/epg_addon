@@ -10,7 +10,6 @@ from src.load_watcher import LoadWatcher
 from src.device_verifier import DeviceVerifier
 from src.devices import Devices
 from src.optimization import EvSolarChargeController
-from src.optimization.ev_solar_charge import is_solar_charge_enabled
 from src.devices_config import devices_config
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
@@ -80,12 +79,9 @@ async def main():
     load_watcher = LoadWatcher(args.token)
 
     # Create solar charge controller (shares the optimizer's HA client and Devices instance)
-    from tinydb import TinyDB
-    _solar_db = TinyDB('db.json')
     solar_charge_controller = EvSolarChargeController(
         get_state_func=optimizer.ha_client.get_state,
         devices_instance=optimizer.devices,
-        db=_solar_db,
     )
     ev_devices = devices_config.get_devices_by_type('ev')
 
@@ -95,8 +91,8 @@ async def main():
     # Run initial load watcher
     await load_watcher.run()
 
-    # Run initial solar charge controller pass (if enabled in config)
-    if is_solar_charge_enabled() and ev_devices:
+    # Run initial solar charge controller pass (for EV devices with solar_charge_only=True)
+    if any(d.solar_charge_only for d in ev_devices):
         await solar_charge_controller.run_all(ev_devices)
 
     # Test WS API 
@@ -170,7 +166,7 @@ async def main():
     logger.info(f"Load watcher scheduled to run every {load_watcher_interval} minutes on the {load_watcher_interval}-minute marks (Europe/Brussels)")
 
     # Schedule solar charge controller to run on the same interval as the load watcher
-    if is_solar_charge_enabled() and ev_devices:
+    if any(d.solar_charge_only for d in ev_devices):
         async def scheduled_solar_charge():
             logger.info("☀️ Running scheduled EV solar charge controller...")
             try:
@@ -188,10 +184,10 @@ async def main():
             misfire_grace_time=60,
             id='ev_solar_charge',
         )
+        solar_ev_names = [d.name for d in ev_devices if d.solar_charge_only]
         logger.info(
             f"EV solar charge controller scheduled to run every {load_watcher_interval} minutes "
-            f"(Europe/Brussels) for {len(ev_devices)} device(s): "
-            f"{[d.name for d in ev_devices]}"
+            f"(Europe/Brussels) for {len(solar_ev_names)} device(s): {solar_ev_names}"
         )
     else:
         logger.info("EV solar charge controller not scheduled (not enabled in config or no EV devices configured)")
