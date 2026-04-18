@@ -51,43 +51,6 @@ class LoadManagementActions(BaseModel):
     apply_limit: Optional[ActionSet] = None
 
 
-class EvSolarChargeConfig(BaseModel):
-    """Solar charge controller configuration for an EV device.
-    
-    When configured, the solar charge controller periodically reads solar
-    production and house consumption per phase, calculates the available
-    solar surplus, and adjusts the EV charging current accordingly.
-    Automatic phase switching between single-phase and three-phase is
-    supported via the device's existing load_management actions.
-    """
-    production_phase_l1_entity: Optional[str] = Field(
-        default=None, description="HA entity for solar production phase L1 (W)"
-    )
-    production_phase_l2_entity: Optional[str] = Field(
-        default=None, description="HA entity for solar production phase L2 (W)"
-    )
-    production_phase_l3_entity: Optional[str] = Field(
-        default=None, description="HA entity for solar production phase L3 (W)"
-    )
-    consumption_phase_l1_entity: Optional[str] = Field(
-        default=None, description="HA entity for house consumption phase L1 (W, excluding EV)"
-    )
-    consumption_phase_l2_entity: Optional[str] = Field(
-        default=None, description="HA entity for house consumption phase L2 (W, excluding EV)"
-    )
-    consumption_phase_l3_entity: Optional[str] = Field(
-        default=None, description="HA entity for house consumption phase L3 (W, excluding EV)"
-    )
-    phase_switch_threshold_power: float = Field(
-        default=4000.0,
-        description="Solar surplus (W) at or above which three-phase charging is used"
-    )
-    minimum_ev_charging_power: float = Field(
-        default=1380.0,
-        description="Minimum solar surplus (W) required to adjust the EV charge limit (6 A × 230 V)"
-    )
-
-
 class LoadManagement(BaseModel):
     """Load management configuration for a device."""
     instantaneous_load_entity: str
@@ -130,10 +93,6 @@ class Device(BaseModel):
     inside_temp_sensor: Optional[str] = Field(default=None, description="Inside temperature sensor entity ID")
     outside_temp_sensor: Optional[str] = Field(default=None, description="Outside temperature sensor entity ID")
     heatpump_status_sensor: Optional[str] = Field(default=None, description="Heat pump on/off status sensor entity ID")
-    # EV solar charge controller (only used when type='ev')
-    solar_charge_config: Optional[EvSolarChargeConfig] = Field(
-        default=None, description="Solar charge controller configuration (EV only)"
-    )
 
 class DevicesConfig(BaseSettings):
     """Main devices configuration."""
