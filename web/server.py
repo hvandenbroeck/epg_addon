@@ -115,6 +115,11 @@ def get_predictions():
     """Return power usage and solar production predictions"""
     with TinyDB('db.json') as db:
         docs = db.search(Query().id == 'predictions')
+        schedule_docs = db.search(Query().id == 'schedule')
+
+    battery_min_soc = {}
+    if schedule_docs:
+        battery_min_soc = schedule_docs[0].get('battery_min_soc', {})
 
     if docs:
         doc = docs[0]
@@ -123,6 +128,7 @@ def get_predictions():
             'usage': doc.get('usage', []),
             'solar': doc.get('solar', []),
             'battery_soc': doc.get('battery_soc', {}),
+            'battery_min_soc': battery_min_soc,
             'updated_at': doc.get('updated_at', '')
         })
     return jsonify({
@@ -130,6 +136,7 @@ def get_predictions():
         'usage': [],
         'solar': [],
         'battery_soc': {},
+        'battery_min_soc': battery_min_soc,
         'updated_at': ''
     })
 
@@ -156,6 +163,7 @@ def get_gantt():
     usage_data = predictions.get('usage', [])
     solar_data = predictions.get('solar', [])
     battery_soc = predictions.get('battery_soc', {})
+    battery_min_soc = schedule_docs[0].get('battery_min_soc', {})
 
     # Device labels and colors
     device_labels = {
@@ -375,6 +383,35 @@ def get_gantt():
                 mode='lines',
                 line=dict(color=soc_colors[i % len(soc_colors)], width=2, shape='spline'),
                 hovertemplate='%{y:.1f}%<extra>' + label + '</extra>',
+                showlegend=True
+            ),
+            row=3, col=1, secondary_y=True
+        )
+
+    # Add min SOC step lines (one per battery device)
+    min_soc_colors = ['#E91E63', '#9C27B0', '#FF5722']
+    for i, (dev_name, slot_list) in enumerate(battery_min_soc.items()):
+        if not slot_list:
+            continue
+        label = f"Min SOC{' ' + dev_name if len(battery_min_soc) > 1 else ''} (%)"
+        fig.add_trace(
+            go.Scatter(
+                x=[entry['slot_time'] for entry in slot_list],
+                y=[entry['min_soc_percent'] for entry in slot_list],
+                name=label,
+                mode='lines',
+                line=dict(
+                    color=min_soc_colors[i % len(min_soc_colors)],
+                    width=2,
+                    dash='dot',
+                    shape='hv',  # Step line
+                ),
+                customdata=[[entry.get('category', ''), entry.get('price', 0)] for entry in slot_list],
+                hovertemplate=(
+                    '%{y:.0f}% '
+                    '(%{customdata[0]}, %{customdata[1]:.4f} €/kWh)'
+                    '<extra>' + label + '</extra>'
+                ),
                 showlegend=True
             ),
             row=3, col=1, secondary_y=True

@@ -13,6 +13,7 @@ from .battery import optimize_battery, optimize_bat_discharge
 from .ev import optimize_ev
 from .ev_solar_charge import EvSolarChargeController
 from .battery_limiter import limit_battery_cycles
+from .battery_min_soc import categorize_slots_by_price
 
 __all__ = [
     'optimize_thermal_device',
@@ -23,4 +24,5 @@ __all__ = [
     'optimize_ev',
     'EvSolarChargeController',
     'limit_battery_cycles',
+    'categorize_slots_by_price',
 ]
