@@ -42,6 +42,9 @@ class Scheduler:
             logger.warning("⚠️ No schedule found in TinyDB.")
             return
 
+        # Load per-slot discharge min SOC lookup: device_name -> {ISO_start: min_soc_percent}
+        battery_discharge_min_soc = schedule_doc.get('battery_discharge_min_soc', {})
+
         # Clear only device-related jobs in the scheduler
         self.remove_device_jobs()
 
@@ -70,6 +73,8 @@ class Scheduler:
             is_battery_discharge = device.endswith('_discharge')
             is_battery_solar_only = device.endswith('_solar_only')
             
+            min_soc_percent = None  # Only set for discharge entries that have a min SOC mapping
+            
             if is_battery_charge or is_battery_discharge or is_battery_solar_only:
                 # Extract the actual device name (e.g., "battery" from "battery_charge")
                 base_device_name = device.rsplit('_', 1)[0]
@@ -91,6 +96,9 @@ class Scheduler:
                     start_actions = cfg.discharge_start.model_dump(exclude_none=True) if cfg.discharge_start else {}
                     stop_actions = cfg.discharge_stop.model_dump(exclude_none=True) if cfg.discharge_stop else {}
                     action_type = "discharge"
+                    # Look up the min SOC for this discharge block (keyed by ISO start time)
+                    device_min_soc_map = battery_discharge_min_soc.get(base_device_name, {})
+                    min_soc_percent = device_min_soc_map.get(start_str)
             else:
                 # Standard device handling (wp, hw, ev)
                 cfg = self.devices.get_device_config(device)
@@ -118,6 +126,22 @@ class Scheduler:
                 )
                 logger.info(f"📅 Scheduled {device.upper()} START at {start_time.strftime('%Y-%m-%d %H:%M')}")
 
+                # For discharge blocks: also schedule set_min_soc_start when configured
+                if is_battery_discharge and min_soc_percent is not None and cfg.set_min_soc_start:
+                    set_min_soc_start_actions = cfg.set_min_soc_start.model_dump(exclude_none=True)
+                    soc_context = {'min_soc_percent': min_soc_percent}
+                    self.scheduler.add_job(
+                        self.devices.execute_device_action,
+                        trigger=DateTrigger(run_date=start_time),
+                        args=[base_device_name, set_min_soc_start_actions, 'set_min_soc_start', start_time, soc_context],
+                        id=f"{device}_set_min_soc_start_device_{start_time.isoformat()}",
+                        replace_existing=True
+                    )
+                    logger.info(
+                        f"📅 Scheduled {device.upper()} SET_MIN_SOC_START "
+                        f"({min_soc_percent:.1f}%) at {start_time.strftime('%Y-%m-%d %H:%M')}"
+                    )
+
             # Schedule stop action if in the future
             if end_time > now and self.scheduler:
                 action_label = f"{action_type}_stop" if action_type else "stop"
@@ -130,5 +154,17 @@ class Scheduler:
                 )
                 scheduled_count += 1
                 logger.info(f"📅 Scheduled {device.upper()} STOP at {end_time.strftime('%Y-%m-%d %H:%M')}")
+
+                # For discharge blocks: also schedule set_min_soc_stop when configured
+                if is_battery_discharge and cfg.set_min_soc_stop:
+                    set_min_soc_stop_actions = cfg.set_min_soc_stop.model_dump(exclude_none=True)
+                    self.scheduler.add_job(
+                        self.devices.execute_device_action,
+                        trigger=DateTrigger(run_date=end_time),
+                        args=[base_device_name, set_min_soc_stop_actions, 'set_min_soc_stop', end_time],
+                        id=f"{device}_set_min_soc_stop_device_{end_time.isoformat()}",
+                        replace_existing=True
+                    )
+                    logger.info(f"📅 Scheduled {device.upper()} SET_MIN_SOC_STOP at {end_time.strftime('%Y-%m-%d %H:%M')}")
 
         logger.info(f"✅ Total actions scheduled: {scheduled_count}")
