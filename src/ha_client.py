@@ -6,6 +6,8 @@ and separation of concerns.
 """
 import logging
 import aiohttp
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 from .config import CONFIG
 
 logger = logging.getLogger(__name__)
@@ -70,3 +72,54 @@ class HomeAssistantClient:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=self.headers, json=service_data) as response:
                 return response.status == 200
+
+    async def get_avg_temperature_48h(self, entity_id: str) -> Optional[float]:
+        """Fetch the 48-hour average value of a temperature sensor from HA history.
+
+        Args:
+            entity_id: The sensor entity ID to query (e.g., 'sensor.outside_temp')
+
+        Returns:
+            Average temperature over the last 48 hours as a float, or None on error.
+        """
+        start_time = datetime.now(timezone.utc) - timedelta(hours=48)
+        # Use strftime to produce a clean UTC timestamp without the '+00:00' suffix,
+        # which would be misinterpreted as a space when embedded in a URL.
+        start_str = start_time.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+        url = (
+            f"{self.ha_url}/api/history/period/{start_str}"
+            f"?filter_entity_id={entity_id}"
+        )
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=self.headers) as response:
+                    if response.status != 200:
+                        logger.error(f"Failed to fetch 48h history for {entity_id}: HTTP {response.status}")
+                        return None
+                    data = await response.json()
+
+            if not data or not data[0]:
+                logger.warning(f"No history data returned for {entity_id}")
+                return None
+
+            values = []
+            for state_change in data[0]:
+                raw = state_change.get('state')
+                if raw and raw not in ('unknown', 'unavailable', 'None'):
+                    try:
+                        values.append(float(raw))
+                    except (ValueError, TypeError):
+                        pass
+
+            if not values:
+                logger.warning(f"No valid numeric states in 48h history for {entity_id}")
+                return None
+
+            avg = sum(values) / len(values)
+            logger.debug(f"48h average temperature for {entity_id}: {avg:.2f}°C ({len(values)} samples)")
+            return avg
+
+        except Exception as e:
+            logger.error(f"Error fetching 48h average temperature for {entity_id}: {e}")
+            return None

@@ -47,6 +47,9 @@ class LimitCalculator:
                 if not device.enable_load_management:
                     continue
                 
+                if device.solar_charge_only:
+                    continue
+                
                 device_name = device.name
                 load_mgmt = device.load_management
                 if not load_mgmt:

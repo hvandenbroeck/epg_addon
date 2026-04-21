@@ -93,6 +93,8 @@ class Device(BaseModel):
     inside_temp_sensor: Optional[str] = Field(default=None, description="Inside temperature sensor entity ID")
     outside_temp_sensor: Optional[str] = Field(default=None, description="Outside temperature sensor entity ID")
     heatpump_status_sensor: Optional[str] = Field(default=None, description="Heat pump on/off status sensor entity ID")
+    # WP temperature-based optimization disable threshold (only used when type='wp')
+    disable_optimization_above_avg_temp: Optional[float] = Field(default=None, description="Disable WP optimization when 48h average outside temperature exceeds this value (°C). None means always optimize.")
     # EV-specific options (only used when type='ev')
     solar_charge_only: bool = Field(default=False, description="When True, the EV charger is controlled by solar surplus only; price-based scheduling and the load watcher are bypassed")
 
@@ -156,7 +158,8 @@ def load_default_config() -> DevicesConfig:
             name="wp",
             type="wp",
             #inside_temp_sensor="sensor.ebusd_700_z2roomtemp",
-            #outside_temp_sensor="sensor.ebusd_700_displayedoutsidetemp",
+            outside_temp_sensor="sensor.ebusd_700_displayedoutsidetemp",
+            disable_optimization_above_avg_temp=14.0,
             #heatpump_status_sensor="sensor.ebusd_700_hc2pumpstatus_2",
             enable_load_management=False,
             start=ActionSet(mqtt=[
@@ -252,12 +255,12 @@ def load_default_config() -> DevicesConfig:
                 EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=50),
             ]),
             solar_only_start=ActionSet(entity=[
-                EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=10),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=10),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=10),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=10),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=10),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=10),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=90),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=90),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=90),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=90),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=90),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=90),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog1_charge", option="No Grid or Gen"),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog2_charge", option="No Grid or Gen"),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog3_charge", option="No Grid or Gen"),

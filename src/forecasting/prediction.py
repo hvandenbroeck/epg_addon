@@ -497,3 +497,61 @@ class Prediction:
         logger.info(f"☀️ Saved {len(solar_records)} hourly solar production predictions to database")
 
         return results_df
+
+    @staticmethod
+    def get_cached_usage(slot_minutes):
+        """Return cached power usage predictions from TinyDB, resampled to slot_minutes intervals.
+
+        Reads the 'usage' key written by calculatePowerUsage(). No API calls or ML training.
+        Returns a list of {'timestamp': ..., 'predicted_kwh': ...} dicts, or None if unavailable.
+        """
+        try:
+            with TinyDB('db.json') as db:
+                predictions_doc = db.get(Query().id == 'predictions')
+
+            if not predictions_doc or not predictions_doc.get('usage'):
+                logger.warning("⚠️ No cached power usage predictions found")
+                return None
+
+            df = pd.DataFrame(predictions_doc['usage'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df = df.set_index('timestamp')
+            df = df.resample(f'{slot_minutes}min').interpolate(method='linear')
+            df = df.reset_index()
+            df['predicted_kwh'] = df['predicted_kwh'] * (slot_minutes / 60)
+
+            result = df[['timestamp', 'predicted_kwh']].to_dict('records')
+            logger.debug(f"🔋 Loaded {len(result)} {slot_minutes}-min slots of cached power usage predictions")
+            return result
+        except Exception as e:
+            logger.warning(f"⚠️ Could not load cached power usage predictions: {e}")
+        return None
+
+    @staticmethod
+    def get_cached_solar(slot_minutes):
+        """Return cached solar production predictions from TinyDB, resampled to slot_minutes intervals.
+
+        Reads the 'solar' key written by calculateSolarProduction(). No API calls or ML training.
+        Returns a list of {'timestamp': ..., 'predicted_kwh': ...} dicts, or None if unavailable.
+        """
+        try:
+            with TinyDB('db.json') as db:
+                predictions_doc = db.get(Query().id == 'predictions')
+
+            if not predictions_doc or not predictions_doc.get('solar'):
+                logger.warning("⚠️ No cached solar production predictions found")
+                return None
+
+            df = pd.DataFrame(predictions_doc['solar'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df = df.set_index('timestamp')
+            df = df.resample(f'{slot_minutes}min').interpolate(method='linear')
+            df = df.reset_index()
+            df['predicted_kwh'] = df['predicted_kwh'] * (slot_minutes / 60)
+
+            result = df[['timestamp', 'predicted_kwh']].to_dict('records')
+            logger.debug(f"☀️ Loaded {len(result)} {slot_minutes}-min slots of cached solar production predictions")
+            return result
+        except Exception as e:
+            logger.warning(f"⚠️ Could not load cached solar production predictions: {e}")
+        return None

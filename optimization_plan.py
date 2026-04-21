@@ -84,6 +84,7 @@ async def main():
         devices_instance=optimizer.devices,
     )
     ev_devices = devices_config.get_devices_by_type('ev')
+    battery_devices = devices_config.get_devices_by_type('battery')
 
     # Run initial optimization
     await optimizer.run_optimization()
@@ -93,7 +94,7 @@ async def main():
 
     # Run initial solar charge controller pass (for EV devices with solar_charge_only=True)
     if any(d.solar_charge_only for d in ev_devices):
-        await solar_charge_controller.run_all(ev_devices)
+        await solar_charge_controller.run_all(ev_devices, battery_devices=battery_devices)
 
     # Test WS API 
     fetcher = HAEnergyDashboardFetcher(args.token)
@@ -170,7 +171,7 @@ async def main():
         async def scheduled_solar_charge():
             logger.info("☀️ Running scheduled EV solar charge controller...")
             try:
-                await solar_charge_controller.run_all(ev_devices)
+                await solar_charge_controller.run_all(ev_devices, battery_devices=battery_devices)
             except Exception as e:
                 logger.error(f"❌ Error during EV solar charge controller: {e}", exc_info=True)
 

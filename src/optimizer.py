@@ -196,6 +196,24 @@ class HeatpumpOptimizer:
             WP_BLOCK_HOURS = wp_device.block_hours if wp_device.block_hours is not None else 1.0
             WP_MIN_GAP_HOURS = wp_device.min_gap_hours if wp_device.min_gap_hours is not None else 3.0
             WP_MAX_GAP_HOURS = wp_device.max_gap_hours if wp_device.max_gap_hours is not None else 8.0
+
+            # ── Temperature-based optimization disable check ──────────────────────
+            if (wp_device.disable_optimization_above_avg_temp is not None
+                    and wp_device.outside_temp_sensor):
+                avg_temp = await self.ha_client.get_avg_temperature_48h(wp_device.outside_temp_sensor)
+                if avg_temp is not None and avg_temp > wp_device.disable_optimization_above_avg_temp:
+                    logger.info(
+                        f"🌡️ {device_name}: Skipping optimization — 48h average outside temperature "
+                        f"({avg_temp:.1f}°C) exceeds threshold ({wp_device.disable_optimization_above_avg_temp}°C)"
+                    )
+                    results[device_name] = []
+                    continue
+                elif avg_temp is not None:
+                    logger.info(
+                        f"🌡️ {device_name}: 48h average outside temperature {avg_temp:.1f}°C "
+                        f"— below threshold ({wp_device.disable_optimization_above_avg_temp}°C), optimization enabled"
+                    )
+            # ─────────────────────────────────────────────────────────────────────
             
             # Calculate expected daily runtime from historical data
             expected_daily_runtime = None
@@ -389,6 +407,9 @@ class HeatpumpOptimizer:
         
         logger.info(f"✅ Optimization complete. Schedule saved to TinyDB.")
         
+        # Calculate and cache production & consumption predictions (full ML run)
+        await self._calculate_and_cache_predictions()
+        
         # Run initial battery cycle limiting based on current SOC
         await self.recalculate_battery_limits()
         
@@ -432,8 +453,8 @@ class HeatpumpOptimizer:
         # Compare total predicted solar production vs total predicted power usage.
         # When solar exceeds usage, there is enough renewable energy to cover all needs,
         # so battery grid-charging and discharging should be suspended.
-        predicted_usage = await self._get_predicted_usage(slot_minutes)
-        predicted_solar = await self._get_predicted_solar(slot_minutes)
+        predicted_usage = Prediction.get_cached_usage(slot_minutes)
+        predicted_solar = Prediction.get_cached_solar(slot_minutes)
 
         solar_only_mode = False
         if predicted_solar and predicted_usage:
@@ -622,53 +643,28 @@ class HeatpumpOptimizer:
             times, device_key, horizon_start.date(), horizon_start, block_minutes=slot_minutes
         ) if times else []
 
-    async def _get_predicted_usage(self, slot_minutes):
-        """Get predicted power usage interpolated to slot_minutes intervals."""
+    async def _calculate_and_cache_predictions(self):
+        """Run full ML predictions for power usage and solar production, writing results to TinyDB.
+        
+        Called by run_optimization() on startup and at 16:05. The resulting cache is then
+        consumed by _get_predicted_usage() and _get_predicted_solar() during subsequent
+        recalculate_battery_limits() calls, avoiding repeated API and ML overhead.
+        """
+        logger.info("🤖 Calculating and caching production & consumption predictions...")
+        
+        access_token = self.ha_client.get_access_token()
+        stats_loader = StatisticsLoader(access_token)
+        weather = Weather(access_token)
+        predictor = Prediction(stats_loader, weather, self.price_history_manager)
+        
         try:
-            access_token = self.ha_client.get_access_token()
-            stats_loader = StatisticsLoader(access_token)
-            weather = Weather(access_token)
-            predictor = Prediction(stats_loader, weather, self.price_history_manager)
-            
-            predicted_df = await predictor.calculatePowerUsage()
-            if predicted_df is not None and len(predicted_df) > 0:
-                # Interpolate hourly predictions to slot_minutes intervals
-                # Only keep predicted_kwh to avoid interpolation errors on non-numeric columns (e.g. date)
-                predicted_df = predicted_df[['timestamp', 'predicted_kwh']].set_index('timestamp')
-                predicted_df = predicted_df.resample(f'{slot_minutes}min').interpolate(method='linear')
-                predicted_df = predicted_df.reset_index()
-                
-                # Convert from kWh per hour to kWh per slot
-                predicted_df['predicted_kwh'] = predicted_df['predicted_kwh'] * (slot_minutes / 60)
-                
-                usage = predicted_df[['timestamp', 'predicted_kwh']].to_dict('records')
-                logger.debug(f"🔋 Retrieved {len(usage)} {slot_minutes}-min slots of predicted power usage")
-                return usage
+            await predictor.calculatePowerUsage()
+            logger.info("✅ Power usage predictions cached")
         except Exception as e:
-            logger.warning(f"⚠️ Could not get predicted power usage: {e}")
-        return None
-
-    async def _get_predicted_solar(self, slot_minutes):
-        """Get predicted solar production interpolated to slot_minutes intervals."""
+            logger.warning(f"⚠️ Could not calculate power usage predictions: {e}")
+        
         try:
-            access_token = self.ha_client.get_access_token()
-            stats_loader = StatisticsLoader(access_token)
-            weather = Weather(access_token)
-            predictor = Prediction(stats_loader, weather, self.price_history_manager)
-
-            predicted_df = await predictor.calculateSolarProduction()
-            if predicted_df is not None and len(predicted_df) > 0:
-                # Interpolate hourly predictions to slot_minutes intervals
-                predicted_df = predicted_df[['timestamp', 'predicted_kwh']].set_index('timestamp')
-                predicted_df = predicted_df.resample(f'{slot_minutes}min').interpolate(method='linear')
-                predicted_df = predicted_df.reset_index()
-
-                # Convert from kWh per hour to kWh per slot
-                predicted_df['predicted_kwh'] = predicted_df['predicted_kwh'] * (slot_minutes / 60)
-
-                solar = predicted_df[['timestamp', 'predicted_kwh']].to_dict('records')
-                logger.debug(f"☀️ Retrieved {len(solar)} {slot_minutes}-min slots of predicted solar production")
-                return solar
+            await predictor.calculateSolarProduction()
+            logger.info("✅ Solar production predictions cached")
         except Exception as e:
-            logger.warning(f"⚠️ Could not get predicted solar production: {e}")
-        return None
+            logger.warning(f"⚠️ Could not calculate solar production predictions: {e}")
