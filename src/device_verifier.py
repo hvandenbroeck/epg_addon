@@ -20,6 +20,15 @@ from .config import CONFIG
 
 logger = logging.getLogger(__name__)
 
+# Maps schedule device-name suffix → (action_type, start_attr, stop_attr on Device model).
+# Longer suffixes must come first so the first-match wins correctly.
+_BATTERY_SUFFIXES = {
+    '_block_grid_export': ('block_grid_export', 'block_grid_export_start', 'block_grid_export_stop'),
+    '_solar_only':        ('solar_only',        'solar_only_start',        'solar_only_stop'),
+    '_discharge':         ('discharge',         'discharge_start',         'discharge_stop'),
+    '_charge':            ('charge',            'charge_start',            'charge_stop'),
+}
+
 
 class DeviceVerifier:
     """Verifies device states and retries actions if devices are not in the expected state."""
@@ -221,37 +230,23 @@ class DeviceVerifier:
         """Verify all actions for a device are in the expected state.
         
         Args:
-            device: Device name (e.g., 'wp', 'hw', 'ev1', 'battery_charge', 'battery_discharge')
-            action_label: Action to verify ('start', 'stop', 'charge_start', 'charge_stop', 'discharge_start', 'discharge_stop')
+            device: Device name (e.g., 'wp', 'hw', 'battery_charge', 'battery_solar_only')
+            action_label: Action to verify ('start' or 'stop')
             context: Optional context for expression evaluation
             
         Returns:
             bool: True if all verifications passed, False if any failed
         """
-        # Handle battery charge/discharge entries (e.g., "battery_charge", "battery_discharge")
-        is_battery_charge = device.endswith('_charge')
-        is_battery_discharge = device.endswith('_discharge')
-        
-        if is_battery_charge or is_battery_discharge:
-            # Extract the actual device name (e.g., "battery" from "battery_charge")
-            base_device_name = device.rsplit('_', 1)[0]
+        suffix = next((s for s in _BATTERY_SUFFIXES if device.endswith(s)), None)
+
+        if suffix:
+            base_device_name = device[:-len(suffix)]
             device_obj = self.devices_config.get_device_by_name(base_device_name)
             if not device_obj:
                 logger.warning(f"No config found for battery device '{base_device_name}'")
                 return True
-            
-            # Get the battery-specific action set
-            if is_battery_charge:
-                if action_label == "start":
-                    action_set = device_obj.charge_start
-                else:
-                    action_set = device_obj.charge_stop
-            else:  # is_battery_discharge
-                if action_label == "start":
-                    action_set = device_obj.discharge_start
-                else:
-                    action_set = device_obj.discharge_stop
-            
+            _, start_attr, stop_attr = _BATTERY_SUFFIXES[suffix]
+            action_set = getattr(device_obj, start_attr if action_label == "start" else stop_attr, None)
             if not action_set:
                 logger.warning(f"No {action_label} action set for battery device '{device}'")
                 return True
@@ -261,8 +256,6 @@ class DeviceVerifier:
             if not device_obj:
                 logger.warning(f"No config found for device '{device}'")
                 return True
-            
-            # Get the action (start or stop)
             action_set = device_obj.start if action_label == "start" else device_obj.stop
         
         all_passed = True
@@ -346,7 +339,7 @@ class DeviceVerifier:
         """Run a single verification check for a device.
         
         Args:
-            device: Device identifier (e.g., 'wp', 'battery_charge')
+            device: Device identifier (e.g., 'wp', 'battery_charge', 'battery_solar_only')
             action_label: Action label ('start' or 'stop')
             context: Optional context for expression evaluation
             check_number: Which verification check this is (1-6)
@@ -357,38 +350,20 @@ class DeviceVerifier:
         
         if not is_correct:
             logger.warning(f"⚠️ Device {device} not in expected {action_label} state, retrying action...")
-            
-            # Handle battery charge/discharge entries
-            is_battery_charge = device.endswith('_charge')
-            is_battery_discharge = device.endswith('_discharge')
-            
-            if is_battery_charge or is_battery_discharge:
-                base_device_name = device.rsplit('_', 1)[0]
-                device_obj = self.devices_config.get_device_by_name(base_device_name)
-                if device_obj:
-                    if is_battery_charge:
-                        action_set = device_obj.charge_start if action_label == "start" else device_obj.charge_stop
-                    else:
-                        action_set = device_obj.discharge_start if action_label == "start" else device_obj.discharge_stop
-                    if action_set:
-                        action_config = action_set.model_dump(exclude_none=True)
-                        await self.devices.execute_device_action(base_device_name, action_config, action_label, context=context, skip_verification=True)
-            else:
-                device_obj = self.devices_config.get_device_by_name(device)
-                if device_obj:
-                    action_set = device_obj.start if action_label == "start" else device_obj.stop
-                    action_config = action_set.model_dump(exclude_none=True)
-                    await self.devices.execute_device_action(device, action_config, action_label, context=context, skip_verification=True)
+            action_set = self._get_action_set(device, action_label)
+            base_device_name = self._get_base_device_name(device)
+            if action_set:
+                action_config = action_set.model_dump(exclude_none=True)
+                await self.devices.execute_device_action(base_device_name, action_config, action_label, context=context, skip_verification=True)
         else:
             logger.info(f"✅ Device {device} verified in correct {action_label} state (check #{check_number}), cancelling remaining checks")
             # Cancel remaining verification jobs for this device
             self._cancel_verification_jobs(device)
 
     def _get_base_device_name(self, device: str) -> str:
-        """Return the base device name, stripping any '_charge' or '_discharge' suffix."""
-        if device.endswith('_charge') or device.endswith('_discharge'):
-            return device.rsplit('_', 1)[0]
-        return device
+        """Return the base device name, stripping any known battery suffix."""
+        suffix = next((s for s in _BATTERY_SUFFIXES if device.endswith(s)), None)
+        return device[:-len(suffix)] if suffix else device
 
     def _is_known_device(self, device: str) -> bool:
         """Return True if the device (or its battery base name) is found in the config."""
@@ -396,14 +371,14 @@ class DeviceVerifier:
 
     def _get_action_set(self, device: str, action_label: str) -> Optional[ActionSet]:
         """Return the ActionSet for the given device and action label, or None."""
-        base_name = self._get_base_device_name(device)
+        suffix = next((s for s in _BATTERY_SUFFIXES if device.endswith(s)), None)
+        base_name = device[:-len(suffix)] if suffix else device
         device_obj = self.devices_config.get_device_by_name(base_name)
         if not device_obj:
             return None
-        if device.endswith('_charge'):
-            return device_obj.charge_start if action_label == "start" else device_obj.charge_stop
-        if device.endswith('_discharge'):
-            return device_obj.discharge_start if action_label == "start" else device_obj.discharge_stop
+        if suffix:
+            _, start_attr, stop_attr = _BATTERY_SUFFIXES[suffix]
+            return getattr(device_obj, start_attr if action_label == "start" else stop_attr, None)
         return device_obj.start if action_label == "start" else device_obj.stop
 
     async def run_periodic_verification(self):

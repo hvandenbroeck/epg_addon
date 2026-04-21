@@ -64,33 +64,27 @@ class Scheduler:
                 logger.error(f"❌ Invalid datetime in schedule: {e}")
                 continue
 
-            # Handle battery charge/discharge/solar_only entries
-            # e.g., "battery_charge", "battery_discharge", "battery_solar_only"
-            is_battery_charge = device.endswith('_charge')
-            is_battery_discharge = device.endswith('_discharge')
-            is_battery_solar_only = device.endswith('_solar_only')
-            
-            if is_battery_charge or is_battery_discharge or is_battery_solar_only:
-                # Extract the actual device name (e.g., "battery" from "battery_charge")
-                base_device_name = device.rsplit('_', 1)[0]
+            # Handle battery typed entries: suffix identifies action type and config attributes
+            # Order matters — longer suffixes must be checked before shorter overlapping ones
+            BATTERY_SUFFIXES = {
+                '_block_grid_export': ('block_grid_export', 'block_grid_export_start', 'block_grid_export_stop'),
+                '_solar_only':        ('solar_only',        'solar_only_start',        'solar_only_stop'),
+                '_discharge':         ('discharge',         'discharge_start',         'discharge_stop'),
+                '_charge':            ('charge',            'charge_start',            'charge_stop'),
+            }
+            matched_suffix = next((s for s in BATTERY_SUFFIXES if device.endswith(s)), None)
+
+            if matched_suffix:
+                action_type, start_attr, stop_attr = BATTERY_SUFFIXES[matched_suffix]
+                base_device_name = device[:-len(matched_suffix)]
                 cfg = self.devices.get_device_config(base_device_name)
                 if not cfg:
                     logger.warning(f"⚠️ No config for battery device '{base_device_name}'")
                     continue
-                
-                # Use battery-specific actions
-                if is_battery_charge:
-                    start_actions = cfg.charge_start.model_dump(exclude_none=True) if cfg.charge_start else {}
-                    stop_actions = cfg.charge_stop.model_dump(exclude_none=True) if cfg.charge_stop else {}
-                    action_type = "charge"
-                elif is_battery_solar_only:
-                    start_actions = cfg.solar_only_start.model_dump(exclude_none=True) if cfg.solar_only_start else {}
-                    stop_actions = cfg.solar_only_stop.model_dump(exclude_none=True) if cfg.solar_only_stop else {}
-                    action_type = "solar_only"
-                else:
-                    start_actions = cfg.discharge_start.model_dump(exclude_none=True) if cfg.discharge_start else {}
-                    stop_actions = cfg.discharge_stop.model_dump(exclude_none=True) if cfg.discharge_stop else {}
-                    action_type = "discharge"
+                start_actions = getattr(cfg, start_attr, None)
+                start_actions = start_actions.model_dump(exclude_none=True) if start_actions else {}
+                stop_actions = getattr(cfg, stop_attr, None)
+                stop_actions = stop_actions.model_dump(exclude_none=True) if stop_actions else {}
             else:
                 # Standard device handling (wp, hw, ev)
                 cfg = self.devices.get_device_config(device)

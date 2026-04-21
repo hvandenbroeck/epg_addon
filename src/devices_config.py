@@ -79,6 +79,9 @@ class Device(BaseModel):
     discharge_stop: Optional[ActionSet] = None
     solar_only_start: Optional[ActionSet] = None
     solar_only_stop: Optional[ActionSet] = None
+    block_grid_export_start: Optional[ActionSet] = None
+    block_grid_export_stop: Optional[ActionSet] = None
+    price_based_solar_grid_export: bool = Field(default=False, description="Block solar grid export during negative-price slots")
     # Battery-specific configuration (only used when type='battery')
     battery_soc_entity: Optional[str] = Field(default=None, description="Home Assistant entity for battery state of charge (%)")
     battery_capacity_kwh: Optional[float] = Field(default=None, description="Battery capacity in kWh")
@@ -255,12 +258,12 @@ def load_default_config() -> DevicesConfig:
                 EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=50),
             ]),
             solar_only_start=ActionSet(entity=[
-                EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=90),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=90),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=90),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=90),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=90),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=90),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=15),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=15),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=15),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=15),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=15),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=15),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog1_charge", option="No Grid or Gen"),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog2_charge", option="No Grid or Gen"),
                 EntityAction(service="select/select_option", entity_id="select.deye_prog3_charge", option="No Grid or Gen"),
@@ -275,7 +278,14 @@ def load_default_config() -> DevicesConfig:
                 EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=50),
                 EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=50),
                 EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=50),
-            ])
+            ]),
+            block_grid_export_start=ActionSet(entity=[
+                EntityAction(service="switch/turn_off", entity_id="switch.deye_solar_export"),
+            ]),
+            block_grid_export_stop=ActionSet(entity=[
+                EntityAction(service="switch/turn_on", entity_id="switch.deye_solar_export"),
+            ]),
+            price_based_solar_grid_export=True
         ),
         Device(
             name="ev",

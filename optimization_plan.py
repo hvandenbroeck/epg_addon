@@ -212,7 +212,7 @@ async def main():
             misfire_grace_time=60,
             id='periodic_verification'
         )
-        logger.info("Periodic device verification scheduled to run every 5 minutes (Europe/Brussels)")
+        logger.info("Periodic device verification scheduled ...")
     else:
         logger.info("Periodic device verification is DISABLED by config.")
     # Note: Post-action verification jobs are scheduled dynamically by DeviceVerifier

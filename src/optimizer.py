@@ -335,6 +335,16 @@ class HeatpumpOptimizer:
             results[f"{device_name}_charge"] = bat_charge_times
             results[f"{device_name}_discharge"] = bat_discharge_times
 
+            # Compute export-blocking slots for negative-price periods
+            if bat_device.price_based_solar_grid_export:
+                block_grid_export_times = [
+                    slot_to_time(i, slot_minutes)
+                    for i, price in enumerate(prices)
+                    if price < 0
+                ]
+                results[f"{device_name}_block_grid_export"] = block_grid_export_times
+                logger.info(f"☀️ {device_name}: {len(block_grid_export_times)} slot(s) with negative prices → grid export will be blocked")
+
         # ===== EV OPTIMIZATION (iterate over all EV devices) =====
         ev_devices = devices_config.get_devices_by_type('ev')
         for ev_device in ev_devices:
@@ -358,6 +368,8 @@ class HeatpumpOptimizer:
                 # Battery has separate charge and discharge entries
                 device_block_minutes[f"{device.name}_charge"] = slot_minutes  # Single slot
                 device_block_minutes[f"{device.name}_discharge"] = slot_minutes  # Single slot
+                if device.price_based_solar_grid_export:
+                    device_block_minutes[f"{device.name}_block_grid_export"] = slot_minutes  # Single slot
             elif device.type == 'ev':
                 device_block_minutes[device.name] = slot_minutes  # Single slot
         
