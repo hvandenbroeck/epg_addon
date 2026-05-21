@@ -100,6 +100,11 @@ class Device(BaseModel):
     disable_optimization_above_avg_temp: Optional[float] = Field(default=None, description="Disable WP optimization when 48h average outside temperature exceeds this value (°C). None means always optimize.")
     # EV-specific options (only used when type='ev')
     solar_charge_only: bool = Field(default=False, description="When True, the EV charger is controlled by solar surplus only; price-based scheduling and the load watcher are bypassed")
+    ev_min_current_limit: float = Field(default=6.0, description="Minimum EV charging current in Amps")
+    ev_max_current_limit: float = Field(default=16.0, description="Maximum EV charging current in Amps")
+    ev_voltage_entity_l1: Optional[str] = Field(default=None, description="HA entity for L1 phase voltage (V). Defaults to 230 V if unset.")
+    ev_voltage_entity_l2: Optional[str] = Field(default=None, description="HA entity for L2 phase voltage (V). Defaults to 230 V if unset.")
+    ev_voltage_entity_l3: Optional[str] = Field(default=None, description="HA entity for L3 phase voltage (V). Defaults to 230 V if unset.")
 
 class DevicesConfig(BaseSettings):
     """Main devices configuration."""
@@ -162,7 +167,7 @@ def load_default_config() -> DevicesConfig:
             type="wp",
             #inside_temp_sensor="sensor.ebusd_700_z2roomtemp",
             outside_temp_sensor="sensor.ebusd_700_displayedoutsidetemp",
-            disable_optimization_above_avg_temp=14.0,
+            disable_optimization_above_avg_temp=10.0,
             #heatpump_status_sensor="sensor.ebusd_700_hc2pumpstatus_2",
             enable_load_management=False,
             start=ActionSet(mqtt=[
@@ -285,13 +290,18 @@ def load_default_config() -> DevicesConfig:
             block_grid_export_stop=ActionSet(entity=[
                 EntityAction(service="switch/turn_on", entity_id="switch.deye_solar_export"),
             ]),
-            price_based_solar_grid_export=True
+            price_based_solar_grid_export=False
         ),
         Device(
             name="ev",
             type="ev",
             solar_charge_only=True,
             enable_load_management=True,
+            ev_min_current_limit=6.0,
+            ev_max_current_limit=16.0,
+            ev_voltage_entity_l1="sensor.peblar_ev_charger_spanning_fase_1",
+            ev_voltage_entity_l2="sensor.peblar_ev_charger_spanning_fase_2",
+            ev_voltage_entity_l3="sensor.peblar_ev_charger_spanning_fase_3",
             load_management=LoadManagement(
                 instantaneous_load_entity="sensor.peblar_ev_charger_vermogen",
                 instantaneous_load_entity_unit="W",

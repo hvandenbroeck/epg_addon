@@ -9,7 +9,7 @@ from src.optimizer import HeatpumpOptimizer
 from src.load_watcher import LoadWatcher
 from src.device_verifier import DeviceVerifier
 from src.devices import Devices
-from src.optimization import EvSolarChargeController
+from src.devices import EvSolarChargeController
 from src.devices_config import devices_config
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR

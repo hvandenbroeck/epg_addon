@@ -1,8 +1,8 @@
 import logging
 import aiohttp
-from .devices_config import devices_config
-from .utils import ensure_list, evaluate_expression
-from .config import CONFIG
+from ..devices_config import devices_config
+from ..utils import ensure_list, evaluate_expression
+from ..config import CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ class Devices:
     @classmethod
     def set_verifier(cls, verifier):
         """Set the device verifier instance for action tracking.
-        
+
         Args:
             verifier: DeviceVerifier instance
         """
@@ -32,11 +32,11 @@ class Devices:
 
     async def call_service(self, service, **service_data):
         """Call a Home Assistant service.
-        
+
         Args:
             service: Service in format 'domain/service_name'
             **service_data: Service parameters
-            
+
         Returns:
             bool: True if service call was successful
         """
@@ -48,29 +48,29 @@ class Devices:
 
     def get_device(self, device_name):
         """Get device configuration by name.
-        
+
         Args:
             device_name: Name of the device
-            
+
         Returns:
             Device object or None if not found
         """
         return self.devices_config.get_device_by_name(device_name)
-    
+
     def get_devices_by_type(self, device_type):
         """Get all devices of a specific type.
-        
+
         Args:
             device_type: Type of device ('wp', 'hw', 'battery', 'ev')
-            
+
         Returns:
             List of Device objects
         """
         return self.devices_config.get_devices_by_type(device_type)
-    
+
     async def execute_device_action(self, device_name, actions, action_label, scheduled_time=None, context=None, skip_verification=False):
         """Execute MQTT and entity actions for a device.
-        
+
         Args:
             device_name: Device name (unique identifier, e.g., 'wp', 'hw', 'ev1', 'ev2')
             actions: Dictionary containing mqtt and entity actions
@@ -81,11 +81,11 @@ class Devices:
         """
         time_info = f" at {scheduled_time}" if scheduled_time else ""
         logger.info(f"🔄 Executing {device_name.upper()} {action_label.upper()}{time_info}")
-        
+
         # Default context if not provided
         if context is None:
             context = {}
-        
+
         # Handle MQTT actions
         mqtt_actions = ensure_list(actions.get("mqtt", []))
         for msg in mqtt_actions:
@@ -122,10 +122,10 @@ class Devices:
 
     def get_device_config(self, device_name):
         """Get configuration for a specific device.
-        
+
         Args:
             device_name: Device name/identifier
-            
+
         Returns:
             Device: Device object or None if not found
         """

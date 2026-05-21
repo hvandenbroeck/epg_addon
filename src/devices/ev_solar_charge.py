@@ -4,15 +4,12 @@ Manages EV charging based on available solar power production, with automatic
 phase switching between single-phase and three-phase charging.
 """
 import logging
-from math import sqrt
 from typing import Optional
 
 from ..config import CONFIG
+from .ev_charger import EvCharger
 
 logger = logging.getLogger(__name__)
-
-_VOLTAGE_SINGLE_PHASE = 230.0           # V (line-to-neutral)
-_VOLTAGE_THREE_PHASE = 400.0 * sqrt(3)  # I = P / (√3 × 400V) ≈ 692.8 V
 
 
 def _get_solar_charge_config() -> dict:
@@ -24,7 +21,6 @@ def _get_solar_charge_config() -> dict:
         'consumption_l1': opts.get('consumption_phase_l1_entity'),
         'consumption_l2': opts.get('consumption_phase_l2_entity'),
         'consumption_l3': opts.get('consumption_phase_l3_entity'),
-        'phase_switch_threshold_power': opts.get('phase_switch_threshold_power', 4000.0),
         'minimum_ev_charging_power': opts.get('minimum_charging_power', 1380.0),
     }
 
@@ -38,6 +34,8 @@ class EvSolarChargeController:
     def __init__(self, get_state_func, devices_instance):
         self.get_state = get_state_func
         self.devices = devices_instance
+        self.ev_charger = EvCharger(get_state_func, devices_instance)
+        self._device_state: dict[str, Optional[tuple[bool, float]]] = {}
 
     async def run_all(self, ev_devices, battery_devices=None):
         """Run controller for every EV device with ``solar_charge_only=True``."""
@@ -68,7 +66,7 @@ class EvSolarChargeController:
             total_production = sum(production)
             total_consumption = sum(consumption)
 
-            ev_load_watts = await self._get_ev_load_watts(ev_device)
+            ev_load_watts, ev_currently_charging = await self._read_ev_load(ev_device)
             effective_production = total_production + ev_load_watts
 
             battery_discharge_watts = await self._get_battery_discharge_watts(battery_devices)
@@ -90,8 +88,6 @@ class EvSolarChargeController:
             )
 
             min_power = solar_cfg['minimum_ev_charging_power']
-            phase_threshold = solar_cfg['phase_switch_threshold_power']
-            ev_currently_charging = await self._is_ev_charging(ev_device)
 
             if total_surplus < min_power:
                 logger.info(
@@ -103,55 +99,17 @@ class EvSolarChargeController:
                         actions=ev_device.stop.model_dump(exclude_none=True),
                         action_label="stop",
                     )
+                self._device_state.pop(device_name, None)
                 return
-
-            use_three_phase = total_surplus >= phase_threshold
-            if use_three_phase:
-                phase_voltage = _VOLTAGE_THREE_PHASE
-                three_phase, single_phase = 1, 0
-                logger.info(f"☀️ {device_name}: {total_surplus:.0f}W ≥ {phase_threshold:.0f}W → THREE-phase charging")
-            else:
-                phase_voltage = _VOLTAGE_SINGLE_PHASE
-                three_phase, single_phase = 0, 1
-                logger.info(f"☀️ {device_name}: {total_surplus:.0f}W < {phase_threshold:.0f}W → SINGLE-phase charging")
-
-            limit_amps = total_surplus / phase_voltage
-            context = {
-                "limit_watts": total_surplus,
-                "limit_amps": limit_amps,
-                "three_phase": three_phase,
-                "single_phase": single_phase,
-            }
-
-            logger.info(
-                f"☀️ {device_name}: Applying limit {total_surplus:.0f}W / {limit_amps:.1f}A "
-                f"({'3-phase' if use_three_phase else '1-phase'})"
-            )
 
             load_mgmt = ev_device.load_management
             if not load_mgmt or not load_mgmt.apply_limit_actions:
                 logger.warning(f"☀️ {device_name}: No load_management or apply_limit_actions configured")
                 return
 
-            apply_actions = load_mgmt.apply_limit_actions
-
-            if load_mgmt.automated_phase_switching:
-                if use_three_phase and apply_actions.switch_to_three_phase:
-                    logger.info(f"☀️ {device_name}: Executing switch_to_three_phase action")
-                    await self.devices.execute_device_action(
-                        device_name=device_name,
-                        actions=apply_actions.switch_to_three_phase.model_dump(exclude_none=True),
-                        action_label="switch_to_three_phase",
-                        context=context,
-                    )
-                elif not use_three_phase and apply_actions.switch_to_single_phase:
-                    logger.info(f"☀️ {device_name}: Executing switch_to_single_phase action")
-                    await self.devices.execute_device_action(
-                        device_name=device_name,
-                        actions=apply_actions.switch_to_single_phase.model_dump(exclude_none=True),
-                        action_label="switch_to_single_phase",
-                        context=context,
-                    )
+            min_amps = ev_device.ev_min_current_limit
+            max_amps = ev_device.ev_max_current_limit
+            phase_switching = load_mgmt.automated_phase_switching
 
             if not ev_currently_charging:
                 logger.info(
@@ -164,13 +122,46 @@ class EvSolarChargeController:
                     action_label="start",
                 )
 
-            if apply_actions.apply_limit:
-                await self.devices.execute_device_action(
-                    device_name=device_name,
-                    actions=apply_actions.apply_limit.model_dump(exclude_none=True),
-                    action_label=f"solar_limit_{int(total_surplus)}W",
-                    context=context,
-                )
+            is_three_phase, current_amps = self._device_state.get(device_name) or (False, min_amps)
+            voltages = await self.ev_charger.get_phase_voltages(ev_device)
+            current_power = EvCharger.compute_power(is_three_phase, current_amps, voltages)
+
+            if current_power < total_surplus:
+                # Step up until we reach or exceed surplus (round up so the inverter
+                # can always increase output when more solar is available).
+                while True:
+                    higher_power = self.ev_charger.get_higher_level_power(
+                        is_three_phase, current_amps, voltages, min_amps, max_amps, phase_switching
+                    )
+                    if higher_power is None:
+                        break  # Already at maximum
+                    new_state = await self.ev_charger.set_higher_level_power(ev_device, is_three_phase, current_amps)
+                    if new_state is None:
+                        break
+                    is_three_phase, current_amps = new_state
+                    current_power = higher_power
+                    if current_power >= total_surplus:
+                        break  # First level at or above surplus – round-up target reached
+            elif current_power > total_surplus:
+                # Step down only while the next level would still be at or above surplus,
+                # keeping the limit rounded up.
+                while True:
+                    lower_power = self.ev_charger.get_lower_level_power(
+                        is_three_phase, current_amps, voltages, min_amps, max_amps, phase_switching
+                    )
+                    if lower_power is None or lower_power < total_surplus:
+                        break  # At minimum or next step would drop below surplus – stay here
+                    new_state = await self.ev_charger.set_lower_level_power(ev_device, is_three_phase, current_amps)
+                    if new_state is None:
+                        break
+                    is_three_phase, current_amps = new_state
+                    current_power = lower_power
+
+            logger.info(
+                f"☀️ {device_name}: Limit settled at "
+                f"{'3-phase' if is_three_phase else '1-phase'} {current_amps:.0f}A ({current_power:.0f}W)"
+            )
+            self._device_state[device_name] = (is_three_phase, current_amps)
 
         except Exception as e:
             logger.error(f"☀️ {device_name}: Unhandled error in solar charge controller: {e}", exc_info=True)
@@ -201,11 +192,14 @@ class EvSolarChargeController:
             results.append(watts if watts is not None else 0.0)
         return tuple(results)
 
-    async def _is_ev_charging(self, ev_device) -> bool:
-        """Return True if the EV charger is currently drawing power."""
+    async def _read_ev_load(self, ev_device) -> tuple[float, bool]:
+        """Read the EV charger's current power draw in one HA call.
+
+        Returns (load_watts, is_charging) where load_watts is always non-negative.
+        """
         load_mgmt = ev_device.load_management
         if not load_mgmt or not load_mgmt.instantaneous_load_entity:
-            return False
+            return 0.0, False
 
         raw = await self._read_watts(load_mgmt.instantaneous_load_entity, load_mgmt.instantaneous_load_entity_unit)
         if raw is None:
@@ -213,18 +207,11 @@ class EvSolarChargeController:
                 f"☀️ {ev_device.name}: Cannot read load from "
                 f"{load_mgmt.instantaneous_load_entity} – assuming not charging"
             )
-            return False
+            return 0.0, False
 
         threshold = CONFIG.get('options', {}).get('load_watcher_threshold_power', 10.0)
-        return raw < -threshold if load_mgmt.charge_sign == 'negative' else raw > threshold
-
-    async def _get_ev_load_watts(self, ev_device) -> float:
-        """Return current EV charger power draw in watts (absolute value)."""
-        load_mgmt = ev_device.load_management
-        if not load_mgmt or not load_mgmt.instantaneous_load_entity:
-            return 0.0
-        raw = await self._read_watts(load_mgmt.instantaneous_load_entity, load_mgmt.instantaneous_load_entity_unit)
-        return abs(raw) if raw is not None else 0.0
+        is_charging = raw < -threshold if load_mgmt.charge_sign == 'negative' else raw > threshold
+        return abs(raw), is_charging
 
     async def _get_battery_discharge_watts(self, battery_devices) -> float:
         """Return total power currently discharged by all batteries in watts."""
