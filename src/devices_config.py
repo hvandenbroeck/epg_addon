@@ -82,6 +82,7 @@ class Device(BaseModel):
     block_grid_export_start: Optional[ActionSet] = None
     block_grid_export_stop: Optional[ActionSet] = None
     price_based_solar_grid_export: bool = Field(default=False, description="Block solar grid export during negative-price slots")
+    grid_export_block_threshold: float = Field(default=0.0, description="Block grid export when price is below this threshold (€/kWh). Default 0 blocks only at negative prices.")
     # Battery-specific configuration (only used when type='battery')
     battery_soc_entity: Optional[str] = Field(default=None, description="Home Assistant entity for battery state of charge (%)")
     battery_capacity_kwh: Optional[float] = Field(default=None, description="Battery capacity in kWh")
@@ -290,7 +291,8 @@ def load_default_config() -> DevicesConfig:
             block_grid_export_stop=ActionSet(entity=[
                 EntityAction(service="switch/turn_on", entity_id="switch.deye_solar_export"),
             ]),
-            price_based_solar_grid_export=False
+            price_based_solar_grid_export=True,
+            grid_export_block_threshold=0.015
         ),
         Device(
             name="ev",

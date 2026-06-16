@@ -337,13 +337,14 @@ class HeatpumpOptimizer:
 
             # Compute export-blocking slots for negative-price periods
             if bat_device.price_based_solar_grid_export:
+                threshold = bat_device.grid_export_block_threshold
                 block_grid_export_times = [
                     slot_to_time(i, slot_minutes)
                     for i, price in enumerate(prices)
-                    if price < 0
+                    if price < threshold
                 ]
                 results[f"{device_name}_block_grid_export"] = block_grid_export_times
-                logger.info(f"☀️ {device_name}: {len(block_grid_export_times)} slot(s) with negative prices → grid export will be blocked")
+                logger.info(f"☀️ {device_name}: {len(block_grid_export_times)} slot(s) below {threshold} €/kWh → grid export will be blocked")
 
         # ===== EV OPTIMIZATION (iterate over all EV devices) =====
         ev_devices = devices_config.get_devices_by_type('ev')
