@@ -1,7 +1,7 @@
 """EV Charger helpers.
 
 Fine-grained current-limit control for EV chargers, with automatic phase switching
-at the boundaries (1-phase max → 3-phase min, and 3-phase min → 1-phase max).
+at the boundaries (1-phase max -> 3-phase min, and 3-phase min -> 1-phase max).
 """
 import logging
 from typing import Optional
@@ -33,15 +33,15 @@ class EvCharger:
             return _DEFAULT_VOLTAGE
         state = await self.get_state(entity_id)
         if not state or state.get("state") in ("unavailable", "unknown", None):
-            logger.warning(f"⚡ Cannot read voltage from {entity_id} – using {_DEFAULT_VOLTAGE} V")
+            logger.warning(f"⚡ Cannot read voltage from {entity_id} - using {_DEFAULT_VOLTAGE} V")
             return _DEFAULT_VOLTAGE
         try:
             return float(state["state"])
         except (ValueError, TypeError):
-            logger.warning(f"⚡ Unparseable voltage from {entity_id} – using {_DEFAULT_VOLTAGE} V")
+            logger.warning(f"⚡ Unparseable voltage from {entity_id} - using {_DEFAULT_VOLTAGE} V")
             return _DEFAULT_VOLTAGE
 
-    async def get_phase_voltages(self, ev_device) -> tuple[float, float, float]:
+    async def get_phase_voltages(self, ev_device) -> tuple:
         """Return (V_L1, V_L2, V_L3), reading from the device's configured entities."""
         v1 = await self._read_voltage(ev_device.ev_voltage_entity_l1)
         v2 = await self._read_voltage(ev_device.ev_voltage_entity_l2)
@@ -49,10 +49,10 @@ class EvCharger:
         return (v1, v2, v3)
 
     @staticmethod
-    def compute_power(is_three_phase: bool, amps: float, voltages: tuple[float, float, float]) -> float:
+    def compute_power(is_three_phase: bool, amps: float, voltages: tuple) -> float:
         """Return watts for the given phase mode and current.
 
-        1-phase uses V_L1; 3-phase sums all three phase voltages × amps.
+        1-phase uses V_L1; 3-phase sums all three phase voltages x amps.
         """
         v1, v2, v3 = voltages
         if is_three_phase:
@@ -66,7 +66,7 @@ class EvCharger:
         min_amps: float,
         max_amps: float,
         automated_phase_switching: bool,
-    ) -> Optional[tuple[bool, float]]:
+    ) -> Optional[tuple]:
         """Return (new_is_three_phase, new_amps) one level lower, or None if at minimum."""
         if is_three_phase:
             if current_amps > min_amps:
@@ -87,7 +87,7 @@ class EvCharger:
         min_amps: float,
         max_amps: float,
         automated_phase_switching: bool,
-    ) -> Optional[tuple[bool, float]]:
+    ) -> Optional[tuple]:
         """Return (new_is_three_phase, new_amps) one level higher, or None if at maximum."""
         if not is_three_phase:
             if current_amps < max_amps:
@@ -102,14 +102,14 @@ class EvCharger:
             return None
 
     # ------------------------------------------------------------------
-    # Public get functions (pure – no HA calls)
+    # Public get functions (pure - no HA calls)
     # ------------------------------------------------------------------
 
     def get_lower_level_power(
         self,
         is_three_phase: bool,
         current_amps: float,
-        voltages: tuple[float, float, float],
+        voltages: tuple,
         min_amps: float,
         max_amps: float,
         automated_phase_switching: bool,
@@ -128,7 +128,7 @@ class EvCharger:
         self,
         is_three_phase: bool,
         current_amps: float,
-        voltages: tuple[float, float, float],
+        voltages: tuple,
         min_amps: float,
         max_amps: float,
         automated_phase_switching: bool,
@@ -144,7 +144,7 @@ class EvCharger:
         return self.compute_power(new_three_phase, new_amps, voltages)
 
     # ------------------------------------------------------------------
-    # Public set functions (async – execute HA actions)
+    # Public set functions (async - execute HA actions)
     # ------------------------------------------------------------------
 
     async def set_lower_level_power(
@@ -152,7 +152,7 @@ class EvCharger:
         ev_device,
         is_three_phase: bool,
         current_amps: float,
-    ) -> Optional[tuple[bool, float]]:
+    ) -> Optional[tuple]:
         """Decrease the EV current limit by one level, switching phase if needed.
 
         Returns (new_is_three_phase, new_amps) if applied, None if already at minimum.
@@ -164,34 +164,73 @@ class EvCharger:
         ev_device,
         is_three_phase: bool,
         current_amps: float,
-    ) -> Optional[tuple[bool, float]]:
+    ) -> Optional[tuple]:
         """Increase the EV current limit by one level, switching phase if needed.
 
         Returns (new_is_three_phase, new_amps) if applied, None if already at maximum.
         """
         return await self._apply_level(ev_device, is_three_phase, current_amps, direction="higher")
 
-    async def _apply_level(self, ev_device, is_three_phase: bool, current_amps: float, direction: str) -> Optional[tuple[bool, float]]:
+    async def _apply_level(self, ev_device, is_three_phase: bool, current_amps: float, direction: str) -> Optional[tuple]:
         device_name = ev_device.name
         min_amps = ev_device.ev_min_current_limit
         max_amps = ev_device.ev_max_current_limit
-        load_mgmt = ev_device.load_management
-        phase_switching = load_mgmt.automated_phase_switching if load_mgmt else False
 
         if direction == "lower":
-            next_state = self._next_lower_state(is_three_phase, current_amps, min_amps, max_amps, phase_switching)
+            next_state = self._next_lower_state(is_three_phase, current_amps, min_amps, max_amps, self._phase_switching(ev_device))
         else:
-            next_state = self._next_higher_state(is_three_phase, current_amps, min_amps, max_amps, phase_switching)
+            next_state = self._next_higher_state(is_three_phase, current_amps, min_amps, max_amps, self._phase_switching(ev_device))
 
         if next_state is None:
             boundary = "minimum" if direction == "lower" else "maximum"
             logger.warning(
                 f"⚡ {device_name}: Already at {boundary} "
-                f"({'3-phase' if is_three_phase else '1-phase'} {current_amps:.0f} A) – no action taken"
+                f"({'3-phase' if is_three_phase else '1-phase'} {current_amps:.0f} A) - no action taken"
             )
             return None
 
         new_three_phase, new_amps = next_state
+        symbol = "↓" if direction == "lower" else "↑"
+        return await self._execute_level(ev_device, new_three_phase, new_amps, is_three_phase, symbol)
+
+    async def set_level(
+        self,
+        ev_device,
+        target_three_phase: bool,
+        target_amps: float,
+        current_three_phase: bool,
+    ) -> Optional[tuple]:
+        """Apply a specific (phase, current) limit directly, in a single action.
+
+        Unlike :meth:`set_higher_level_power` / :meth:`set_lower_level_power` this does
+        not step one level at a time - it jumps straight to ``target_amps``. Used when
+        (re)starting a charging session so the limit is pinned immediately instead of
+        letting the charger sit at its power-on default (often the hardware maximum).
+
+        ``target_amps`` is clamped to the device's [min, max] current range.
+        """
+        min_amps = ev_device.ev_min_current_limit
+        max_amps = ev_device.ev_max_current_limit
+        target_amps = float(max(min_amps, min(max_amps, round(target_amps))))
+        return await self._execute_level(ev_device, target_three_phase, target_amps, current_three_phase, "→")
+
+    @staticmethod
+    def _phase_switching(ev_device) -> bool:
+        load_mgmt = ev_device.load_management
+        return load_mgmt.automated_phase_switching if load_mgmt else False
+
+    async def _execute_level(
+        self,
+        ev_device,
+        new_three_phase: bool,
+        new_amps: float,
+        old_three_phase: bool,
+        symbol: str,
+    ) -> tuple:
+        """Execute the HA actions to switch phase (if needed) and apply a current limit."""
+        device_name = ev_device.name
+        load_mgmt = ev_device.load_management
+        phase_switching = load_mgmt.automated_phase_switching if load_mgmt else False
         voltages = await self.get_phase_voltages(ev_device)
         new_watts = self.compute_power(new_three_phase, new_amps, voltages)
 
@@ -203,7 +242,7 @@ class EvCharger:
         }
 
         logger.info(
-            f"⚡ {device_name}: {'↓' if direction == 'lower' else '↑'} "
+            f"⚡ {device_name}: {symbol} "
             f"{'3-phase' if new_three_phase else '1-phase'} {new_amps:.0f} A ({new_watts:.0f} W)"
         )
 
@@ -211,7 +250,7 @@ class EvCharger:
             apply_actions = load_mgmt.apply_limit_actions
 
             # Execute phase switch action if phase changed
-            if new_three_phase != is_three_phase and phase_switching:
+            if new_three_phase != old_three_phase and phase_switching:
                 if new_three_phase and apply_actions.switch_to_three_phase:
                     await self.devices.execute_device_action(
                         device_name=device_name,
@@ -236,6 +275,6 @@ class EvCharger:
                     context=context,
                 )
         else:
-            logger.warning(f"⚡ {device_name}: No load_management or apply_limit_actions configured – limit not applied")
+            logger.warning(f"⚡ {device_name}: No load_management or apply_limit_actions configured - limit not applied")
 
         return (new_three_phase, new_amps)

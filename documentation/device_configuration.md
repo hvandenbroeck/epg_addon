@@ -151,31 +151,35 @@ Enable by adding the following keys to `config.json` under `options`:
 
 | Option key | Type | Default | Description |
 |------------|------|---------|-------------|
-| `ev_solar_charge_production_phase_l1_entity` | string | `null` | HA entity for solar production phase L1 (W) |
-| `ev_solar_charge_production_phase_l2_entity` | string | `null` | HA entity for solar production phase L2 (W) |
-| `ev_solar_charge_production_phase_l3_entity` | string | `null` | HA entity for solar production phase L3 (W) |
-| `ev_solar_charge_consumption_phase_l1_entity` | string | `null` | HA entity for house consumption phase L1 excluding the EV (W) |
-| `ev_solar_charge_consumption_phase_l2_entity` | string | `null` | HA entity for house consumption phase L2 excluding the EV (W) |
-| `ev_solar_charge_consumption_phase_l3_entity` | string | `null` | HA entity for house consumption phase L3 excluding the EV (W) |
-| `phase_switch_threshold_power` | number | `4000` | Surplus (W) at or above which three-phase charging is used (shared with load watcher) |
-| `ev_solar_charge_minimum_charging_power` | number | `1380` | Minimum surplus (W) needed to adjust the charge limit (≈ 6 A × 230 V) |
+| `production_phase_l1_entity` | string | `null` | HA entity for grid **export** (feed-in) on phase L1 (W) |
+| `production_phase_l2_entity` | string | `null` | HA entity for grid **export** (feed-in) on phase L2 (W) |
+| `production_phase_l3_entity` | string | `null` | HA entity for grid **export** (feed-in) on phase L3 (W) |
+| `consumption_phase_l1_entity` | string | `null` | HA entity for grid **import** on phase L1 (W) |
+| `consumption_phase_l2_entity` | string | `null` | HA entity for grid **import** on phase L2 (W) |
+| `consumption_phase_l3_entity` | string | `null` | HA entity for grid **import** on phase L3 (W) |
 
-The controller is enabled as soon as at least one production entity is set.
-Omit the phases you don't need; missing phases default to **0 W**.
+These are the per-phase grid **export** and **import** legs (not gross PV / house
+load). The controller derives the surplus as ``export − import + ev_load − battery
+discharge``, so feeding the net grid legs lets it isolate how much solar is available
+to the car. Tuning options (global `minimum_charging_power` and the per-EV-device
+`solar_*` fields) are listed under **Behaviour and tuning options** below.
+
+The controller runs for every EV device that has `solar_charge_only: true`; set
+the production/consumption entities here so it can measure the surplus. Omit the
+phases you don't need; missing phases default to **0 W**.
 
 Example `config.json` snippet:
 
 ```json
 {
   "options": {
-    "ev_solar_charge_production_phase_l1_entity": "sensor.power_production_phase_l1",
-    "ev_solar_charge_production_phase_l2_entity": "sensor.power_production_phase_l2",
-    "ev_solar_charge_production_phase_l3_entity": "sensor.power_production_phase_l3",
-    "ev_solar_charge_consumption_phase_l1_entity": "sensor.power_consumption_phase_l1",
-    "ev_solar_charge_consumption_phase_l2_entity": "sensor.power_consumption_phase_l2",
-    "ev_solar_charge_consumption_phase_l3_entity": "sensor.power_consumption_phase_l3",
-    "phase_switch_threshold_power": 4000,
-    "ev_solar_charge_minimum_charging_power": 1380
+    "production_phase_l1_entity": "sensor.power_production_phase_l1",
+    "production_phase_l2_entity": "sensor.power_production_phase_l2",
+    "production_phase_l3_entity": "sensor.power_production_phase_l3",
+    "consumption_phase_l1_entity": "sensor.power_consumption_phase_l1",
+    "consumption_phase_l2_entity": "sensor.power_consumption_phase_l2",
+    "consumption_phase_l3_entity": "sensor.power_consumption_phase_l3",
+    "minimum_charging_power": 1380
   }
 }
 ```
@@ -183,6 +187,70 @@ Example `config.json` snippet:
 The controller runs on the same schedule as the load watcher and applies
 limits to **all** configured EV devices via their existing
 `load_management.apply_limit_actions`.
+
+### Behaviour and tuning options
+
+**Global options** (under `options` in `config.json`, optional — defaults shown):
+
+| Option key | Type | Default | Description |
+|------------|------|---------|-------------|
+| `minimum_charging_power` | number (W) | `1380` | Minimum power the EV must be able to draw to charge (≈ 6 A × 230 V). The session never runs below this. |
+| `phase_switch_delay_minutes` | number (min) | `5` | After dropping to single phase, how long to wait before switching back up to three phase (prevents phase chatter near the boundary). **Shared** with the load watcher. |
+
+**Per-EV-device fields** (on the EV entry in `/data/options.json`, alongside
+`solar_charge_only`, `ev_min_current_limit`, etc. — optional, defaults shown). These
+are per device so different chargers can behave differently:
+
+| Device field | Type | Default | Description |
+|--------------|------|---------|-------------|
+| `solar_round_down` | bool | `false` | When the surplus lands between two charge levels: `false` rounds **up** to the next level (uses all excess solar, drawing the dynamic gap — ~230 W per amp step, ~690 W across a three-phase step — from the grid); `true` rounds **down** (never imports to round, exports the small remainder instead). |
+| `solar_start_margin` | number (W) | `200` | Extra surplus above the minimum required before a session **starts**, so it doesn't start on a borderline surplus and immediately stop. |
+| `solar_stop_debounce` | integer (cycles) | `3` | Consecutive control cycles the surplus must stay below the minimum before the session is **stopped** — rides out passing clouds without flapping. |
+| `solar_battery_soc_full` | number (%) | `0` (off) | Optional strict *battery-first lockout*. When `> 0`, the EV will not start until every battery with a SOC sensor reaches this level, and a running session stops if SOC later drops below `value − hysteresis`. Leave at `0` to disable (see below). |
+| `solar_battery_soc_hysteresis` | number (%) | `5` | Resume band for the lockout above: once stopped on low SOC, the EV resumes only after SOC climbs back to `solar_battery_soc_full`. |
+
+#### Battery priority
+
+By default (`solar_battery_soc_full = 0`) the house battery already has priority
+**without** any lockout: the surplus is the grid **export** overflow
+(PV − house − battery charging), so the EV only ever uses solar the battery is not
+absorbing. A nearly-empty battery charging at its maximum rate (say 2.5 kW) while the
+inverter produces much more (say 6 kW) still leaves the ~3.5 kW overflow for the EV.
+The battery is also never *discharged* to feed the EV — battery discharge is treated
+as a deficit, so the EV steps down instead.
+
+Set `solar_battery_soc_full` to a percentage (e.g. `100`) only if you want the
+stricter behaviour of keeping the EV completely off until the battery is full. This
+requires each battery device to define `battery_soc_entity`.
+
+#### Negative prices / blocked export
+
+When the add-on blocks grid export during negative-price slots (via a battery
+device's `block_grid_export_start` / `block_grid_export_stop` switch), the inverter
+curtails production and the export meter reads ~0. The controller detects this from
+the export switch state and, instead of the (now meaningless) export figure, uses the
+power flowing into the battery as the surplus signal — so the EV still soaks up the
+otherwise-curtailed solar.
+
+#### Phase integrity
+
+A current limit means very different power in single- vs three-phase (e.g. 16 A is
+~3.7 kW on one phase but ~11 kW on three), so the controller keeps the charger's phase
+and its own model in lock-step:
+
+- On every **start** it explicitly commands the intended phase rather than assuming it.
+- Every **cycle** it reads the charger's *actual* phase (from the force-single-phase
+  switch) and corrects its internal state if they disagree — so a charger left in or
+  reverted to the wrong phase can't make a limit draw 3× the expected power.
+- Every **step** is applied with the matching phase command, so the limit and phase
+  never drift apart.
+- While the `phase_switch_delay_minutes` dwell is active (just dropped to single phase),
+  a limit increase that would require switching back up to three phase is **skipped**
+  until the dwell expires — the limit is never raised into a phase change that isn't
+  allowed yet.
+
+This reads the entity referenced by the device's `switch_to_single_phase` action; if no
+such switch is configured, the controller falls back to its internal phase state.
 
 ## Troubleshooting
 

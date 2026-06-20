@@ -106,6 +106,12 @@ class Device(BaseModel):
     ev_voltage_entity_l1: Optional[str] = Field(default=None, description="HA entity for L1 phase voltage (V). Defaults to 230 V if unset.")
     ev_voltage_entity_l2: Optional[str] = Field(default=None, description="HA entity for L2 phase voltage (V). Defaults to 230 V if unset.")
     ev_voltage_entity_l3: Optional[str] = Field(default=None, description="HA entity for L3 phase voltage (V). Defaults to 230 V if unset.")
+    # EV solar-charge tuning (only used when type='ev' and solar_charge_only=True)
+    solar_round_down: bool = Field(default=False, description="Round the charge limit DOWN to the level at/below the surplus (no grid import to round) instead of UP to the level above it.")
+    solar_start_margin: float = Field(default=200.0, description="Extra surplus (W) above the minimum required before a solar charging session starts.")
+    solar_stop_debounce: int = Field(default=3, description="Consecutive control cycles the surplus must stay below the minimum before the session stops (anti-flap).")
+    solar_battery_soc_full: float = Field(default=0.0, description="Strict battery-first lockout: the EV will not start until every battery with a SOC entity reaches this percent, and stops if SOC later drops below (this - hysteresis). 0 disables (the battery still keeps priority via the surplus calculation).")
+    solar_battery_soc_hysteresis: float = Field(default=5.0, description="Resume band (%) below 'full' before a stopped EV resumes (used with solar_battery_soc_full).")
 
 class DevicesConfig(BaseSettings):
     """Main devices configuration."""
@@ -299,6 +305,12 @@ def load_default_config() -> DevicesConfig:
             type="ev",
             solar_charge_only=True,
             enable_load_management=True,
+            # EV solar-charge tuning (all optional; defaults shown for illustration)
+            solar_round_down=False,
+            solar_start_margin=200.0,
+            solar_stop_debounce=3,
+            solar_battery_soc_full=0.0,
+            solar_battery_soc_hysteresis=5.0,
             ev_min_current_limit=6.0,
             ev_max_current_limit=16.0,
             ev_voltage_entity_l1="sensor.peblar_ev_charger_spanning_fase_1",
