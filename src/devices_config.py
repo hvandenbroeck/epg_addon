@@ -112,6 +112,7 @@ class Device(BaseModel):
     solar_stop_debounce: int = Field(default=3, description="Consecutive control cycles the surplus must stay below the minimum before the session stops (anti-flap).")
     solar_battery_soc_full: float = Field(default=0.0, description="Strict battery-first lockout: the EV will not start until every battery with a SOC entity reaches this percent, and stops if SOC later drops below (this - hysteresis). 0 disables (the battery still keeps priority via the surplus calculation).")
     solar_battery_soc_hysteresis: float = Field(default=5.0, description="Resume band (%) below 'full' before a stopped EV resumes (used with solar_battery_soc_full).")
+    solar_block_battery_discharge: bool = Field(default=False, description="When enabled, battery discharge is blocked (via discharge_stop) while the EV is actively charging, and re-enabled (via discharge_start) when charging stops — but only if discharge was active when charging began.")
 
 class DevicesConfig(BaseSettings):
     """Main devices configuration."""
@@ -262,12 +263,12 @@ def load_default_config() -> DevicesConfig:
                 EntityAction(service="select/select_option", entity_id="select.deye_prog6_charge", option="No Grid or Gen"),
             ]),
             discharge_stop=ActionSet(entity=[
-                EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=50),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=50),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=50),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=50),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=50),
-                EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=50),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=80),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog2_capacity", value=80),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog3_capacity", value=80),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog4_capacity", value=80),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog5_capacity", value=80),
+                EntityAction(service="number/set_value", entity_id="number.deye_prog6_capacity", value=80),
             ]),
             solar_only_start=ActionSet(entity=[
                 EntityAction(service="number/set_value", entity_id="number.deye_prog1_capacity", value=15),
@@ -311,6 +312,7 @@ def load_default_config() -> DevicesConfig:
             solar_stop_debounce=3,
             solar_battery_soc_full=0.0,
             solar_battery_soc_hysteresis=5.0,
+            solar_block_battery_discharge=True,
             ev_min_current_limit=6.0,
             ev_max_current_limit=16.0,
             ev_voltage_entity_l1="sensor.peblar_ev_charger_spanning_fase_1",

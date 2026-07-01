@@ -19,16 +19,16 @@ Design goals (see the long comment in :meth:`EvSolarChargeController.run`):
   overflow (PV minus house minus battery charging), so the battery always charges
   first and the EV only uses solar the battery can't absorb. Battery *discharge* is
   treated as a deficit, so the EV steps down rather than pulling the battery flat.
-  (An optional strict SOC lockout exists but is disabled by default.)
+  (An optional strict SOC lockout exists but is disabled by default.) This priority
+  holds even when grid export is blocked: battery-charge power is never counted as EV
+  surplus, so the EV draws only what the battery isn't storing - the round-up target
+  logic still lets it climb into genuinely spare (curtailed) PV.
 * Keep the phase honest: the charger's ACTUAL phase is read each cycle and the limit
   is always applied with the matching phase command, so a charger stuck in the wrong
   phase can't make a current limit draw ~3x the expected power. After dropping to
   single phase, switching back up to three phase (and any limit change that would
   require it) is held off for ``phase_switch_delay_minutes`` (shared with the load
   watcher) to avoid chatter.
-* Cope with blocked grid export (negative-price slots): when the inverter is told
-  not to export, its production meter no longer reflects the real surplus, so the
-  surplus folds in battery-charge power instead.
 """
 import logging
 from datetime import datetime
@@ -84,6 +84,7 @@ class EvSolarChargeController:
             'stop_debounce': int(getattr(ev_device, 'solar_stop_debounce', 3)),
             'battery_soc_full': float(getattr(ev_device, 'solar_battery_soc_full', 0.0)),
             'battery_soc_hysteresis': float(getattr(ev_device, 'solar_battery_soc_hysteresis', 5.0)),
+            'block_battery_discharge': bool(getattr(ev_device, 'solar_block_battery_discharge', False)),
         }
 
     async def run_all(self, ev_devices, battery_devices=None):
@@ -118,9 +119,11 @@ class EvSolarChargeController:
            to start, and only stop after the surplus has stayed below the minimum for
            ``stop_debounce`` consecutive cycles.
 
-        When grid export is blocked (negative-price slots) the production meter is
-        unreliable, so the surplus folds in battery-charge power; the same rounding
-        then lets the EV soak up curtailed PV that the meters can't directly see.
+        The battery always has priority: battery-charge power is never counted as
+        surplus, even when grid export is blocked, so the EV only ever grows into solar
+        the battery isn't already storing. During blocked-export slots the round-up
+        target (step 2) still lets the EV climb into genuinely spare PV - drawing it
+        makes the curtailed inverter ramp production up rather than pulling the battery.
         """
         cfg = _get_solar_charge_config()
         tuning = self._device_tuning(ev_device)
@@ -163,6 +166,8 @@ class EvSolarChargeController:
             current_amps = st.get('amps', min_amps)
             below_min = st.get('below_min', 0)
             last_single_switch = st.get('last_single_switch')
+            # Names of battery devices whose discharge we blocked and should restore on stop.
+            discharge_restore: list = st.get('discharge_restore', [])
 
             # ----------------------------------------------------------------
             # Not currently charging -> decide whether to start.
@@ -176,12 +181,7 @@ class EvSolarChargeController:
                     self._device_state.pop(device_name, None)
                     return
 
-                if r['export_blocked']:
-                    # Can't see surplus directly; start as long as we're within one
-                    # charge step of the minimum (negative-price slots are daytime).
-                    start_ok = surplus >= effective_min - min_step
-                else:
-                    start_ok = surplus >= effective_min + tuning['start_margin']
+                start_ok = surplus >= effective_min + tuning['start_margin']
 
                 if not start_ok:
                     logger.info(
@@ -211,7 +211,14 @@ class EvSolarChargeController:
                 )
                 if applied is not None:
                     init_three, init_amps = applied
-                self._save_state(device_name, init_three, init_amps, 0, None)
+                discharge_restore = []
+                if tuning['block_battery_discharge'] and battery_devices:
+                    discharge_restore = await self._block_battery_discharge(battery_devices)
+                    logger.info(
+                        f"☀️ {device_name}: Blocked battery discharge during EV charging "
+                        f"(will restore on stop: {discharge_restore or 'none — discharge was already inactive'})"
+                    )
+                self._save_state(device_name, init_three, init_amps, 0, None, discharge_restore)
                 logger.info(
                     f"☀️ {device_name}: Started at "
                     f"{'3-phase' if init_three else '1-phase'} {init_amps:.0f}A "
@@ -229,9 +236,25 @@ class EvSolarChargeController:
                     f"☀️ {device_name}: Battery fell to {min_soc:.0f}% "
                     f"(< {soc_resume:.0f}%) - stopping EV to recharge the house battery first"
                 )
+                await self._restore_battery_discharge(device_name, discharge_restore, battery_devices)
                 await self._stop(ev_device)
                 self._device_state.pop(device_name, None)
                 return
+
+            # Keep battery discharge blocked for the whole session, re-evaluated every
+            # cycle. This needs no session memory: it naturally covers a restart that
+            # adopted an in-flight session, and re-blocks discharge that another
+            # automation re-enabled mid-session. Only batteries currently discharging
+            # are touched, so it's a no-op once everything is already stopped.
+            if tuning['block_battery_discharge'] and battery_devices:
+                before = set(discharge_restore)
+                discharge_restore = await self._block_battery_discharge(battery_devices, discharge_restore)
+                newly_blocked = set(discharge_restore) - before
+                if newly_blocked:
+                    logger.info(
+                        f"☀️ {device_name}: Blocked battery discharge during EV charging "
+                        f"({', '.join(sorted(newly_blocked))}; restore on stop: {discharge_restore})"
+                    )
 
             # Reconcile our phase belief with the charger's ACTUAL phase, so a charger
             # left in (or reverted to) the wrong phase can't corrupt the power figures
@@ -255,6 +278,7 @@ class EvSolarChargeController:
                         f"☀️ {device_name}: Surplus {surplus:.0f}W below minimum "
                         f"({effective_min:.0f}W) for {below_min} cycles - stopping EV charger"
                     )
+                    await self._restore_battery_discharge(device_name, discharge_restore, battery_devices)
                     await self._stop(ev_device)
                     self._device_state.pop(device_name, None)
                     return
@@ -272,7 +296,7 @@ class EvSolarChargeController:
                     f"☀️ {device_name}: Surplus low ({surplus:.0f}W) - holding at minimum "
                     f"({below_min}/{tuning['stop_debounce']} before stop)"
                 )
-                self._save_state(device_name, is_three_phase, current_amps, below_min, last_single_switch)
+                self._save_state(device_name, is_three_phase, current_amps, below_min, last_single_switch, discharge_restore)
                 return
 
             # Surplus is healthy -> reset the stop debounce and track the limit.
@@ -284,7 +308,7 @@ class EvSolarChargeController:
                 f"{'3-phase' if is_three_phase else '1-phase'} {current_amps:.0f}A "
                 f"({EvCharger.compute_power(is_three_phase, current_amps, voltages):.0f}W)"
             )
-            self._save_state(device_name, is_three_phase, current_amps, 0, last_single_switch)
+            self._save_state(device_name, is_three_phase, current_amps, 0, last_single_switch, discharge_restore)
 
         except Exception as e:
             logger.error(f"☀️ {device_name}: Unhandled error in solar charge controller: {e}", exc_info=True)
@@ -309,12 +333,14 @@ class EvSolarChargeController:
         bat_charge, bat_discharge, min_soc, export_blocked = await self._read_battery_state(battery_devices)
 
         # Surplus available to the EV. ``net_grid`` is the export overflow (PV minus
-        # house minus battery charging), so the battery keeps priority automatically.
+        # house minus battery charging), so the battery ALWAYS keeps priority: the EV
+        # only ever sees solar the battery isn't already absorbing. Battery-charge power
+        # is deliberately NOT folded in - not even when grid export is blocked - so the
+        # EV can never grow into power the battery is actively storing. (When export is
+        # blocked the round-up target logic still lets the EV climb into genuinely spare
+        # PV, since drawing it makes the curtailed inverter ramp up rather than pulling
+        # from the battery.)
         surplus = net_grid + ev_load - bat_discharge
-        if export_blocked:
-            # The export meter is muted by inverter curtailment; battery-charge power
-            # is the visible proxy for the spare PV, so fold it in.
-            surplus += bat_charge
 
         voltages = await self.ev_charger.get_phase_voltages(ev_device)
 
@@ -407,13 +433,82 @@ class EvSolarChargeController:
             action_label="stop",
         )
 
-    def _save_state(self, device_name, three_phase, amps, below_min, last_single_switch) -> None:
+    def _save_state(self, device_name, three_phase, amps, below_min, last_single_switch, discharge_restore=None) -> None:
         self._device_state[device_name] = {
             'three_phase': three_phase,
             'amps': amps,
             'below_min': below_min,
             'last_single_switch': last_single_switch,
+            'discharge_restore': discharge_restore or [],
         }
+
+    async def _block_battery_discharge(self, battery_devices, restore=None) -> list:
+        """Stop discharge on any battery that is currently discharging; return the restore set.
+
+        Re-evaluated every cycle, so it's idempotent: a battery that is already stopped is
+        left untouched (no redundant command, and discharge the user/another automation
+        had off independently is never "restored"), while one that is actively discharging
+        is stopped and added to the restore set. ``restore`` is the set accumulated so far
+        this session; the union is returned. Discharge is considered active when any of the
+        battery's discharge_stop entities does NOT already match its target value.
+        """
+        restore_set = set(restore or [])
+        for bat in battery_devices or []:
+            if not bat.discharge_stop:
+                continue
+            if not await self._is_discharge_active(bat):
+                continue
+            await self.devices.execute_device_action(
+                device_name=bat.name,
+                actions=bat.discharge_stop.model_dump(exclude_none=True),
+                action_label="discharge_stop",
+            )
+            restore_set.add(bat.name)
+        return sorted(restore_set)
+
+    async def _restore_battery_discharge(self, ev_device_name, discharge_restore, battery_devices) -> None:
+        """Call discharge_start on the batteries whose discharge we stopped this session."""
+        if not discharge_restore or not battery_devices:
+            return
+        restore_set = set(discharge_restore)
+        for bat in battery_devices:
+            if bat.name in restore_set and bat.discharge_start:
+                await self.devices.execute_device_action(
+                    device_name=bat.name,
+                    actions=bat.discharge_start.model_dump(exclude_none=True),
+                    action_label="discharge_start",
+                )
+                logger.info(f"☀️ {ev_device_name}: Restored battery discharge for {bat.name}")
+
+    async def _is_discharge_active(self, bat_device) -> bool:
+        """Return True if battery discharge is currently active (not already stopped).
+
+        Checks each EntityAction in discharge_stop: if the entity's current state already
+        matches the action's target value, discharge was already stopped before we intervened.
+        If any entity differs from its target value, discharge is considered active.
+        Falls back to True (assume active) when state is unreadable.
+        """
+        discharge_stop = getattr(bat_device, 'discharge_stop', None)
+        if not discharge_stop:
+            return False
+        for entity_action in (discharge_stop.entity or []):
+            entity_id = getattr(entity_action, 'entity_id', None)
+            target = entity_action.value if entity_action.value is not None else entity_action.option
+            if not entity_id or target is None:
+                continue
+            state = await self.get_state(entity_id)
+            if not state or state.get('state') in ('unavailable', 'unknown', None):
+                return True  # unreadable → assume active (safer)
+            current = state.get('state', '')
+            try:
+                if float(current) != float(target):
+                    return True
+            except (ValueError, TypeError):
+                if str(current).lower() != str(target).lower():
+                    return True
+            # First readable entity already at target value → check next
+        # All checked entities are at their discharge_stop values → discharge was already stopped
+        return False
 
     # ------------------------------------------------------------------
     # Level selection (pure helpers)

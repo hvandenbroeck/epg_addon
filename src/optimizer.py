@@ -350,6 +350,9 @@ class HeatpumpOptimizer:
         ev_devices = devices_config.get_devices_by_type('ev')
         for ev_device in ev_devices:
             device_name = ev_device.name
+            if ev_device.solar_charge_only:
+                logger.info(f"🚗 {device_name}: solar_charge_only=True, skipping price-based scheduling")
+                continue
             ev_times = optimize_ev(prices, slot_minutes, EV_MAX_PRICE, slot_to_time)
             results[device_name] = ev_times
 
