@@ -44,6 +44,20 @@ class ActionSet(BaseModel):
     entity: List[EntityAction] = Field(default_factory=list)
 
 
+class EntityCondition(BaseModel):
+    """A single comparison against a Home Assistant entity's state or attribute."""
+    entity_id: str = Field(..., description="Home Assistant entity to read")
+    state_attribute: Optional[str] = Field(default=None, description="Read this attribute instead of the entity state")
+    operator: Literal["<", "<=", ">", ">=", "==", "!=", "in", "not_in"] = Field(..., description="Comparison operator")
+    value: Union[str, int, float, List[Union[str, int, float]]] = Field(..., description="Value to compare against; use a list for 'in'/'not_in'")
+
+
+class ConditionGroup(BaseModel):
+    """A flat group of entity conditions combined with a single boolean operator (no nesting)."""
+    logic: Literal["and", "or"] = Field(default="and", description="How to combine the conditions")
+    conditions: List[EntityCondition] = Field(default_factory=list, description="Leaf conditions to evaluate")
+
+
 class LoadManagementActions(BaseModel):
     """Load management specific actions."""
     switch_to_single_phase: Optional[ActionSet] = None
@@ -106,6 +120,15 @@ class Device(BaseModel):
     ev_voltage_entity_l1: Optional[str] = Field(default=None, description="HA entity for L1 phase voltage (V). Defaults to 230 V if unset.")
     ev_voltage_entity_l2: Optional[str] = Field(default=None, description="HA entity for L2 phase voltage (V). Defaults to 230 V if unset.")
     ev_voltage_entity_l3: Optional[str] = Field(default=None, description="HA entity for L3 phase voltage (V). Defaults to 230 V if unset.")
+    ev_single_phase_line: Literal["l1", "l2", "l3"] = Field(default="l1", description="Physical phase the charger uses when in single-phase mode. Determines which phase's voltage backs the 1-phase power calculation and which per-phase production/consumption reading is checked for the phase-balance switch.")
+    grid_export_unblock_condition: Optional[ConditionGroup] = Field(
+        default=None,
+        description="EV-ready override for price-based grid-export blocking. When this condition is TRUE "
+                    "(e.g. the charger is connected and the car is below its target SOC), price-based grid-export "
+                    "blocking is overridden and export is force-unblocked so the inverter runs at full production "
+                    "for the EV. Evaluated with certainty only: if any referenced entity is unavailable/unknown, "
+                    "the EV counts as not-ready and normal price-based blocking stays in effect. None disables it.",
+    )
     # EV solar-charge tuning (only used when type='ev' and solar_charge_only=True)
     solar_round_down: bool = Field(default=False, description="Round the charge limit DOWN to the level at/below the surplus (no grid import to round) instead of UP to the level above it.")
     solar_start_margin: float = Field(default=200.0, description="Extra surplus (W) above the minimum required before a solar charging session starts.")
@@ -113,6 +136,10 @@ class Device(BaseModel):
     solar_battery_soc_full: float = Field(default=0.0, description="Strict battery-first lockout: the EV will not start until every battery with a SOC entity reaches this percent, and stops if SOC later drops below (this - hysteresis). 0 disables (the battery still keeps priority via the surplus calculation).")
     solar_battery_soc_hysteresis: float = Field(default=5.0, description="Resume band (%) below 'full' before a stopped EV resumes (used with solar_battery_soc_full).")
     solar_block_battery_discharge: bool = Field(default=False, description="When enabled, battery discharge is blocked (via discharge_stop) while the EV is actively charging, and re-enabled (via discharge_start) when charging stops — but only if discharge was active when charging began.")
+    solar_phase_balance_switching: bool = Field(default=False, description="While charging single-phase, detect the EV's phase importing from the grid while the other two phases are exporting or idle (a sign the inverter can't rebalance across phases), and switch early to 3-phase to use the spare solar on those phases.")
+    solar_phase_balance_import_threshold: float = Field(default=100.0, description="Minimum import (W) on the EV's phase to count as 'starved' for the phase-balance switch.")
+    solar_phase_balance_export_margin: float = Field(default=0.0, description="The other two phases must each be at or above this net export (W) - i.e. not importing - to count as having spare solar for the phase-balance switch.")
+    solar_phase_balance_debounce: int = Field(default=2, description="Consecutive control cycles the phase imbalance must persist before forcing an early switch to 3-phase (anti-flap).")
 
 class DevicesConfig(BaseSettings):
     """Main devices configuration."""
@@ -318,6 +345,19 @@ def load_default_config() -> DevicesConfig:
             ev_voltage_entity_l1="sensor.peblar_ev_charger_spanning_fase_1",
             ev_voltage_entity_l2="sensor.peblar_ev_charger_spanning_fase_2",
             ev_voltage_entity_l3="sensor.peblar_ev_charger_spanning_fase_3",
+            ev_single_phase_line="l2",
+            solar_phase_balance_switching=True,
+            solar_phase_balance_import_threshold=100.0,
+            solar_phase_balance_export_margin=0.0,
+            solar_phase_balance_debounce=2,
+            # Unblock grid export while the car is below 79% AND the charger is charging or suspended.
+            grid_export_unblock_condition=ConditionGroup(
+                logic="and",
+                conditions=[
+                    EntityCondition(entity_id="sensor.id_7_tourer_pro_accu", operator="<", value=79),
+                    EntityCondition(entity_id="sensor.peblar_ev_charger_status", operator="in", value=["charging", "suspended"]),
+                ],
+            ),
             load_management=LoadManagement(
                 instantaneous_load_entity="sensor.peblar_ev_charger_vermogen",
                 instantaneous_load_entity_unit="W",

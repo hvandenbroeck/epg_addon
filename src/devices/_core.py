@@ -2,6 +2,7 @@ import logging
 import aiohttp
 from ..devices_config import devices_config
 from ..utils import ensure_list, evaluate_expression
+from ..conditions import any_ev_ready
 from ..config import CONFIG
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,40 @@ class Devices:
         # Register action with verifier for post-action verification
         if self._verifier and action_label in ("start", "stop") and not skip_verification:
             self._verifier.register_action(device_name, action_label, context)
+
+    async def get_state(self, entity_id):
+        """Get the current Home Assistant state dict for an entity (or None).
+
+        Mirrors ``HomeAssistantClient.get_state`` / ``DeviceVerifier.get_entity_state`` so the
+        condition evaluator can read entities from within scheduled jobs held only by ``Devices``.
+        """
+        url = f"{self.ha_url}/api/states/{entity_id}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=self.headers) as response:
+                    if response.status == 200:
+                        return await response.json()
+                    logger.warning(f"Failed to get state for {entity_id}: HTTP {response.status}")
+                    return None
+        except Exception as e:
+            logger.error(f"Error getting state for {entity_id}: {e}")
+            return None
+
+    async def execute_grid_export_block_start(self, device_name, actions, action_label, scheduled_time=None):
+        """Gate the price-based grid-export block at the slot boundary.
+
+        If any EV is ready to charge (its ``grid_export_unblock_condition`` is certainly TRUE),
+        skip the block so export stays unblocked and the inverter runs at full production for the
+        EV. Otherwise apply the block as scheduled. The periodic verifier keeps reconciling this
+        for changes that happen mid-slot.
+        """
+        ev_devices = self.get_devices_by_type("ev")
+        if await any_ev_ready(ev_devices, self.get_state):
+            logger.info(
+                f"☀️ {device_name}: an EV is ready → overriding price block, leaving grid export UNBLOCKED"
+            )
+            return
+        await self.execute_device_action(device_name, actions, action_label, scheduled_time)
 
     def get_device_config(self, device_name):
         """Get configuration for a specific device.

@@ -103,8 +103,15 @@ class Scheduler:
             # Schedule start action if in the future
             if start_time > now and self.scheduler:
                 action_label = f"{action_type}_start" if action_type else "start"
+                # Grid-export block start is gated on EV readiness: when an EV is ready to
+                # charge, the price-based block is overridden so export stays unblocked.
+                start_target = (
+                    self.devices.execute_grid_export_block_start
+                    if action_type == 'block_grid_export'
+                    else self.devices.execute_device_action
+                )
                 self.scheduler.add_job(
-                    self.devices.execute_device_action,
+                    start_target,
                     trigger=DateTrigger(run_date=start_time),
                     args=[base_device_name, start_actions, action_label, start_time],
                     id=f"{device}_start_device_{start_time.isoformat()}",

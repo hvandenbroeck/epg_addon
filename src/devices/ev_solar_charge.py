@@ -19,10 +19,11 @@ Design goals (see the long comment in :meth:`EvSolarChargeController.run`):
   overflow (PV minus house minus battery charging), so the battery always charges
   first and the EV only uses solar the battery can't absorb. Battery *discharge* is
   treated as a deficit, so the EV steps down rather than pulling the battery flat.
-  (An optional strict SOC lockout exists but is disabled by default.) This priority
-  holds even when grid export is blocked: battery-charge power is never counted as EV
-  surplus, so the EV draws only what the battery isn't storing - the round-up target
-  logic still lets it climb into genuinely spare (curtailed) PV.
+  (An optional strict SOC lockout exists but is disabled by default.) Note: when
+  grid export is blocked (curtailed), the inverter throttles production to track
+  load in near real time, so ``surplus`` collapses to roughly the EV's own draw and
+  the round-up logic has little/no real headroom to climb into - see the note in
+  ``_read_inputs``.
 * Keep the phase honest: the charger's ACTUAL phase is read each cycle and the limit
   is always applied with the matching phase command, so a charger stuck in the wrong
   phase can't make a current limit draw ~3x the expected power. After dropping to
@@ -35,7 +36,7 @@ from datetime import datetime
 from typing import Optional
 
 from ..config import CONFIG
-from .ev_charger import EvCharger
+from .ev_charger import EvCharger, line_index
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,8 @@ class EvSolarChargeController:
         self.ev_charger = EvCharger(get_state_func, devices_instance)
         # Per-device runtime state:
         #   {'three_phase': bool, 'amps': float, 'below_min': int,
-        #    'last_single_switch': Optional[str ISO timestamp]}
+        #    'last_single_switch': Optional[str ISO timestamp],
+        #    'phase_imbalance_count': int}
         self._device_state: dict[str, dict] = {}
 
     @staticmethod
@@ -85,6 +87,10 @@ class EvSolarChargeController:
             'battery_soc_full': float(getattr(ev_device, 'solar_battery_soc_full', 0.0)),
             'battery_soc_hysteresis': float(getattr(ev_device, 'solar_battery_soc_hysteresis', 5.0)),
             'block_battery_discharge': bool(getattr(ev_device, 'solar_block_battery_discharge', False)),
+            'phase_balance_switching': bool(getattr(ev_device, 'solar_phase_balance_switching', False)),
+            'phase_balance_import_threshold': float(getattr(ev_device, 'solar_phase_balance_import_threshold', 100.0)),
+            'phase_balance_export_margin': float(getattr(ev_device, 'solar_phase_balance_export_margin', 0.0)),
+            'phase_balance_debounce': int(getattr(ev_device, 'solar_phase_balance_debounce', 2)),
         }
 
     async def run_all(self, ev_devices, battery_devices=None):
@@ -120,10 +126,12 @@ class EvSolarChargeController:
            ``stop_debounce`` consecutive cycles.
 
         The battery always has priority: battery-charge power is never counted as
-        surplus, even when grid export is blocked, so the EV only ever grows into solar
-        the battery isn't already storing. During blocked-export slots the round-up
-        target (step 2) still lets the EV climb into genuinely spare PV - drawing it
-        makes the curtailed inverter ramp production up rather than pulling the battery.
+        surplus, so the EV only ever grows into solar the battery isn't already
+        storing. During blocked-export slots, though, the round-up target (step 2)
+        has little room to climb: the inverter throttles production to track load in
+        near real time, so ``surplus`` collapses to roughly the EV's own current draw
+        (see the note in ``_read_inputs``) - ramp-up is effectively stalled until
+        export is unblocked again.
         """
         cfg = _get_solar_charge_config()
         tuning = self._device_tuning(ev_device)
@@ -166,6 +174,7 @@ class EvSolarChargeController:
             current_amps = st.get('amps', min_amps)
             below_min = st.get('below_min', 0)
             last_single_switch = st.get('last_single_switch')
+            phase_imbalance_count = st.get('phase_imbalance_count', 0)
             # Names of battery devices whose discharge we blocked and should restore on stop.
             discharge_restore: list = st.get('discharge_restore', [])
 
@@ -300,6 +309,42 @@ class EvSolarChargeController:
                 return
 
             # Surplus is healthy -> reset the stop debounce and track the limit.
+
+            # Phase-balance check: while still 1-phase, if the EV's phase is importing
+            # from the grid while the other two are exporting/idle (a sign the inverter
+            # can't rebalance production across phases), jump straight to 3-phase once
+            # the pattern has persisted for a few cycles - rather than waiting for the
+            # aggregate surplus alone to climb past the normal 3-phase-min boundary.
+            if not is_three_phase and phase_switching and tuning['phase_balance_switching']:
+                if self._check_phase_imbalance(ev_device, r, tuning):
+                    phase_imbalance_count += 1
+                else:
+                    phase_imbalance_count = 0
+
+                dwell_active = False
+                if last_single_switch:
+                    mins = (datetime.now() - datetime.fromisoformat(last_single_switch)).total_seconds() / 60.0
+                    dwell_active = mins < cfg['phase_switch_delay_minutes']
+
+                if phase_imbalance_count >= tuning['phase_balance_debounce'] and not dwell_active:
+                    logger.info(
+                        f"☀️ {device_name}: ⚡ Phase imbalance detected (EV phase importing while "
+                        f"the other phases export/idle) for {phase_imbalance_count} cycles - "
+                        f"switching early to 3-phase to use the spare solar"
+                    )
+                    applied = await self.ev_charger.set_level(
+                        ev_device, True, min_amps, current_three_phase=False
+                    )
+                    if applied is not None:
+                        is_three_phase, current_amps = applied
+                    self._save_state(device_name, is_three_phase, current_amps, 0, last_single_switch, discharge_restore, 0)
+                    logger.info(
+                        f"☀️ {device_name}: Switched to 3-phase {current_amps:.0f}A due to phase imbalance"
+                    )
+                    return
+            else:
+                phase_imbalance_count = 0
+
             is_three_phase, current_amps, last_single_switch = await self._adjust_level(
                 ev_device, r, cfg, tuning, is_three_phase, current_amps, last_single_switch
             )
@@ -308,7 +353,7 @@ class EvSolarChargeController:
                 f"{'3-phase' if is_three_phase else '1-phase'} {current_amps:.0f}A "
                 f"({EvCharger.compute_power(is_three_phase, current_amps, voltages):.0f}W)"
             )
-            self._save_state(device_name, is_three_phase, current_amps, 0, last_single_switch, discharge_restore)
+            self._save_state(device_name, is_three_phase, current_amps, 0, last_single_switch, discharge_restore, phase_imbalance_count)
 
         except Exception as e:
             logger.error(f"☀️ {device_name}: Unhandled error in solar charge controller: {e}", exc_info=True)
@@ -336,13 +381,24 @@ class EvSolarChargeController:
         # house minus battery charging), so the battery ALWAYS keeps priority: the EV
         # only ever sees solar the battery isn't already absorbing. Battery-charge power
         # is deliberately NOT folded in - not even when grid export is blocked - so the
-        # EV can never grow into power the battery is actively storing. (When export is
-        # blocked the round-up target logic still lets the EV climb into genuinely spare
-        # PV, since drawing it makes the curtailed inverter ramp up rather than pulling
-        # from the battery.)
+        # EV can never grow into power the battery is actively storing.
+        #
+        # Since ``total_consumption`` already includes ``ev_load``, adding it back makes
+        # ``surplus`` collapse to ``total_production - house_baseline - bat_discharge`` -
+        # independent of the EV's own draw, as intended, IF ``total_production`` reflects
+        # true PV output. When grid export is blocked, it doesn't: the inverter curtails
+        # production to track load in near real time, so ``total_production`` is itself
+        # pinned to roughly ``house_baseline + ev_load``, which makes ``surplus`` collapse
+        # to roughly ``ev_load - bat_discharge`` instead - i.e. no headroom signal, so the
+        # round-up target rarely climbs above whatever the EV is already drawing while
+        # export stays blocked.
         surplus = net_grid + ev_load - bat_discharge
 
         voltages = await self.ev_charger.get_phase_voltages(ev_device)
+
+        # Per-phase net grid flow (>0 export, <0 import), physical L1/L2/L3 order -
+        # used by the phase-balance check to see which phase(s) have spare solar.
+        phase_net = tuple(p - c for p, c in zip(production, consumption))
 
         return {
             'production': production, 'consumption': consumption,
@@ -350,7 +406,7 @@ class EvSolarChargeController:
             'net_grid': net_grid, 'ev_load': ev_load, 'ev_charging': ev_charging,
             'bat_charge': bat_charge, 'bat_discharge': bat_discharge,
             'min_soc': min_soc, 'export_blocked': export_blocked,
-            'surplus': surplus, 'voltages': voltages,
+            'surplus': surplus, 'voltages': voltages, 'phase_net': phase_net,
         }
 
     def _log_inputs(self, device_name, r) -> None:
@@ -366,6 +422,23 @@ class EvSolarChargeController:
             f"Battery SOC={soc_text}  "
             f"Surplus={r['surplus']:.0f}W"
         )
+
+    @staticmethod
+    def _check_phase_imbalance(ev_device, r, tuning) -> bool:
+        """True if the EV's phase is importing while the other two have spare solar.
+
+        Signals a 3-phase inverter/battery that can't rebalance production across
+        phases to match the EV's single-phase load: the EV's phase pulls from the
+        grid while the other two sit idle or export, even though the aggregate
+        surplus may not yet justify a 3-phase switch on its own.
+        """
+        idx = line_index(getattr(ev_device, 'ev_single_phase_line', 'l1'))
+        phase_net = r['phase_net']
+        ev_phase_net = phase_net[idx]
+        other_nets = [n for i, n in enumerate(phase_net) if i != idx]
+        ev_importing = ev_phase_net < -tuning['phase_balance_import_threshold']
+        others_spare = all(n >= tuning['phase_balance_export_margin'] for n in other_nets)
+        return ev_importing and others_spare
 
     async def _adjust_level(self, ev_device, r, cfg, tuning, is_three_phase, current_amps, last_single_switch):
         """Move the charge limit toward the target for the current surplus.
@@ -433,13 +506,17 @@ class EvSolarChargeController:
             action_label="stop",
         )
 
-    def _save_state(self, device_name, three_phase, amps, below_min, last_single_switch, discharge_restore=None) -> None:
+    def _save_state(
+        self, device_name, three_phase, amps, below_min, last_single_switch,
+        discharge_restore=None, phase_imbalance_count=0,
+    ) -> None:
         self._device_state[device_name] = {
             'three_phase': three_phase,
             'amps': amps,
             'below_min': below_min,
             'last_single_switch': last_single_switch,
             'discharge_restore': discharge_restore or [],
+            'phase_imbalance_count': phase_imbalance_count,
         }
 
     async def _block_battery_discharge(self, battery_devices, restore=None) -> list:

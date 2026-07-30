@@ -16,6 +16,7 @@ from tinydb import TinyDB, Query
 
 from .devices_config import devices_config, ActionSet
 from .utils import ensure_list, evaluate_expression
+from .conditions import any_ev_ready
 from .config import CONFIG
 
 logger = logging.getLogger(__name__)
@@ -433,7 +434,18 @@ class DeviceVerifier:
             elif device not in device_states:
                 # No active slot for this device yet — it should be off
                 device_states[device] = "stop"
-        
+
+        # EV-ready override: when any EV is ready to charge, force-unblock grid export by
+        # flipping any active price-based block ("start") to "stop" (unblock). Evaluated once
+        # per cycle and shared across all batteries. When no EV is ready, blocking is left as
+        # scheduled, so a car unplugged mid-slot re-blocks on the next cycle.
+        if any(d.endswith("_block_grid_export") and a == "start" for d, a in device_states.items()):
+            if await any_ev_ready(self.devices_config.get_devices_by_type("ev"), self.get_entity_state):
+                for dev_name, action in list(device_states.items()):
+                    if action == "start" and dev_name.endswith("_block_grid_export"):
+                        device_states[dev_name] = "stop"
+                        logger.info(f"☀️ {dev_name}: an EV is ready → forcing grid export UNBLOCK")
+
         # Verify each device's expected state and re-apply the action when needed
         for device, expected_action in device_states.items():
             is_correct = await self.verify_device_action(device, expected_action)

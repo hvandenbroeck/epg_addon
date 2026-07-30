@@ -11,6 +11,11 @@ logger = logging.getLogger(__name__)
 _DEFAULT_VOLTAGE = 230.0
 
 
+def line_index(line: str) -> int:
+    """Map a physical phase name ("l1"/"l2"/"l3") to its tuple index (0/1/2)."""
+    return {"l1": 0, "l2": 1, "l3": 2}.get(str(line).lower(), 0)
+
+
 class EvCharger:
     """Helpers for stepping an EV charger's current limit up or down by one amp.
 
@@ -42,11 +47,18 @@ class EvCharger:
             return _DEFAULT_VOLTAGE
 
     async def get_phase_voltages(self, ev_device) -> tuple:
-        """Return (V_L1, V_L2, V_L3), reading from the device's configured entities."""
+        """Return phase voltages read from the device's configured entities, reordered so
+        index 0 is always the line used for single-phase charging (``ev_single_phase_line``).
+
+        ``compute_power``'s three-phase sum is order-independent, so this reordering only
+        affects the single-phase calculation - it never needs to change.
+        """
         v1 = await self._read_voltage(ev_device.ev_voltage_entity_l1)
         v2 = await self._read_voltage(ev_device.ev_voltage_entity_l2)
         v3 = await self._read_voltage(ev_device.ev_voltage_entity_l3)
-        return (v1, v2, v3)
+        physical = (v1, v2, v3)
+        idx = line_index(getattr(ev_device, 'ev_single_phase_line', 'l1'))
+        return (physical[idx],) + tuple(v for i, v in enumerate(physical) if i != idx)
 
     @staticmethod
     def compute_power(is_three_phase: bool, amps: float, voltages: tuple) -> float:
