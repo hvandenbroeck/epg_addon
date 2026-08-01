@@ -10,10 +10,12 @@ from ..config import CONFIG
 logger = logging.getLogger(__name__)
 
 class Prediction:
-    def __init__(self, statistics_loader, weather, price_history_manager=None):
+    def __init__(self, statistics_loader, weather, price_history_manager=None,
+                 curtailment_history_manager=None):
         self.statistics_loader = statistics_loader
         self.weather = weather
         self.price_history_manager = price_history_manager
+        self.curtailment_history_manager = curtailment_history_manager
         self.days_back = CONFIG['options'].get('prediction_days_back', 365)
 
     async def calculateTomorrowsPowerUsage(self):
@@ -315,6 +317,63 @@ class Prediction:
         
         return results_df
 
+    @staticmethod
+    def _resolve_export_switch_entity():
+        """Return the grid-export switch entity to use for curtailment detection, or None.
+
+        Prefers a battery device's explicit ``grid_export_switch_entity``; otherwise falls back
+        to the first entity in its ``block_grid_export_stop`` action (the switch that *enables*
+        export), matching the runtime semantic in devices/ev_solar_charge.py.
+        """
+        from ..devices_config import devices_config
+        for bat in devices_config.get_devices_by_type("battery"):
+            explicit = getattr(bat, 'grid_export_switch_entity', None)
+            if explicit:
+                return explicit
+            stop_action = getattr(bat, 'block_grid_export_stop', None)
+            if stop_action and getattr(stop_action, 'entity', None):
+                for entity_action in stop_action.entity:
+                    entity_id = getattr(entity_action, 'entity_id', None)
+                    if entity_id:
+                        return entity_id
+        return None
+
+    async def _filter_curtailed_hours(self, merged_df):
+        """Remove hours where grid export was blocked (PV curtailed) from the training set.
+
+        Fails open: if no curtailment manager, no configured export switch, or no recorded
+        curtailed hours, the DataFrame is returned unchanged. Hours with no record are always
+        kept, so a history gap can never silently delete good training data.
+        """
+        if self.curtailment_history_manager is None:
+            return merged_df
+
+        switch_entity = self._resolve_export_switch_entity()
+        if not switch_entity:
+            return merged_df
+
+        # Append the latest recorder window to the store, then read the full training window.
+        try:
+            access_token = getattr(self.statistics_loader, 'access_token', None)
+            await self.curtailment_history_manager.record_recent(switch_entity, access_token)
+        except Exception as e:
+            logger.warning(f"⚠️ Could not update curtailment history: {e}")
+
+        curtailed_hours = self.curtailment_history_manager.get_curtailed_hours(self.days_back)
+        if not curtailed_hours or 'timestamp_aligned' not in merged_df.columns:
+            return merged_df
+
+        before = len(merged_df)
+        mask = merged_df['timestamp_aligned'].isin(curtailed_hours)
+        merged_df = merged_df[~mask]
+        removed = before - len(merged_df)
+        if removed:
+            logger.info(
+                f"🚫 Excluded {removed} curtailed hour(s) (export blocked via {switch_entity}) "
+                f"from solar training"
+            )
+        return merged_df
+
     async def calculateSolarProduction(self):
         """
         Predict solar production for the remaining hours of today and all of tomorrow using
@@ -363,6 +422,12 @@ class Prediction:
         # Drop rows where target is missing or negative
         merged_df = merged_df.dropna(subset=['solar_production_per_hour'])
         merged_df = merged_df[merged_df['solar_production_per_hour'] >= 0]
+
+        # Drop hours where grid export was blocked (PV curtailed). During curtailment the
+        # inverter throttles production to track house load, so those hours record suppressed
+        # output that would bias the model toward under-prediction. Curtailed hours are
+        # detected from the export switch entity and accumulated in the curtailment store.
+        merged_df = await self._filter_curtailed_hours(merged_df)
 
         logger.info(f"✅ Solar training dataset: {len(merged_df)} hourly records")
 

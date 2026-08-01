@@ -26,6 +26,7 @@ from .config import CONFIG
 from .price_fetcher import EntsoeePriceFetcher
 from .devices_config import devices_config
 from .forecasting.price_history import PriceHistoryManager
+from .forecasting.curtailment_history import CurtailmentHistoryManager
 from .forecasting.statistics_loader import StatisticsLoader
 from .forecasting.weather import Weather
 from .forecasting.prediction import Prediction
@@ -71,6 +72,9 @@ class HeatpumpOptimizer:
         
         # Initialize Price History Manager for percentile calculations
         self.price_history_manager = PriceHistoryManager(entsoe_token, entsoe_country) if entsoe_token else None
+
+        # Records curtailed hours (grid export blocked) so they can be excluded from solar training
+        self.curtailment_history_manager = CurtailmentHistoryManager()
 
     async def get_state(self, entity_id):
         """Get the state of an entity from Home Assistant.
@@ -671,7 +675,8 @@ class HeatpumpOptimizer:
         access_token = self.ha_client.get_access_token()
         stats_loader = StatisticsLoader(access_token)
         weather = Weather(access_token)
-        predictor = Prediction(stats_loader, weather, self.price_history_manager)
+        predictor = Prediction(stats_loader, weather, self.price_history_manager,
+                               self.curtailment_history_manager)
         
         try:
             await predictor.calculatePowerUsage()

@@ -232,6 +232,19 @@ the export switch state and, instead of the (now meaningless) export figure, use
 power flowing into the battery as the surplus signal — so the EV still soaks up the
 otherwise-curtailed solar.
 
+Because those curtailed hours record suppressed PV output, they would also mislead the
+solar-production forecast (training it to under-predict on exactly the sunny, low-price
+peak hours). The add-on therefore excludes curtailed periods from solar model training:
+it reads the export switch history, records each curtailed 15-minute slot into the
+shared `db.json` store, and drops the affected hours from the training set (because the
+hourly training value is the sum over the whole hour, any single curtailed 15-minute slot
+drops that whole hour). By default it uses the switch from
+`block_grid_export_stop`; set `grid_export_switch_entity` on the battery device to point
+at a different switch (its `off` state must mean export is blocked).
+Note: because Home Assistant's history API only returns data within the recorder's
+`purge_keep_days` window, full 90-day coverage is reached progressively over the first
+couple of weeks of daily runs (or immediately if you raise `purge_keep_days`).
+
 #### Phase integrity
 
 A current limit means very different power in single- vs three-phase (e.g. 16 A is

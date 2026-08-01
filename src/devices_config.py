@@ -95,6 +95,13 @@ class Device(BaseModel):
     solar_only_stop: Optional[ActionSet] = None
     block_grid_export_start: Optional[ActionSet] = None
     block_grid_export_stop: Optional[ActionSet] = None
+    grid_export_switch_entity: Optional[str] = Field(
+        default=None,
+        description="Switch entity whose OFF state means grid export is blocked and PV is being "
+                    "curtailed. Used to exclude curtailed hours from solar-production training so "
+                    "the forecast is not misled by suppressed output. If unset, falls back to the "
+                    "entity in block_grid_export_stop.",
+    )
     price_based_solar_grid_export: bool = Field(default=False, description="Block solar grid export during negative-price slots")
     grid_export_block_threshold: float = Field(default=0.0, description="Block grid export when price is below this threshold (€/kWh). Default 0 blocks only at negative prices.")
     # Battery-specific configuration (only used when type='battery')
@@ -321,6 +328,7 @@ def load_default_config() -> DevicesConfig:
             ]),
             block_grid_export_start=ActionSet(entity=[
                 EntityAction(service="switch/turn_off", entity_id="switch.deye_solar_export"),
+                
             ]),
             block_grid_export_stop=ActionSet(entity=[
                 EntityAction(service="switch/turn_on", entity_id="switch.deye_solar_export"),
