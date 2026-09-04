@@ -52,12 +52,50 @@ Each device has a **unique name** and a **device type**.
 
 ### Optional – Battery Only
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `charge_start` | ActionSet | Actions to start battery charging |
-| `charge_stop` | ActionSet | Actions to stop battery charging |
-| `discharge_start` | ActionSet | Actions to start battery discharging |
-| `discharge_stop` | ActionSet | Actions to stop battery discharging |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `charge_start` | ActionSet | `{}` | Actions to start battery charging |
+| `charge_stop` | ActionSet | `{}` | Actions to stop battery charging |
+| `discharge_start` | ActionSet | `{}` | Actions to start battery discharging |
+| `discharge_stop` | ActionSet | `{}` | Actions to stop battery discharging |
+| `battery_soc_entity` | string | `null` | Entity ID for the battery's state of charge (%) |
+| `battery_capacity_kwh` | number | `null` | Battery capacity in kWh, used for SOC-based cycle limiting |
+| `battery_charge_speed_kw` | number | `null` | Battery charge speed in kW, used for SOC-based cycle limiting |
+| `battery_min_soc_percent` | number | `20.0` | Minimum battery SOC (%) |
+| `battery_max_soc_percent` | number | `80.0` | Maximum battery SOC (%) |
+
+See [Battery Optimization](battery_optimization.md) for details.
+
+### Optional – EV Only
+
+An EV device supports exactly two charging modes — `solar_charge_only` (solar-surplus charging) or
+`ev_deadline_charge_enabled` (charge to a target SOC by a deadline; see below). They're mutually
+exclusive, and a device with neither set gets no automated charging schedule at all (a warning is
+logged at optimization time).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `solar_charge_only` | boolean | `false` | Controlled by solar surplus instead of a deadline; see [Optional – EV Solar Charge Controller](#optional--ev-solar-charge-controller) below |
+| `ev_min_current_limit` | number (A) | `6.0` | Minimum EV charging current |
+| `ev_max_current_limit` | number (A) | `16.0` | Maximum EV charging current |
+| `ev_voltage_entity_l1` / `_l2` / `_l3` | string | `null` | Entity for phase voltage (V); defaults to 230 V if unset |
+| `ev_single_phase_line` | string | `"l1"` | Physical phase used in single-phase mode: `"l1"`, `"l2"`, or `"l3"` |
+| `grid_export_unblock_condition` | ConditionGroup | `null` | EV-ready override that force-unblocks price-based grid-export blocking when true (e.g. charger connected and below target SOC) |
+
+See [Expressions](expressions.md) for the `value`/`payload`/`option` expression syntax used in `apply_limit_actions`.
+
+### Optional – EV Deadline Charging Only
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `ev_deadline_charge_enabled` | boolean | `false` | Enables "charge by deadline" mode. Mutually exclusive with `solar_charge_only`. |
+| `ev_soc_entity` | string | `null` | Entity ID for the EV's current state of charge (%) |
+| `ev_battery_capacity_kwh` | number | `null` | EV usable battery capacity in kWh (required) |
+| `ev_deadline_charge_power_kw` | number | `null` | Assumed charging power (kW) used for planning. If unset, estimated from `ev_max_current_limit` at 230 V single-phase. |
+| `ev_deadline_target_soc_entity` | string | `null` | `input_number` entity holding the target SOC (%) |
+| `ev_deadline_target_time_entity` | string | `null` | `input_datetime` entity holding the "charge by" deadline |
+
+See [EV Deadline Charging](ev_deadline_charging.md) for the full guide, including dashboard card setup.
 
 ### Optional – Heat Pump Runtime Calculation
 
@@ -208,6 +246,11 @@ are per device so different chargers can behave differently:
 | `solar_stop_debounce` | integer (cycles) | `3` | Consecutive control cycles the surplus must stay below the minimum before the session is **stopped** — rides out passing clouds without flapping. |
 | `solar_battery_soc_full` | number (%) | `0` (off) | Optional strict *battery-first lockout*. When `> 0`, the EV will not start until every battery with a SOC sensor reaches this level, and a running session stops if SOC later drops below `value − hysteresis`. Leave at `0` to disable (see below). |
 | `solar_battery_soc_hysteresis` | number (%) | `5` | Resume band for the lockout above: once stopped on low SOC, the EV resumes only after SOC climbs back to `solar_battery_soc_full`. |
+| `solar_block_battery_discharge` | bool | `false` | While the EV is actively charging, block battery discharge (via `discharge_stop`) and re-enable it (via `discharge_start`) once charging stops — only if discharge was active when charging began. |
+| `solar_phase_balance_switching` | bool | `false` | While charging single-phase, detect the EV's phase importing from the grid while the other two phases export or idle, and switch early to 3-phase to use the spare solar on those phases. |
+| `solar_phase_balance_import_threshold` | number (W) | `100` | Minimum import on the EV's phase to count as "starved" for the phase-balance switch. |
+| `solar_phase_balance_export_margin` | number (W) | `0` | The other two phases must each be at or above this net export to count as having spare solar. |
+| `solar_phase_balance_debounce` | integer (cycles) | `2` | Consecutive cycles the phase imbalance must persist before forcing an early switch to 3-phase (anti-flap). |
 
 #### Battery priority
 

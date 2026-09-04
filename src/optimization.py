@@ -6,7 +6,7 @@ functions from the new src/optimization/ package structure.
 The actual implementations have been moved to:
 - src/optimization/thermal.py: Heat pump and hot water optimization
 - src/optimization/battery.py: Battery charge/discharge optimization
-- src/optimization/ev.py: EV charging optimization
+- src/optimization/ev_deadline.py: EV deadline-based charging optimization
 - src/optimization/battery_limiter.py: SOC-aware battery cycle limiting
 
 For new code, prefer importing directly from src.optimization:
@@ -20,7 +20,6 @@ from .optimization import (
     optimize_hw,
     optimize_battery,
     optimize_bat_discharge,
-    optimize_ev,
     limit_battery_cycles,
 )
 
@@ -30,6 +29,5 @@ __all__ = [
     'optimize_hw',
     'optimize_battery',
     'optimize_bat_discharge',
-    'optimize_ev',
     'limit_battery_cycles',
 ]

@@ -1,6 +1,6 @@
 name: "EPG Add-on"
 description: "Energy Plan Generator"
-version: "1.0.3"
+version: "1.0.5"
 slug: "epg_addon"
 init: false
 homeassistant_api: true
@@ -12,8 +12,10 @@ arch:
   - i386
 ports:
   8099/tcp: 8099
+  8100/tcp: 8100
 ports_description:
   8099/tcp: Web interface (Not required for Ingress)
+  8100/tcp: Manual recalculation trigger (used by rest_command from HA dashboards)
 ingress: true       # Add this
 ingress_port: 8099  # Add this  
 webui: "http://[HOST]:[PORT:8099]"

@@ -20,7 +20,7 @@ from .ha_client import HomeAssistantClient
 from .device_state_manager import DeviceStateManager
 from .devices import Devices
 from .scheduler import Scheduler
-from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, optimize_ev, limit_battery_cycles
+from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, limit_battery_cycles, plan_ev_deadline_charge, read_ev_deadline_inputs
 from .utils import slot_to_time, slots_to_iso_ranges, merge_sequential_timeslots, time_to_slot
 from .config import CONFIG
 from .price_fetcher import EntsoeePriceFetcher
@@ -31,6 +31,7 @@ from .forecasting.statistics_loader import StatisticsLoader
 from .forecasting.weather import Weather
 from .forecasting.prediction import Prediction
 from .forecasting.battery_soc_prediction import predict_battery_soc
+from .forecasting.ev_soc_prediction import predict_ev_soc
 from .runtime_calculator import RuntimeCalculator
 
 logger = logging.getLogger(__name__)
@@ -130,8 +131,6 @@ class HeatpumpOptimizer:
         BAT_CHARGE_PERCENTILE = CONFIG['options'].get('battery_charge_percentile', 30)
         BAT_DISCHARGE_PERCENTILE = CONFIG['options'].get('battery_discharge_percentile', 70)
         BAT_PRICE_DIFF_THRESHOLD = CONFIG['options'].get('battery_price_difference_threshold', 0.10)
-
-        EV_MAX_PRICE = 0.02  # 11 cents per kWh
 
         logger.info("🔎 Starting energy optimization using ENTSO-E prices (rolling horizon)...")
         logger.info(f"🔋 Battery optimization settings: "
@@ -355,10 +354,15 @@ class HeatpumpOptimizer:
         for ev_device in ev_devices:
             device_name = ev_device.name
             if ev_device.solar_charge_only:
-                logger.info(f"🚗 {device_name}: solar_charge_only=True, skipping price-based scheduling")
+                logger.info(f"🚗 {device_name}: solar_charge_only=True, handled by the EV solar charge controller")
                 continue
-            ev_times = optimize_ev(prices, slot_minutes, EV_MAX_PRICE, slot_to_time)
-            results[device_name] = ev_times
+            if ev_device.ev_deadline_charge_enabled:
+                logger.info(f"🚗 {device_name}: ev_deadline_charge_enabled=True, plan computed by recalculate_ev_deadline_plans()")
+                continue
+            logger.warning(
+                f"🚗 {device_name}: neither solar_charge_only nor ev_deadline_charge_enabled is set — "
+                "no charging schedule will be created for this device"
+            )
 
         logger.info(f"⚙️ Optimization Results (before SOC limiting): {json.dumps(results)}")
 
@@ -432,7 +436,10 @@ class HeatpumpOptimizer:
         
         # Run initial battery cycle limiting based on current SOC
         await self.recalculate_battery_limits()
-        
+
+        # Run initial EV deadline-charging plan based on current SOC/target/deadline
+        await self.recalculate_ev_deadline_plans()
+
         # Schedule actions from database
         await self.scheduler_instance.schedule_actions()
 
@@ -614,6 +621,116 @@ class HeatpumpOptimizer:
             logger.info(f"🔋 Saved battery SOC predictions for {len(battery_soc_predictions)} device(s) ({total_points} data points)")
         
         logger.info(f"✅ Battery limits recalculated ({len(new_schedule)} entries)")
+        await self.scheduler_instance.schedule_actions()
+
+    async def recalculate_ev_deadline_plans(self):
+        """Recalculate EV deadline-charging plans based on current SOC, target, and deadline.
+
+        Called after optimization and every 15 minutes (mirrors recalculate_battery_limits)
+        so the plan reacts to actual SOC changes and to the user adjusting the target-SOC /
+        deadline dashboard helpers mid-day.
+        """
+        ev_deadline_devices = [
+            d for d in devices_config.get_devices_by_type('ev') if d.ev_deadline_charge_enabled
+        ]
+        if not ev_deadline_devices:
+            return
+
+        logger.info("🚗 Recalculating EV deadline-charging plans...")
+
+        with TinyDB('db.json') as db:
+            schedule_doc = db.get(Query().id == "schedule")
+
+        if not schedule_doc or not schedule_doc.get('horizon_start') or not schedule_doc.get('prices'):
+            logger.warning("⚠️ No valid schedule found, skipping EV deadline recalculation")
+            return
+
+        horizon_start = datetime.fromisoformat(schedule_doc['horizon_start'])
+        horizon_end = datetime.fromisoformat(schedule_doc['horizon_end'])
+
+        if datetime.now() >= horizon_end:
+            logger.info("📅 Horizon expired, skipping EV deadline recalculation")
+            return
+
+        prices = schedule_doc['prices']
+        slot_minutes = schedule_doc.get('slot_minutes', 15)
+        current_schedule = schedule_doc.get('schedule', [])
+        now = datetime.now().replace(tzinfo=None)
+
+        ev_device_names = {d.name for d in ev_deadline_devices}
+        new_schedule = [
+            entry for entry in current_schedule
+            if entry.get('device') not in ev_device_names
+        ]
+
+        ev_soc_predictions = {}
+
+        for ev_device in ev_deadline_devices:
+            previous_charge_times = self._extract_times(current_schedule, ev_device.name, horizon_start, slot_minutes)
+
+            if not ev_device.ev_battery_capacity_kwh:
+                logger.warning(f"⚠️ {ev_device.name}: ev_battery_capacity_kwh not configured, skipping deadline planning")
+                new_schedule.extend(self._times_to_schedule(previous_charge_times, ev_device.name, horizon_start, slot_minutes))
+                continue
+
+            current_soc, target_soc, deadline = await read_ev_deadline_inputs(self.get_state, ev_device, now)
+
+            charge_power_kw = ev_device.ev_deadline_charge_power_kw
+            if not charge_power_kw:
+                charge_power_kw = ev_device.ev_max_current_limit * 230 / 1000
+                logger.debug(
+                    f"🚗 {ev_device.name}: ev_deadline_charge_power_kw not set, estimated "
+                    f"{charge_power_kw:.2f} kW from ev_max_current_limit at 230V"
+                )
+
+            charge_times = plan_ev_deadline_charge(
+                prices=prices,
+                slot_minutes=slot_minutes,
+                horizon_start=horizon_start,
+                current_soc=current_soc,
+                target_soc=target_soc,
+                deadline=deadline,
+                ev_battery_capacity_kwh=ev_device.ev_battery_capacity_kwh,
+                charge_power_kw=charge_power_kw,
+                device_name=ev_device.name,
+                previous_charge_times=previous_charge_times,
+            )
+
+            new_schedule.extend(self._times_to_schedule(charge_times, ev_device.name, horizon_start, slot_minutes))
+
+            if current_soc is not None:
+                try:
+                    ev_soc_predictions[ev_device.name] = predict_ev_soc(
+                        charge_times=charge_times,
+                        slot_minutes=slot_minutes,
+                        horizon_start=horizon_start,
+                        horizon_end=horizon_end,
+                        current_soc=current_soc,
+                        ev_battery_capacity_kwh=ev_device.ev_battery_capacity_kwh,
+                        charge_power_kw=charge_power_kw,
+                        device_name=ev_device.name,
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ {ev_device.name}: could not compute EV SOC prediction: {e}")
+
+        new_schedule = merge_sequential_timeslots([new_schedule])
+        schedule_doc['schedule'] = new_schedule
+        schedule_doc['last_ev_deadline_recalc'] = datetime.now().isoformat()
+
+        with TinyDB('db.json') as db:
+            db.upsert(schedule_doc, Query().id == "schedule")
+
+        if ev_soc_predictions:
+            with TinyDB('db.json') as db:
+                existing = db.get(Query().id == 'predictions') or {}
+                existing.update({
+                    'id': 'predictions',
+                    'ev_soc': ev_soc_predictions,
+                    'updated_at': datetime.now().isoformat()
+                })
+                db.upsert(existing, Query().id == 'predictions')
+
+        logger.info(f"✅ EV deadline plans recalculated ({len(new_schedule)} entries)")
         await self.scheduler_instance.schedule_actions()
 
     async def _get_battery_soc(self, bat_device):

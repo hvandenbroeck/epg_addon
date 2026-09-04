@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile src/forecasting/curtailment_history.py)",
+      "Bash(git -C /addons/epg_addon log --oneline -15)",
+      "Bash(python3 -c ' *)",
+      "Bash(/tmp/claude-0/-addons-epg-addon/41c8cab6-2f33-498b-9486-aeff3b9710ad/scratchpad/venv/bin/python -c ' *)"
+    ]
+  }
+}

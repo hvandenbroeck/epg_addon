@@ -21,6 +21,7 @@ Welcome to the EPG Addon documentation. The EPG (Energy Price Guidance) Addon op
 |-------|-------------|
 | [Expressions](expressions.md) | Use mathematical expressions in `value` and `payload` fields |
 | [Battery Optimization](battery_optimization.md) | How battery charge/discharge thresholds are calculated from price history |
+| [EV Deadline Charging](ev_deadline_charging.md) | Charge an EV to a target SOC by a deadline, in the cheapest available price slots |
 | [Heat Pump Runtime](heat_pump_runtime.md) | Automatic daily runtime calculation from historical sensor data |
 | [Debug Logs](debug_logs.md) | Web-based debug log viewer: filtering, search, and real-time updates |
 

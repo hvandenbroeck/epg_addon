@@ -123,6 +123,7 @@ def get_predictions():
             'usage': doc.get('usage', []),
             'solar': doc.get('solar', []),
             'battery_soc': doc.get('battery_soc', {}),
+            'ev_soc': doc.get('ev_soc', {}),
             'updated_at': doc.get('updated_at', '')
         })
     return jsonify({
@@ -130,6 +131,7 @@ def get_predictions():
         'usage': [],
         'solar': [],
         'battery_soc': {},
+        'ev_soc': {},
         'updated_at': ''
     })
 
@@ -156,6 +158,7 @@ def get_gantt():
     usage_data = predictions.get('usage', [])
     solar_data = predictions.get('solar', [])
     battery_soc = predictions.get('battery_soc', {})
+    ev_soc = predictions.get('ev_soc', {})
 
     # Device labels and colors
     device_labels = {
@@ -374,6 +377,24 @@ def get_gantt():
                 name=label,
                 mode='lines',
                 line=dict(color=soc_colors[i % len(soc_colors)], width=2, shape='spline'),
+                hovertemplate='%{y:.1f}%<extra>' + label + '</extra>',
+                showlegend=True
+            ),
+            row=3, col=1, secondary_y=True
+        )
+
+    ev_soc_colors = ['#9B59B6', '#6C3483', '#C39BD3']
+    for i, (name, soc_entries) in enumerate(ev_soc.items()):
+        if not soc_entries:
+            continue
+        label = f"EV SOC{' ' + name if len(ev_soc) > 1 else ''} (%)"
+        fig.add_trace(
+            go.Scatter(
+                x=[r['timestamp'] for r in soc_entries],
+                y=[r['soc_percent'] for r in soc_entries],
+                name=label,
+                mode='lines',
+                line=dict(color=ev_soc_colors[i % len(ev_soc_colors)], width=2, shape='spline', dash='dot'),
                 hovertemplate='%{y:.1f}%<extra>' + label + '</extra>',
                 showlegend=True
             ),

@@ -13,6 +13,7 @@ from src.devices import EvSolarChargeController
 from src.devices_config import devices_config
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
+from aiohttp import web
 from src.forecasting import StatisticsLoader, Weather, Prediction, HAEnergyDashboardFetcher, PriceHistoryManager
 from src.config import CONFIG
 
@@ -144,6 +145,49 @@ async def main():
     )
     logger.info("Battery SOC recalculation scheduled every 15 minutes (Europe/Brussels)")
 
+    # Schedule EV deadline-charging plan recalculation every 15 minutes (same cadence as battery)
+    trigger_runner = None
+    if any(d.ev_deadline_charge_enabled for d in ev_devices):
+        async def scheduled_ev_deadline_recalc():
+            logger.info("🚗 Running scheduled EV deadline-charging plan recalculation...")
+            try:
+                await optimizer.recalculate_ev_deadline_plans()
+                logger.info("✅ EV deadline-charging plan recalculation completed successfully")
+            except Exception as e:
+                logger.error(f"❌ Error during EV deadline-charging plan recalculation: {e}", exc_info=True)
+
+        scheduler.add_job(
+            scheduled_ev_deadline_recalc,
+            'cron',
+            minute='10,25,40,55',
+            timezone='Europe/Brussels',
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=60,
+            id='ev_deadline_recalc'
+        )
+        logger.info("EV deadline-charging plan recalculation scheduled every 15 minutes (Europe/Brussels)")
+
+        # Lightweight HTTP endpoint so a Home Assistant dashboard button can trigger an instant
+        # recalculation, instead of waiting for the next 15-minute cron tick. Runs on the same
+        # asyncio loop as the scheduler, so it calls recalculate_ev_deadline_plans() directly.
+        async def handle_ev_deadline_recalc_trigger(request):
+            logger.info("🚗 Manual EV deadline-charging recalculation requested via HA dashboard...")
+            try:
+                await optimizer.recalculate_ev_deadline_plans()
+                logger.info("✅ Manual EV deadline-charging recalculation completed successfully")
+                return web.json_response({'status': 'ok'})
+            except Exception as e:
+                logger.error(f"❌ Error during manual EV deadline-charging recalculation: {e}", exc_info=True)
+                return web.json_response({'status': 'error', 'message': str(e)}, status=500)
+
+        trigger_app = web.Application()
+        trigger_app.router.add_post('/trigger/ev_deadline_recalc', handle_ev_deadline_recalc_trigger)
+        trigger_runner = web.AppRunner(trigger_app)
+        await trigger_runner.setup()
+        await web.TCPSite(trigger_runner, '0.0.0.0', 8100).start()
+        logger.info("Manual trigger HTTP server listening on port 8100 (POST /trigger/ev_deadline_recalc)")
+
     # Schedule load watcher to run every N minutes on the N-minute marks
     load_watcher_interval = CONFIG["options"].get("load_watcher_interval_minutes", 5)
 
@@ -235,6 +279,8 @@ async def main():
         load_watcher.close()
         _solar_db.close()
         scheduler.shutdown(wait=False)
+        if trigger_runner:
+            await trigger_runner.cleanup()
 
 if __name__ == "__main__":
     try:

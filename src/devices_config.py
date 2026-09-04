@@ -9,7 +9,7 @@ Configuration is loaded from environment variables or config files.
 """
 
 from typing import Dict, List, Optional, Literal, Any, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict, JsonConfigSettingsSource, PydanticBaseSettingsSource
 import json
 import os
@@ -121,7 +121,7 @@ class Device(BaseModel):
     # WP temperature-based optimization disable threshold (only used when type='wp')
     disable_optimization_above_avg_temp: Optional[float] = Field(default=None, description="Disable WP optimization when 48h average outside temperature exceeds this value (°C). None means always optimize.")
     # EV-specific options (only used when type='ev')
-    solar_charge_only: bool = Field(default=False, description="When True, the EV charger is controlled by solar surplus only; price-based scheduling and the load watcher are bypassed")
+    solar_charge_only: bool = Field(default=False, description="When True, the EV charger is controlled by solar surplus only (bypasses the load watcher). Mutually exclusive with ev_deadline_charge_enabled — an EV device must set exactly one of the two to be scheduled at all.")
     ev_min_current_limit: float = Field(default=6.0, description="Minimum EV charging current in Amps")
     ev_max_current_limit: float = Field(default=16.0, description="Maximum EV charging current in Amps")
     ev_voltage_entity_l1: Optional[str] = Field(default=None, description="HA entity for L1 phase voltage (V). Defaults to 230 V if unset.")
@@ -147,6 +147,22 @@ class Device(BaseModel):
     solar_phase_balance_import_threshold: float = Field(default=100.0, description="Minimum import (W) on the EV's phase to count as 'starved' for the phase-balance switch.")
     solar_phase_balance_export_margin: float = Field(default=0.0, description="The other two phases must each be at or above this net export (W) - i.e. not importing - to count as having spare solar for the phase-balance switch.")
     solar_phase_balance_debounce: int = Field(default=2, description="Consecutive control cycles the phase imbalance must persist before forcing an early switch to 3-phase (anti-flap).")
+    # EV deadline-charging mode (only used when type='ev'; mutually exclusive with solar_charge_only)
+    ev_deadline_charge_enabled: bool = Field(default=False, description="When True, EV charging is scheduled to reach a target SOC by a deadline using cheapest-slot selection. Mutually exclusive with solar_charge_only.")
+    ev_soc_entity: Optional[str] = Field(default=None, description="Home Assistant entity for the EV's current state of charge (%). Mirrors battery_soc_entity.")
+    ev_battery_capacity_kwh: Optional[float] = Field(default=None, description="EV usable battery capacity in kWh. Required for ev_deadline_charge_enabled; used to convert the SOC gap into an energy target.")
+    ev_deadline_charge_power_kw: Optional[float] = Field(default=None, description="Assumed charging power (kW) delivered during one 'on' slot, used only for planning how many slots are needed. Actual delivered power is still governed by load management/EvCharger. If unset, estimated from ev_max_current_limit at 230V single-phase.")
+    ev_deadline_target_soc_entity: Optional[str] = Field(default=None, description="HA input_number entity holding the user's target SOC (%) for deadline charging.")
+    ev_deadline_target_time_entity: Optional[str] = Field(default=None, description="HA input_datetime entity holding the user's 'charge by' deadline. A time-only helper (has_time, no has_date) is treated as a recurring daily deadline (rolls to the next occurrence); a full date+time helper is treated as a one-off absolute deadline.")
+
+    @model_validator(mode="after")
+    def _check_ev_deadline_solar_exclusive(self):
+        if self.ev_deadline_charge_enabled and self.solar_charge_only:
+            raise ValueError(
+                f"Device '{self.name}': ev_deadline_charge_enabled and solar_charge_only are mutually exclusive"
+            )
+        return self
+
 
 class DevicesConfig(BaseSettings):
     """Main devices configuration."""
@@ -339,7 +355,13 @@ def load_default_config() -> DevicesConfig:
         Device(
             name="ev",
             type="ev",
-            solar_charge_only=True,
+            solar_charge_only=False,
+            ev_deadline_charge_enabled=True,
+            ev_soc_entity="sensor.id_7_tourer_pro_accu",
+            ev_battery_capacity_kwh=77.0,
+            ev_deadline_charge_power_kw=5.0,
+            ev_deadline_target_soc_entity="input_number.ev_deadline_target_soc",
+            ev_deadline_target_time_entity="input_datetime.ev_deadline_target_time",
             enable_load_management=True,
             # EV solar-charge tuning (all optional; defaults shown for illustration)
             solar_round_down=False,
@@ -371,7 +393,7 @@ def load_default_config() -> DevicesConfig:
                 instantaneous_load_entity_unit="W",
                 load_priority=2,
                 load_limiter_entity="select.device_load_limit",
-                load_maximum_watts="8000",
+                load_maximum_watts="5000",
                 charge_sign="positive",
                 automated_phase_switching=True,
                 apply_limit_actions=LoadManagementActions(

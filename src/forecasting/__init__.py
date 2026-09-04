@@ -12,5 +12,6 @@ from .weather import Weather
 from .HAConfig import HAEnergyDashboardFetcher
 from .price_history import PriceHistoryManager
 from .battery_soc_prediction import predict_battery_soc
+from .ev_soc_prediction import predict_ev_soc
 
-__all__ = ['Prediction', 'StatisticsLoader', 'Weather', 'HAEnergyDashboardFetcher', 'PriceHistoryManager', 'predict_battery_soc']
+__all__ = ['Prediction', 'StatisticsLoader', 'Weather', 'HAEnergyDashboardFetcher', 'PriceHistoryManager', 'predict_battery_soc', 'predict_ev_soc']
