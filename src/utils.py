@@ -161,6 +161,27 @@ def _eval_node(node, safe_funcs):
         raise TypeError(f"Unsupported node type: {type(node)}")
 
 
+async def read_entity_watts(get_state, entity_id, default_unit="W"):
+    """Read a Home Assistant entity's state as watts, or None if it can't be read.
+
+    ``get_state`` is any async ``entity_id -> state dict`` callable (``Devices.get_state``,
+    ``HomeAssistantClient.get_state``, ...). A ``kW`` unit_of_measurement is scaled to
+    watts; ``default_unit`` applies when the entity reports no unit. Unavailable, unknown
+    and non-numeric states all return None so callers can decide what "unreadable" means.
+    """
+    if not entity_id:
+        return None
+    state = await get_state(entity_id)
+    if not state or state.get("state") in ("unavailable", "unknown", None):
+        return None
+    try:
+        raw = float(state["state"])
+    except (ValueError, TypeError):
+        return None
+    unit = state.get("attributes", {}).get("unit_of_measurement", default_unit)
+    return raw * 1000.0 if str(unit).lower() == "kw" else raw
+
+
 def slot_to_time(index, slot_minutes):
     """Convert slot index to time string."""
     hours = (index * slot_minutes) // 60

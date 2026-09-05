@@ -21,6 +21,17 @@ class Scheduler:
         self.scheduler = scheduler
         self.devices = devices
 
+    def _device_action_target(self, cfg, action_type):
+        """The Devices method that should run this device's plain start/stop action.
+
+        EV start/stop goes through ``execute_ev_action`` so the battery-discharge guard
+        blocks/releases at the slot boundary; everything else (and every battery-suffixed
+        entry, which has its own ``action_type``) uses the plain executor.
+        """
+        if action_type is None and getattr(cfg, 'type', None) == 'ev':
+            return self.devices.execute_ev_action
+        return self.devices.execute_device_action
+
     def remove_device_jobs(self):
         """Remove only device-related scheduled jobs (jobs with '_device_' in their ID).
         This preserves other jobs like scheduled_optimization and scheduled_load_watcher.
@@ -105,10 +116,12 @@ class Scheduler:
                 action_label = f"{action_type}_start" if action_type else "start"
                 # Grid-export block start is gated on EV readiness: when an EV is ready to
                 # charge, the price-based block is overridden so export stays unblocked.
+                # EV slots go through execute_ev_action so the battery-discharge guard can
+                # block discharge at the slot boundary instead of a control cycle later.
                 start_target = (
                     self.devices.execute_grid_export_block_start
                     if action_type == 'block_grid_export'
-                    else self.devices.execute_device_action
+                    else self._device_action_target(cfg, action_type)
                 )
                 self.scheduler.add_job(
                     start_target,
@@ -123,7 +136,7 @@ class Scheduler:
             if end_time > now and self.scheduler:
                 action_label = f"{action_type}_stop" if action_type else "stop"
                 self.scheduler.add_job(
-                    self.devices.execute_device_action,
+                    self._device_action_target(cfg, action_type),
                     trigger=DateTrigger(run_date=end_time),
                     args=[base_device_name, stop_actions, action_label, end_time],
                     id=f"{device}_stop_device_{end_time.isoformat()}",

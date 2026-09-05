@@ -83,16 +83,27 @@ sweep of all devices.
 
 **Conditional gating:** [src/conditions.py](src/conditions.py) evaluates user-configured
 `ConditionGroup`/`EntityCondition` trees against live HA state with an "unknown counts as false"
-safety rule. Currently used for EV-readiness overrides of price-based grid-export blocking
-(`grid_export_unblock_condition` on a `Device`) — both the scheduler's grid-export-block start job
-and `Devices.execute_grid_export_block_start` consult `any_ev_ready()` before blocking export, so
-an EV that needs the sun always wins over the price signal.
+safety rule (`evaluate_condition_group`). Used for EV-readiness overrides of price-based
+grid-export blocking (`ev_ready_to_charge_condition` on a `Device`) — both the scheduler's
+grid-export-block start job and `Devices.execute_grid_export_block_start` consult `any_ev_ready()`
+before blocking export, so an EV that needs the sun always wins over the price signal — and for
+the optional `ev_charging_condition` read by the battery-discharge guard.
+
+**Battery-discharge guard** ([src/devices/battery_discharge_guard.py](src/devices/battery_discharge_guard.py))
+blocks house-battery discharge while an EV charges (`block_battery_discharge_while_charging` on
+an EV `Device`), independent of charge mode because it keys off the EV's *observed* charging
+state. One instance is shared by every path that can open or close a session — the solar
+controller (inline), scheduled price/deadline slots (`Devices.execute_ev_action`, wired in by
+[src/scheduler.py](src/scheduler.py)), and a `reconcile()` sweep on the load-watcher interval for
+everything else. `device_verifier.run_periodic_verification` asks the guard which batteries are
+held so it doesn't "repair" a discharge slot the guard is deliberately holding off.
 
 **EV solar charging** ([src/devices/ev_solar_charge.py](src/devices/ev_solar_charge.py), the
 largest device module) is a separate control loop from price-based EV scheduling — active only
 when a device has `solar_charge_only=True`; it dynamically sets charge current from live solar
-surplus, handles phase switching/balancing, and battery-first lockout/discharge-blocking. It shares
-the same `Devices` instance and HA client as the optimizer rather than owning its own connection.
+surplus, handles phase switching/balancing, and the battery-first lockout (discharge blocking now
+lives in the shared battery-discharge guard below). It shares the same `Devices` instance and HA
+client as the optimizer rather than owning its own connection.
 
 **Load management** ([src/load_watcher/](src/load_watcher/)) is independent of the price
 optimizer: it watches instantaneous grid load every `load_watcher_interval_minutes`, computes

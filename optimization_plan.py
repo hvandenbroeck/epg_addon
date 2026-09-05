@@ -9,6 +9,7 @@ from src.optimizer import HeatpumpOptimizer
 from src.load_watcher import LoadWatcher
 from src.device_verifier import DeviceVerifier
 from src.devices import Devices
+from src.devices import BatteryDischargeGuard
 from src.devices import EvSolarChargeController
 from src.devices_config import devices_config
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -79,10 +80,20 @@ async def main():
     # Create load watcher instance
     load_watcher = LoadWatcher(args.token)
 
+    # Battery-discharge guard: one instance shared by every path that can start or stop an
+    # EV charging session (solar controller, scheduled price/deadline slots, periodic sweep),
+    # so a battery blocked by one is known to all of them.
+    discharge_guard = BatteryDischargeGuard(
+        get_state_func=optimizer.ha_client.get_state,
+        devices_instance=optimizer.devices,
+    )
+    Devices.set_discharge_guard(discharge_guard)
+
     # Create solar charge controller (shares the optimizer's HA client and Devices instance)
     solar_charge_controller = EvSolarChargeController(
         get_state_func=optimizer.ha_client.get_state,
         devices_instance=optimizer.devices,
+        discharge_guard=discharge_guard,
     )
     ev_devices = devices_config.get_devices_by_type('ev')
     battery_devices = devices_config.get_devices_by_type('battery')
@@ -236,6 +247,38 @@ async def main():
         )
     else:
         logger.info("EV solar charge controller not scheduled (not enabled in config or no EV devices configured)")
+
+    # Sweep the battery-discharge guard on the control-cycle interval. This covers the EV
+    # devices the solar controller does NOT drive (deadline, price-based, or a session
+    # started by hand at the charger); solar_charge_only devices are skipped inside
+    # reconcile() because that controller already blocks/releases inline every cycle.
+    guarded_ev_names = [
+        d.name for d in ev_devices
+        if BatteryDischargeGuard.is_enabled(d) and not d.solar_charge_only
+    ]
+    if guarded_ev_names and battery_devices:
+        async def scheduled_discharge_guard():
+            logger.info("🔋 Running scheduled battery-discharge guard sweep...")
+            try:
+                await discharge_guard.reconcile(ev_devices, battery_devices)
+            except Exception as e:
+                logger.error(f"❌ Error during battery-discharge guard sweep: {e}", exc_info=True)
+
+        await scheduled_discharge_guard()
+        scheduler.add_job(
+            scheduled_discharge_guard,
+            'cron',
+            minute=f'*/{load_watcher_interval}',
+            timezone='Europe/Brussels',
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=60,
+            id='battery_discharge_guard',
+        )
+        logger.info(
+            f"Battery-discharge guard scheduled every {load_watcher_interval} minutes "
+            f"(Europe/Brussels) for {len(guarded_ev_names)} EV device(s): {guarded_ev_names}"
+        )
 
     # Schedule device verification - periodic check every 5 minutes if enabled in config
     if CONFIG["options"].get("periodic_verification_enabled", True):

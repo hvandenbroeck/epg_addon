@@ -446,6 +446,19 @@ class DeviceVerifier:
                         device_states[dev_name] = "stop"
                         logger.info(f"☀️ {dev_name}: an EV is ready → forcing grid export UNBLOCK")
 
+        # Battery-discharge guard override: while an EV is charging, the guard has stopped
+        # that battery's discharge on purpose. Flip its active discharge slot to "stop" so
+        # this sweep re-asserts the block instead of fighting it every 5 minutes; the slot
+        # is verified as scheduled again as soon as the guard releases the battery.
+        guard = self.devices.get_discharge_guard()
+        for battery_name in (guard.blocked_batteries() if guard else set()):
+            discharge_key = f"{battery_name}_discharge"
+            if device_states.get(discharge_key) == "start":
+                device_states[discharge_key] = "stop"
+                logger.info(
+                    f"🔋 {discharge_key}: an EV is charging → keeping battery discharge BLOCKED"
+                )
+
         # Verify each device's expected state and re-apply the action when needed
         for device, expected_action in device_states.items():
             is_correct = await self.verify_device_action(device, expected_action)

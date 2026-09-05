@@ -36,6 +36,8 @@ from datetime import datetime
 from typing import Optional
 
 from ..config import CONFIG
+from ..utils import read_entity_watts
+from .battery_discharge_guard import BatteryDischargeGuard
 from .ev_charger import EvCharger, line_index
 
 logger = logging.getLogger(__name__)
@@ -67,10 +69,13 @@ class EvSolarChargeController:
     Only operates on EV devices with ``solar_charge_only=True``.
     """
 
-    def __init__(self, get_state_func, devices_instance):
+    def __init__(self, get_state_func, devices_instance, discharge_guard=None):
         self.get_state = get_state_func
         self.devices = devices_instance
         self.ev_charger = EvCharger(get_state_func, devices_instance)
+        # Shared with the scheduler and the periodic sweep so a battery blocked here is
+        # known everywhere; owns the block/restore bookkeeping itself.
+        self.discharge_guard = discharge_guard or BatteryDischargeGuard(get_state_func, devices_instance)
         # Per-device runtime state:
         #   {'three_phase': bool, 'amps': float, 'below_min': int,
         #    'last_single_switch': Optional[str ISO timestamp],
@@ -86,7 +91,6 @@ class EvSolarChargeController:
             'stop_debounce': int(getattr(ev_device, 'solar_stop_debounce', 3)),
             'battery_soc_full': float(getattr(ev_device, 'solar_battery_soc_full', 0.0)),
             'battery_soc_hysteresis': float(getattr(ev_device, 'solar_battery_soc_hysteresis', 5.0)),
-            'block_battery_discharge': bool(getattr(ev_device, 'solar_block_battery_discharge', False)),
             'phase_balance_switching': bool(getattr(ev_device, 'solar_phase_balance_switching', False)),
             'phase_balance_import_threshold': float(getattr(ev_device, 'solar_phase_balance_import_threshold', 100.0)),
             'phase_balance_export_margin': float(getattr(ev_device, 'solar_phase_balance_export_margin', 0.0)),
@@ -175,13 +179,15 @@ class EvSolarChargeController:
             below_min = st.get('below_min', 0)
             last_single_switch = st.get('last_single_switch')
             phase_imbalance_count = st.get('phase_imbalance_count', 0)
-            # Names of battery devices whose discharge we blocked and should restore on stop.
-            discharge_restore: list = st.get('discharge_restore', [])
 
             # ----------------------------------------------------------------
             # Not currently charging -> decide whether to start.
             # ----------------------------------------------------------------
             if not r['ev_charging']:
+                # Whatever ended the session (us, the user at the charger, the car itself),
+                # the battery must not stay blocked. No-op when nothing is held.
+                await self.discharge_guard.release(ev_device, battery_devices)
+
                 if not battery_full:
                     logger.info(
                         f"☀️ {device_name}: Battery at {min_soc:.0f}% "
@@ -220,14 +226,8 @@ class EvSolarChargeController:
                 )
                 if applied is not None:
                     init_three, init_amps = applied
-                discharge_restore = []
-                if tuning['block_battery_discharge'] and battery_devices:
-                    discharge_restore = await self._block_battery_discharge(battery_devices)
-                    logger.info(
-                        f"☀️ {device_name}: Blocked battery discharge during EV charging "
-                        f"(will restore on stop: {discharge_restore or 'none — discharge was already inactive'})"
-                    )
-                self._save_state(device_name, init_three, init_amps, 0, None, discharge_restore)
+                await self.discharge_guard.block(ev_device, battery_devices)
+                self._save_state(device_name, init_three, init_amps, 0, None)
                 logger.info(
                     f"☀️ {device_name}: Started at "
                     f"{'3-phase' if init_three else '1-phase'} {init_amps:.0f}A "
@@ -245,7 +245,7 @@ class EvSolarChargeController:
                     f"☀️ {device_name}: Battery fell to {min_soc:.0f}% "
                     f"(< {soc_resume:.0f}%) - stopping EV to recharge the house battery first"
                 )
-                await self._restore_battery_discharge(device_name, discharge_restore, battery_devices)
+                await self.discharge_guard.release(ev_device, battery_devices)
                 await self._stop(ev_device)
                 self._device_state.pop(device_name, None)
                 return
@@ -255,15 +255,7 @@ class EvSolarChargeController:
             # adopted an in-flight session, and re-blocks discharge that another
             # automation re-enabled mid-session. Only batteries currently discharging
             # are touched, so it's a no-op once everything is already stopped.
-            if tuning['block_battery_discharge'] and battery_devices:
-                before = set(discharge_restore)
-                discharge_restore = await self._block_battery_discharge(battery_devices, discharge_restore)
-                newly_blocked = set(discharge_restore) - before
-                if newly_blocked:
-                    logger.info(
-                        f"☀️ {device_name}: Blocked battery discharge during EV charging "
-                        f"({', '.join(sorted(newly_blocked))}; restore on stop: {discharge_restore})"
-                    )
+            await self.discharge_guard.block(ev_device, battery_devices)
 
             # Reconcile our phase belief with the charger's ACTUAL phase, so a charger
             # left in (or reverted to) the wrong phase can't corrupt the power figures
@@ -287,7 +279,7 @@ class EvSolarChargeController:
                         f"☀️ {device_name}: Surplus {surplus:.0f}W below minimum "
                         f"({effective_min:.0f}W) for {below_min} cycles - stopping EV charger"
                     )
-                    await self._restore_battery_discharge(device_name, discharge_restore, battery_devices)
+                    await self.discharge_guard.release(ev_device, battery_devices)
                     await self._stop(ev_device)
                     self._device_state.pop(device_name, None)
                     return
@@ -305,7 +297,7 @@ class EvSolarChargeController:
                     f"☀️ {device_name}: Surplus low ({surplus:.0f}W) - holding at minimum "
                     f"({below_min}/{tuning['stop_debounce']} before stop)"
                 )
-                self._save_state(device_name, is_three_phase, current_amps, below_min, last_single_switch, discharge_restore)
+                self._save_state(device_name, is_three_phase, current_amps, below_min, last_single_switch)
                 return
 
             # Surplus is healthy -> reset the stop debounce and track the limit.
@@ -337,7 +329,7 @@ class EvSolarChargeController:
                     )
                     if applied is not None:
                         is_three_phase, current_amps = applied
-                    self._save_state(device_name, is_three_phase, current_amps, 0, last_single_switch, discharge_restore, 0)
+                    self._save_state(device_name, is_three_phase, current_amps, 0, last_single_switch, 0)
                     logger.info(
                         f"☀️ {device_name}: Switched to 3-phase {current_amps:.0f}A due to phase imbalance"
                     )
@@ -353,7 +345,7 @@ class EvSolarChargeController:
                 f"{'3-phase' if is_three_phase else '1-phase'} {current_amps:.0f}A "
                 f"({EvCharger.compute_power(is_three_phase, current_amps, voltages):.0f}W)"
             )
-            self._save_state(device_name, is_three_phase, current_amps, 0, last_single_switch, discharge_restore, phase_imbalance_count)
+            self._save_state(device_name, is_three_phase, current_amps, 0, last_single_switch, phase_imbalance_count)
 
         except Exception as e:
             logger.error(f"☀️ {device_name}: Unhandled error in solar charge controller: {e}", exc_info=True)
@@ -508,84 +500,15 @@ class EvSolarChargeController:
 
     def _save_state(
         self, device_name, three_phase, amps, below_min, last_single_switch,
-        discharge_restore=None, phase_imbalance_count=0,
+        phase_imbalance_count=0,
     ) -> None:
         self._device_state[device_name] = {
             'three_phase': three_phase,
             'amps': amps,
             'below_min': below_min,
             'last_single_switch': last_single_switch,
-            'discharge_restore': discharge_restore or [],
             'phase_imbalance_count': phase_imbalance_count,
         }
-
-    async def _block_battery_discharge(self, battery_devices, restore=None) -> list:
-        """Stop discharge on any battery that is currently discharging; return the restore set.
-
-        Re-evaluated every cycle, so it's idempotent: a battery that is already stopped is
-        left untouched (no redundant command, and discharge the user/another automation
-        had off independently is never "restored"), while one that is actively discharging
-        is stopped and added to the restore set. ``restore`` is the set accumulated so far
-        this session; the union is returned. Discharge is considered active when any of the
-        battery's discharge_stop entities does NOT already match its target value.
-        """
-        restore_set = set(restore or [])
-        for bat in battery_devices or []:
-            if not bat.discharge_stop:
-                continue
-            if not await self._is_discharge_active(bat):
-                continue
-            await self.devices.execute_device_action(
-                device_name=bat.name,
-                actions=bat.discharge_stop.model_dump(exclude_none=True),
-                action_label="discharge_stop",
-            )
-            restore_set.add(bat.name)
-        return sorted(restore_set)
-
-    async def _restore_battery_discharge(self, ev_device_name, discharge_restore, battery_devices) -> None:
-        """Call discharge_start on the batteries whose discharge we stopped this session."""
-        if not discharge_restore or not battery_devices:
-            return
-        restore_set = set(discharge_restore)
-        for bat in battery_devices:
-            if bat.name in restore_set and bat.discharge_start:
-                await self.devices.execute_device_action(
-                    device_name=bat.name,
-                    actions=bat.discharge_start.model_dump(exclude_none=True),
-                    action_label="discharge_start",
-                )
-                logger.info(f"☀️ {ev_device_name}: Restored battery discharge for {bat.name}")
-
-    async def _is_discharge_active(self, bat_device) -> bool:
-        """Return True if battery discharge is currently active (not already stopped).
-
-        Checks each EntityAction in discharge_stop: if the entity's current state already
-        matches the action's target value, discharge was already stopped before we intervened.
-        If any entity differs from its target value, discharge is considered active.
-        Falls back to True (assume active) when state is unreadable.
-        """
-        discharge_stop = getattr(bat_device, 'discharge_stop', None)
-        if not discharge_stop:
-            return False
-        for entity_action in (discharge_stop.entity or []):
-            entity_id = getattr(entity_action, 'entity_id', None)
-            target = entity_action.value if entity_action.value is not None else entity_action.option
-            if not entity_id or target is None:
-                continue
-            state = await self.get_state(entity_id)
-            if not state or state.get('state') in ('unavailable', 'unknown', None):
-                return True  # unreadable → assume active (safer)
-            current = state.get('state', '')
-            try:
-                if float(current) != float(target):
-                    return True
-            except (ValueError, TypeError):
-                if str(current).lower() != str(target).lower():
-                    return True
-            # First readable entity already at target value → check next
-        # All checked entities are at their discharge_stop values → discharge was already stopped
-        return False
 
     # ------------------------------------------------------------------
     # Level selection (pure helpers)
@@ -648,19 +571,7 @@ class EvSolarChargeController:
 
     async def _read_watts(self, entity_id: Optional[str], default_unit: str = "W") -> Optional[float]:
         """Read a HA entity state as watts. Returns None if unavailable or unparseable."""
-        if not entity_id:
-            return None
-        state = await self.get_state(entity_id)
-        if not state or state.get("state") in ("unavailable", "unknown", None):
-            return None
-        try:
-            raw = float(state["state"])
-            unit = state.get("attributes", {}).get("unit_of_measurement", default_unit)
-            if unit.lower() == "kw":
-                raw *= 1000.0
-            return raw
-        except (ValueError, TypeError):
-            return None
+        return await read_entity_watts(self.get_state, entity_id, default_unit)
 
     async def _get_phase_power(self, l1_entity, l2_entity, l3_entity, name) -> tuple:
         """Fetch per-phase power readings (W). Missing/unavailable phases default to 0.0."""

@@ -11,8 +11,9 @@ logger = logging.getLogger(__name__)
 class Devices:
     """Manages device actions and execution."""
 
-    # Class-level reference to verifier (set externally)
+    # Class-level references, set externally (see optimization_plan.py)
     _verifier = None
+    _discharge_guard = None
 
     def __init__(self, access_token):
         self.ha_url = CONFIG['options']['ha_url']
@@ -30,6 +31,20 @@ class Devices:
             verifier: DeviceVerifier instance
         """
         cls._verifier = verifier
+
+    @classmethod
+    def set_discharge_guard(cls, guard):
+        """Set the battery-discharge guard used around EV start/stop actions.
+
+        Args:
+            guard: BatteryDischargeGuard instance
+        """
+        cls._discharge_guard = guard
+
+    @classmethod
+    def get_discharge_guard(cls):
+        """The battery-discharge guard, or None when it was never wired up."""
+        return cls._discharge_guard
 
     async def call_service(self, service, **service_data):
         """Call a Home Assistant service.
@@ -142,7 +157,7 @@ class Devices:
     async def execute_grid_export_block_start(self, device_name, actions, action_label, scheduled_time=None):
         """Gate the price-based grid-export block at the slot boundary.
 
-        If any EV is ready to charge (its ``grid_export_unblock_condition`` is certainly TRUE),
+        If any EV is ready to charge (its ``ev_ready_to_charge_condition`` is certainly TRUE),
         skip the block so export stays unblocked and the inverter runs at full production for the
         EV. Otherwise apply the block as scheduled. The periodic verifier keeps reconciling this
         for changes that happen mid-slot.
@@ -154,6 +169,27 @@ class Devices:
             )
             return
         await self.execute_device_action(device_name, actions, action_label, scheduled_time)
+
+    async def execute_ev_action(self, device_name, actions, action_label, scheduled_time=None):
+        """EV start/stop that also drives the battery-discharge guard.
+
+        Used for scheduled (price-based / deadline) EV slots, so the house battery stops
+        discharging the moment the slot opens rather than at the next control cycle. The
+        block on start is optimistic — the slot only *enables* charging, and the car may
+        not draw at all (unplugged, already full) — but the guard's periodic reconcile
+        releases it again on the next cycle when no charging materialises.
+        """
+        await self.execute_device_action(device_name, actions, action_label, scheduled_time)
+
+        guard = self._discharge_guard
+        device = self.get_device_config(device_name)
+        if not guard or not device or not guard.is_enabled(device):
+            return
+        battery_devices = self.get_devices_by_type("battery")
+        if action_label == "start":
+            await guard.block(device, battery_devices)
+        elif action_label == "stop":
+            await guard.release(device, battery_devices)
 
     def get_device_config(self, device_name):
         """Get configuration for a specific device.

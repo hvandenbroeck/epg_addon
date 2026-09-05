@@ -80,9 +80,43 @@ logged at optimization time).
 | `ev_max_current_limit` | number (A) | `16.0` | Maximum EV charging current |
 | `ev_voltage_entity_l1` / `_l2` / `_l3` | string | `null` | Entity for phase voltage (V); defaults to 230 V if unset |
 | `ev_single_phase_line` | string | `"l1"` | Physical phase used in single-phase mode: `"l1"`, `"l2"`, or `"l3"` |
-| `grid_export_unblock_condition` | ConditionGroup | `null` | EV-ready override that force-unblocks price-based grid-export blocking when true (e.g. charger connected and below target SOC) |
+| `ev_ready_to_charge_condition` | ConditionGroup | `null` | "EV is ready to charge" (e.g. charger connected and below target SOC). When true it overrides price-based grid-export blocking, force-unblocking export. Formerly `grid_export_unblock_condition`, which still works. |
+| `block_battery_discharge_while_charging` | boolean | `false` | Keep the house battery out of the charging session: block battery discharge while this EV is charging, restore it when the session ends. See [Battery-discharge guard](#battery-discharge-guard) below. |
+| `ev_charging_condition` | ConditionGroup | `null` | How to tell this EV is actively charging, for the guard above. Optional — charging is otherwise detected from `load_management.instantaneous_load_entity`. |
 
 See [Expressions](expressions.md) for the `value`/`payload`/`option` expression syntax used in `apply_limit_actions`.
+
+#### Battery-discharge guard
+
+Emptying the house battery into the car is close to always a loss — the energy makes a
+second round trip through an inverter for a load that could just as well have taken the
+same cheap import. With `block_battery_discharge_while_charging: true` on an EV device,
+each battery's `discharge_stop` action fires while that EV is charging and
+`discharge_start` fires when the session ends.
+
+It works the same in **every** charge mode — solar-surplus, deadline/target-SOC,
+price-based slots, and even a session started by hand at the charger — because it keys
+off the EV's *observed* charging state rather than off whichever planner opened the slot:
+
+- The solar controller blocks and releases inline, in the same cycle it starts or stops
+  the charger.
+- Scheduled (deadline / price) slots block at the slot boundary, when the start action
+  fires. That block is optimistic — if the car turns out not to draw at all (unplugged,
+  already full), the next sweep releases it.
+- A sweep on the load-watcher interval covers everything else, and re-asserts a block
+  another automation undid mid-session.
+
+Charging is detected from `load_management.instantaneous_load_entity` (same threshold and
+sign convention as the load watcher). Set `ev_charging_condition` instead when the
+charger's status entity is a better signal than its power meter; an unavailable or
+unknown entity counts as *not* charging, so a dead sensor releases the battery rather
+than pinning it blocked.
+
+Restores are conservative: only a battery that was **actually discharging** when the
+block was taken is ever restored (discharge that was already off stays off), and a
+battery blocked for two EVs at once is restored only when the last of them stops. While a
+block is held, the periodic device verifier leaves the battery's scheduled discharge slot
+alone instead of undoing the block every 5 minutes.
 
 ### Optional – EV Deadline Charging Only
 
@@ -246,7 +280,7 @@ are per device so different chargers can behave differently:
 | `solar_stop_debounce` | integer (cycles) | `3` | Consecutive control cycles the surplus must stay below the minimum before the session is **stopped** — rides out passing clouds without flapping. |
 | `solar_battery_soc_full` | number (%) | `0` (off) | Optional strict *battery-first lockout*. When `> 0`, the EV will not start until every battery with a SOC sensor reaches this level, and a running session stops if SOC later drops below `value − hysteresis`. Leave at `0` to disable (see below). |
 | `solar_battery_soc_hysteresis` | number (%) | `5` | Resume band for the lockout above: once stopped on low SOC, the EV resumes only after SOC climbs back to `solar_battery_soc_full`. |
-| `solar_block_battery_discharge` | bool | `false` | While the EV is actively charging, block battery discharge (via `discharge_stop`) and re-enable it (via `discharge_start`) once charging stops — only if discharge was active when charging began. |
+| `solar_block_battery_discharge` | bool | `false` | **Deprecated** — use [`block_battery_discharge_while_charging`](#battery-discharge-guard), which does the same thing in every charge mode instead of solar only. Setting this still enables it. |
 | `solar_phase_balance_switching` | bool | `false` | While charging single-phase, detect the EV's phase importing from the grid while the other two phases export or idle, and switch early to 3-phase to use the spare solar on those phases. |
 | `solar_phase_balance_import_threshold` | number (W) | `100` | Minimum import on the EV's phase to count as "starved" for the phase-balance switch. |
 | `solar_phase_balance_export_margin` | number (W) | `0` | The other two phases must each be at or above this net export to count as having spare solar. |

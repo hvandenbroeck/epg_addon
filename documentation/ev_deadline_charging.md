@@ -46,6 +46,11 @@ Add these fields to the EV device entry in `/data/options.json`:
 | `ev_deadline_target_soc_entity` | string | `null` | `input_number` entity holding your target SOC (%) |
 | `ev_deadline_target_time_entity` | string | `null` | `input_datetime` entity holding your "charge by" deadline |
 
+Worth pairing with this mode: `block_battery_discharge_while_charging: true` keeps the
+house battery from emptying itself into the car during a deadline slot — the block is
+taken when the slot opens and released when charging stops. See
+[Battery-discharge guard](device_configuration.md#battery-discharge-guard).
+
 Example device entry:
 
 ```json
@@ -58,6 +63,7 @@ Example device entry:
   "ev_deadline_charge_power_kw": 7.4,
   "ev_deadline_target_soc_entity": "input_number.ev_target_soc",
   "ev_deadline_target_time_entity": "input_datetime.ev_charge_by",
+  "block_battery_discharge_while_charging": true,
   "start": { "entity": [{"service": "switch/turn_on", "entity_id": "switch.ev_charger"}] },
   "stop":  { "entity": [{"service": "switch/turn_off", "entity_id": "switch.ev_charger"}] }
 }

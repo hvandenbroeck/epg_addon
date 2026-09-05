@@ -128,13 +128,34 @@ class Device(BaseModel):
     ev_voltage_entity_l2: Optional[str] = Field(default=None, description="HA entity for L2 phase voltage (V). Defaults to 230 V if unset.")
     ev_voltage_entity_l3: Optional[str] = Field(default=None, description="HA entity for L3 phase voltage (V). Defaults to 230 V if unset.")
     ev_single_phase_line: Literal["l1", "l2", "l3"] = Field(default="l1", description="Physical phase the charger uses when in single-phase mode. Determines which phase's voltage backs the 1-phase power calculation and which per-phase production/consumption reading is checked for the phase-balance switch.")
+    ev_ready_to_charge_condition: Optional[ConditionGroup] = Field(
+        default=None,
+        description="When this condition is TRUE the EV counts as ready to charge (e.g. the charger is "
+                    "connected and the car is below its target SOC), which overrides price-based grid-export "
+                    "blocking: export is force-unblocked so the inverter runs at full production for the EV. "
+                    "Evaluated with certainty only: if any referenced entity is unavailable/unknown, the EV "
+                    "counts as not-ready and normal price-based blocking stays in effect. None disables it.",
+    )
     grid_export_unblock_condition: Optional[ConditionGroup] = Field(
         default=None,
-        description="EV-ready override for price-based grid-export blocking. When this condition is TRUE "
-                    "(e.g. the charger is connected and the car is below its target SOC), price-based grid-export "
-                    "blocking is overridden and export is force-unblocked so the inverter runs at full production "
-                    "for the EV. Evaluated with certainty only: if any referenced entity is unavailable/unknown, "
-                    "the EV counts as not-ready and normal price-based blocking stays in effect. None disables it.",
+        description="DEPRECATED — renamed to ev_ready_to_charge_condition. Still honoured when set.",
+    )
+    ev_charging_condition: Optional[ConditionGroup] = Field(
+        default=None,
+        description="How to tell this EV is actively charging, used by the battery-discharge guard "
+                    "(block_battery_discharge_while_charging). Optional: when unset, charging is "
+                    "detected from load_management.instantaneous_load_entity exceeding the load "
+                    "watcher's threshold_power, which is what most chargers need. Configure it for a "
+                    "charger whose status entity is a better signal than its power meter. Evaluated "
+                    "with certainty only: an unavailable/unknown entity counts as not charging.",
+    )
+    block_battery_discharge_while_charging: bool = Field(
+        default=False,
+        description="When enabled, house-battery discharge is blocked (via each battery's "
+                    "discharge_stop) while this EV is actively charging, and re-enabled (via "
+                    "discharge_start) once it stops — but only for batteries that were actually "
+                    "discharging when the block was taken. Applies to every charge mode (solar, "
+                    "deadline, price-based, and manually started sessions).",
     )
     # EV solar-charge tuning (only used when type='ev' and solar_charge_only=True)
     solar_round_down: bool = Field(default=False, description="Round the charge limit DOWN to the level at/below the surplus (no grid import to round) instead of UP to the level above it.")
@@ -142,7 +163,7 @@ class Device(BaseModel):
     solar_stop_debounce: int = Field(default=3, description="Consecutive control cycles the surplus must stay below the minimum before the session stops (anti-flap).")
     solar_battery_soc_full: float = Field(default=0.0, description="Strict battery-first lockout: the EV will not start until every battery with a SOC entity reaches this percent, and stops if SOC later drops below (this - hysteresis). 0 disables (the battery still keeps priority via the surplus calculation).")
     solar_battery_soc_hysteresis: float = Field(default=5.0, description="Resume band (%) below 'full' before a stopped EV resumes (used with solar_battery_soc_full).")
-    solar_block_battery_discharge: bool = Field(default=False, description="When enabled, battery discharge is blocked (via discharge_stop) while the EV is actively charging, and re-enabled (via discharge_start) when charging stops — but only if discharge was active when charging began.")
+    solar_block_battery_discharge: bool = Field(default=False, description="DEPRECATED — use block_battery_discharge_while_charging, which does the same thing for every charge mode instead of only solar. Setting this still enables it.")
     solar_phase_balance_switching: bool = Field(default=False, description="While charging single-phase, detect the EV's phase importing from the grid while the other two phases are exporting or idle (a sign the inverter can't rebalance across phases), and switch early to 3-phase to use the spare solar on those phases.")
     solar_phase_balance_import_threshold: float = Field(default=100.0, description="Minimum import (W) on the EV's phase to count as 'starved' for the phase-balance switch.")
     solar_phase_balance_export_margin: float = Field(default=0.0, description="The other two phases must each be at or above this net export (W) - i.e. not importing - to count as having spare solar for the phase-balance switch.")
@@ -154,6 +175,19 @@ class Device(BaseModel):
     ev_deadline_charge_power_kw: Optional[float] = Field(default=None, description="Assumed charging power (kW) delivered during one 'on' slot, used only for planning how many slots are needed. Actual delivered power is still governed by load management/EvCharger. If unset, estimated from ev_max_current_limit at 230V single-phase.")
     ev_deadline_target_soc_entity: Optional[str] = Field(default=None, description="HA input_number entity holding the user's target SOC (%) for deadline charging.")
     ev_deadline_target_time_entity: Optional[str] = Field(default=None, description="HA input_datetime entity holding the user's 'charge by' deadline. A time-only helper (has_time, no has_date) is treated as a recurring daily deadline (rolls to the next occurrence); a full date+time helper is treated as a one-off absolute deadline.")
+
+    @model_validator(mode="after")
+    def _migrate_deprecated_fields(self):
+        """Fold deprecated field names into their replacements.
+
+        Keeps existing ``/data/options.json`` files working unchanged; from here on only
+        the new names are read anywhere in the codebase.
+        """
+        if self.solar_block_battery_discharge and not self.block_battery_discharge_while_charging:
+            self.block_battery_discharge_while_charging = True
+        if self.grid_export_unblock_condition and not self.ev_ready_to_charge_condition:
+            self.ev_ready_to_charge_condition = self.grid_export_unblock_condition
+        return self
 
     @model_validator(mode="after")
     def _check_ev_deadline_solar_exclusive(self):
@@ -369,7 +403,7 @@ def load_default_config() -> DevicesConfig:
             solar_stop_debounce=3,
             solar_battery_soc_full=0.0,
             solar_battery_soc_hysteresis=5.0,
-            solar_block_battery_discharge=True,
+            block_battery_discharge_while_charging=True,
             ev_min_current_limit=6.0,
             ev_max_current_limit=16.0,
             ev_voltage_entity_l1="sensor.peblar_ev_charger_spanning_fase_1",
@@ -381,7 +415,7 @@ def load_default_config() -> DevicesConfig:
             solar_phase_balance_export_margin=0.0,
             solar_phase_balance_debounce=2,
             # Unblock grid export while the car is below 79% AND the charger is charging or suspended.
-            grid_export_unblock_condition=ConditionGroup(
+            ev_ready_to_charge_condition=ConditionGroup(
                 logic="and",
                 conditions=[
                     EntityCondition(entity_id="sensor.id_7_tourer_pro_accu", operator="<", value=79),
@@ -393,7 +427,7 @@ def load_default_config() -> DevicesConfig:
                 instantaneous_load_entity_unit="W",
                 load_priority=2,
                 load_limiter_entity="select.device_load_limit",
-                load_maximum_watts="5000",
+                load_maximum_watts="6000",
                 charge_sign="positive",
                 automated_phase_switching=True,
                 apply_limit_actions=LoadManagementActions(

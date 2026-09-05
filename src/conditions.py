@@ -10,7 +10,8 @@ cannot be evaluated with certainty - the entity is unreadable, or its state/attr
 as ``False``. So readiness is only ever asserted when every relevant leaf is definitely true.
 
 The comparison logic mirrors the numeric-first / case-insensitive-string convention already
-used in ``device_verifier.verify_entity_action`` and ``ev_solar_charge._is_discharge_active``.
+used in ``device_verifier.verify_entity_action`` and
+``battery_discharge_guard._is_discharge_active``.
 """
 import logging
 from typing import Awaitable, Callable, Optional
@@ -100,11 +101,11 @@ async def evaluate_entity_condition(cond, get_state: GetState) -> Optional[bool]
     return _compare(raw, cond.operator, cond.value)
 
 
-async def is_ev_ready(group, get_state: GetState) -> bool:
+async def evaluate_condition_group(group, get_state: GetState) -> bool:
     """True ONLY if ``group`` evaluates with certainty to True.
 
     Any leaf that is unknown/unavailable/unreadable counts as False, so an ``and`` group
-    short-circuits to "not ready". An empty/None group proves nothing and returns False.
+    short-circuits to False. An empty/None group proves nothing and returns False.
     """
     if not group or not group.conditions:
         return False
@@ -113,13 +114,13 @@ async def is_ev_ready(group, get_state: GetState) -> bool:
 
 
 async def any_ev_ready(ev_devices, get_state: GetState) -> bool:
-    """True if any EV device's ``grid_export_unblock_condition`` is certainly ready.
+    """True if any EV device's ``ev_ready_to_charge_condition`` is certainly ready.
 
     When true, price-based grid-export blocking should be overridden (export unblocked) so
     the inverter runs at full production for the EV.
     """
     for ev in ev_devices or []:
-        cond = getattr(ev, "grid_export_unblock_condition", None)
-        if cond and cond.conditions and await is_ev_ready(cond, get_state):
+        cond = getattr(ev, "ev_ready_to_charge_condition", None)
+        if cond and cond.conditions and await evaluate_condition_group(cond, get_state):
             return True
     return False
