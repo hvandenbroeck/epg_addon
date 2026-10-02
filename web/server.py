@@ -42,6 +42,7 @@ def get_battery_thresholds():
         updated_at = schedule_docs[0].get('updated_at', '')
         solar_only_mode = schedule_docs[0].get('solar_only_mode', False)
         last_soc_recalc = schedule_docs[0].get('last_soc_recalc', '')
+        solar_only_evaluation = schedule_docs[0].get('solar_only_evaluation')
         return jsonify({
             'max_charge_price': thresholds.get('max_charge_price'),
             'min_discharge_price': thresholds.get('min_discharge_price'),
@@ -51,6 +52,7 @@ def get_battery_thresholds():
             'price_diff_threshold': thresholds.get('price_diff_threshold'),
             'updated_at': updated_at,
             'solar_only_mode': solar_only_mode,
+            'solar_only_evaluation': solar_only_evaluation,
             'last_soc_recalc': last_soc_recalc
         })
     return jsonify({
@@ -62,7 +64,67 @@ def get_battery_thresholds():
         'price_diff_threshold': None,
         'updated_at': '',
         'solar_only_mode': False,
+        'solar_only_evaluation': None,
         'last_soc_recalc': ''
+    })
+
+
+_EV_DEADLINE_EMPTY_PRIMARY = {
+    'device': None,
+    'ready': None,
+    'ready_condition_configured': False,
+    'charging': False,
+    'charging_power_w': None,
+    'charging_power_kw': None,
+    'charging_source': None,
+    'charging_condition_configured': False,
+    'charging_load_entity': None,
+    'scheduled': False,
+    'status': 'unavailable',
+    'headline': 'No EV deadline plan yet',
+    'plan_headline': 'No EV deadline plan yet',
+    'message': 'No EV deadline-charging plan has been computed yet.',
+    'current_soc': None,
+    'target_soc': None,
+    'deadline': None,
+    'charge_power_kw': None,
+    'energy_needed_kwh': 0.0,
+    'energy_planned_kwh': 0.0,
+    'energy_scheduled_kwh': 0.0,
+    'avg_price': None,
+    'slot_count': 0,
+    'scheduled_slot_count': 0,
+    'slots': [],
+    'scheduled_slots': [],
+    'first_slot_start': None,
+    'last_slot_stop': None,
+    'updated_at': '',
+}
+
+
+@app.route('/api/ev_deadline')
+def get_ev_deadline():
+    """Return the EV deadline-charging plan summaries.
+
+    Written by HeatpumpOptimizer.recalculate_ev_deadline_plans(). ``devices`` holds one
+    summary per deadline-mode EV (scheduled or held back while the EV is not ready);
+    ``primary`` repeats the first device so a Home Assistant REST sensor can read it
+    without knowing the device name. ``primary`` is always an object.
+    """
+    with TinyDB('db.json') as db:
+        doc = db.get(Query().id == 'ev_deadline')
+
+    if doc:
+        primary = doc.get('primary') or _EV_DEADLINE_EMPTY_PRIMARY
+        return jsonify({
+            'devices': doc.get('devices', {}),
+            'primary': primary,
+            'updated_at': doc.get('updated_at', '')
+        })
+    return jsonify({
+        'devices': {},
+        'primary': _EV_DEADLINE_EMPTY_PRIMARY,
+        'updated_at': ''
     })
 
 @app.route('/api/peak')

@@ -9,7 +9,7 @@ A Home Assistant addon that optimizes the energy usage of heat pumps, hot water 
 - **Heat pump runtime** – Calculates expected daily runtime from sensor history and adjusts the schedule accordingly.
 - **Load management** – Dynamically limits device power draw to avoid grid overload.
 - **Expressions** – Use mathematical expressions (e.g. watt-to-amp conversion) directly in device configuration values.
-- **EV deadline charging** – Charge an EV to a target SOC by a deadline you set from a Home Assistant dashboard card, using the cheapest available price slots. A trigger endpoint on port **8100** lets a dashboard button force an instant recalculation instead of waiting for the next 15-minute cycle.
+- **EV deadline charging** – Charge an EV to a target SOC by a deadline you set from a Home Assistant dashboard card, using the cheapest available price slots; the plan is only scheduled once the car is ready to charge. The Home Assistant side (helpers, "Recalculate now" script, readiness/plan sensors) ships as a package that the add-on deploys into your HA config on start, and a trigger endpoint on port **8100** lets a dashboard button force an instant recalculation instead of waiting for the next 15-minute cycle.
 - **Web UI** – Visualizes the optimization schedule and provides a filterable debug log viewer on port **8099**.
 
 ## Documentation
@@ -34,4 +34,6 @@ See the **[documentation/](documentation/index.md)** folder for all guides:
 3. Build and start the container (see `Dockerfile` and `run.sh`).
 4. The addon runs the optimization daily at **16:05** and exposes the web UI on port **8099**. If any
    device has `ev_deadline_charge_enabled: true`, it also exposes a manual-recalculation trigger on
-   port **8100** (see [EV Deadline Charging](documentation/ev_deadline_charging.md)).
+   port **8100** and deploys `homeassistant/packages/ev_deadline.yaml` into your Home Assistant
+   `packages/` directory (enable packages in `configuration.yaml`, then restart HA — see
+   [EV Deadline Charging](documentation/ev_deadline_charging.md)).

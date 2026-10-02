@@ -27,9 +27,7 @@ stops.
 """
 import logging
 
-from ..config import CONFIG
-from ..conditions import evaluate_condition_group
-from ..utils import read_entity_watts
+from ..ev_charging_state import is_ev_charging
 
 logger = logging.getLogger(__name__)
 
@@ -65,35 +63,13 @@ class BatteryDischargeGuard:
     async def is_ev_charging(self, ev_device) -> bool:
         """Is this EV drawing power right now?
 
-        Uses ``ev_charging_condition`` when the user configured one (for a charger whose
-        status entity is a better signal than its power meter), else the load-management
-        power entity with the same threshold and sign convention the load watcher uses.
-        Unreadable counts as *not* charging, so a dead sensor releases the battery rather
-        than pinning it blocked indefinitely.
+        Delegates to :func:`src.ev_charging_state.is_ev_charging`, the single definition
+        shared with the dashboard/UI status: ``ev_charging_condition`` when the user
+        configured one, else the load-management power entity with the load watcher's
+        threshold and sign convention. Unreadable counts as *not* charging, so a dead
+        sensor releases the battery rather than pinning it blocked indefinitely.
         """
-        cond = getattr(ev_device, 'ev_charging_condition', None)
-        if cond and cond.conditions:
-            return await evaluate_condition_group(cond, self.get_state)
-
-        load_mgmt = getattr(ev_device, 'load_management', None)
-        entity_id = getattr(load_mgmt, 'instantaneous_load_entity', None) if load_mgmt else None
-        if not entity_id:
-            logger.warning(
-                f"🔋 {ev_device.name}: battery-discharge guard needs either ev_charging_condition "
-                f"or load_management.instantaneous_load_entity - treating as not charging"
-            )
-            return False
-
-        raw = await read_entity_watts(self.get_state, entity_id, load_mgmt.instantaneous_load_entity_unit)
-        if raw is None:
-            logger.warning(
-                f"🔋 {ev_device.name}: cannot read charger power from {entity_id} - "
-                f"treating as not charging"
-            )
-            return False
-
-        threshold = CONFIG.get('options', {}).get('load_watcher_threshold_power', 10.0)
-        return raw < -threshold if load_mgmt.charge_sign == 'negative' else raw > threshold
+        return await is_ev_charging(self.get_state, ev_device, warn_when_undetectable=True)
 
     # ------------------------------------------------------------------
     # Block / release

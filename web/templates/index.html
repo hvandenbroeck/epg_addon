@@ -38,7 +38,14 @@
             Grid charging and forced discharge are suspended.
         </div>
         <div class="solar-only-badge">⚡ Grid charging &amp; forced discharge suspended</div>
+        <div class="solar-only-evaluation" id="solarOnlyEvaluation"></div>
         <div class="solar-only-timestamp" id="solarOnlyTimestamp"></div>
+    </div>
+    <div class="ev-deadline" id="evDeadlineBlock" style="display: none;">
+        <h2>EV Deadline Charging</h2>
+        <div id="evDeadlineContent">
+            <div class="loading">Loading EV charging plan...</div>
+        </div>
     </div>
     <div class="device-limits">
         <h2>Device Load Limits</h2>
@@ -227,6 +234,154 @@
                 });
         }
 
+        function formatSolarOnlyEvaluation(ev) {
+            // One line explaining the solar-only decision: solar vs usage (+ scheduled EV charge)
+            if (!ev) return '';
+            const solar = (ev.solar_kwh || 0).toFixed(1);
+            const usage = (ev.usage_kwh || 0).toFixed(1);
+            const evKwh = ev.ev_deadline_kwh || 0;
+            const total = (ev.total_usage_kwh || 0).toFixed(1);
+            let text = `Solar-only check: solar <strong>${solar} kWh</strong> vs usage <strong>${usage} kWh</strong>`;
+            if (evKwh > 0) {
+                text += ` + scheduled EV charge <strong>${evKwh.toFixed(1)} kWh</strong> = <strong>${total} kWh</strong>`;
+            }
+            text += ev.solar_only_mode ? ' → solar covers it' : ' → solar does not cover it';
+            return text;
+        }
+
+        function escapeHtml(value) {
+            return String(value === null || value === undefined ? '' : value)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        function formatSlotRange(slot) {
+            const start = new Date(slot.start);
+            const stop = new Date(slot.stop);
+            const sameDay = start.toDateString() === stop.toDateString();
+            const day = d => d.toLocaleDateString([], { weekday: 'short', day: '2-digit', month: 'short' });
+            const time = d => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            return sameDay
+                ? `${day(start)} ${time(start)}–${time(stop)}`
+                : `${day(start)} ${time(start)} – ${day(stop)} ${time(stop)}`;
+        }
+
+        function updateEvDeadline() {
+            fetch('api/ev_deadline')
+                .then(response => response.json())
+                .then(data => {
+                    const block = document.getElementById('evDeadlineBlock');
+                    const container = document.getElementById('evDeadlineContent');
+                    const devices = Object.values(data.devices || {});
+
+                    if (devices.length === 0) {
+                        // No deadline-mode EV configured (or no plan computed yet): keep the box hidden
+                        block.style.display = 'none';
+                        return;
+                    }
+                    block.style.display = '';
+
+                    let html = '<div class="ev-deadline-grid">';
+                    devices.forEach(dev => {
+                        const ready = dev.ready === true;
+                        const readyConfigured = dev.ready_condition_configured === true;
+                        const charging = dev.charging === true;
+                        const scheduled = dev.scheduled === true;
+                        const name = escapeHtml(dev.device || 'EV').replace(/_/g, ' ').toUpperCase();
+                        const slots = dev.slots || [];
+                        const chargeKw = dev.charging_power_kw !== null && dev.charging_power_kw !== undefined
+                            ? `${Number(dev.charging_power_kw).toFixed(2)} kW` : null;
+
+                        // A car that is already charging gets the charging badge, not the
+                        // (then misleading) readiness badge.
+                        let readyBadge;
+                        if (charging) {
+                            readyBadge = `<span class="ev-badge ev-badge-charging">⚡ Charging now${chargeKw ? ' – ' + chargeKw : ''}</span>`;
+                        } else if (!readyConfigured) {
+                            readyBadge = '<span class="ev-badge ev-badge-neutral">No readiness condition – always scheduled</span>';
+                        } else if (ready) {
+                            readyBadge = '<span class="ev-badge ev-badge-ready">🔌 Car ready to charge</span>';
+                        } else {
+                            readyBadge = '<span class="ev-badge ev-badge-waiting">🚗 Car not ready to charge</span>';
+                        }
+
+                        const socNow = dev.current_soc !== null && dev.current_soc !== undefined ? `${Number(dev.current_soc).toFixed(0)}%` : '--';
+                        const socTarget = dev.target_soc !== null && dev.target_soc !== undefined ? `${Number(dev.target_soc).toFixed(0)}%` : '--';
+                        const deadline = dev.deadline ? new Date(dev.deadline).toLocaleString([], { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '--';
+                        const needed = (dev.energy_needed_kwh || 0).toFixed(1);
+                        const planned = (dev.energy_planned_kwh || 0).toFixed(1);
+                        const avgPrice = dev.avg_price !== null && dev.avg_price !== undefined ? `€${Number(dev.avg_price).toFixed(4)}/kWh` : '--';
+                        const power = dev.charge_power_kw ? `${Number(dev.charge_power_kw).toFixed(1)} kW` : '--';
+
+                        // Charging is a live observation, the plan note is about the schedule:
+                        // both can be true at once (a car charging on solar surplus while the
+                        // deadline plan is still held back), so they stack rather than replace.
+                        let planNote = '';
+                        if (charging) {
+                            planNote += `
+                                <div class="ev-plan-note charging">
+                                    <strong>The car is charging right now${chargeKw ? ' at ' + chargeKw : ''}.</strong>
+                                    ${scheduled
+                                        ? ' This is a scheduled slot, or a session started elsewhere.'
+                                        : ' The session was not started by the deadline plan (solar surplus, a price slot, or started by hand at the charger).'}
+                                </div>`;
+                        }
+                        if (readyConfigured && !ready) {
+                            planNote += `
+                                <div class="ev-plan-note waiting">
+                                    <strong>Nothing is scheduled yet.</strong> The charge will be planned automatically as soon as
+                                    the car is plugged in and ready to charge. Your target SOC and deadline are saved and already
+                                    taken into account – the slots below are what would be scheduled right now.
+                                    Held-back slots are <em>not</em> shown on the schedule chart.
+                                </div>`;
+                        } else if (scheduled) {
+                            planNote += `<div class="ev-plan-note scheduled"><strong>Scheduled.</strong> These slots are in the live schedule and on the chart below.</div>`;
+                        }
+
+                        let slotsHtml = '';
+                        if (slots.length > 0) {
+                            slotsHtml = '<div class="ev-slots">' +
+                                slots.map(sl => `<span class="ev-slot-chip ${ready || !readyConfigured ? 'scheduled' : 'held'}">${escapeHtml(formatSlotRange(sl))}</span>`).join('') +
+                                '</div>';
+                        } else {
+                            slotsHtml = '<div class="ev-slots-empty">No charge slots in the plan.</div>';
+                        }
+
+                        html += `
+                            <div class="ev-deadline-card ${charging ? 'charging' : (readyConfigured && !ready ? 'waiting' : '')}">
+                                <div class="ev-deadline-header">
+                                    <div class="ev-deadline-name">${name}</div>
+                                    ${readyBadge}
+                                </div>
+                                <div class="ev-headline">${escapeHtml(dev.headline || '')}</div>
+                                <div class="ev-message">${escapeHtml(dev.message || '')}</div>
+                                <div class="ev-stats">
+                                    <div class="ev-stat"><span class="ev-stat-label">SOC</span><span class="ev-stat-value">${socNow} → ${socTarget}</span></div>
+                                    <div class="ev-stat"><span class="ev-stat-label">Charge by</span><span class="ev-stat-value">${escapeHtml(deadline)}</span></div>
+                                    <div class="ev-stat"><span class="ev-stat-label">Energy needed</span><span class="ev-stat-value">${needed} kWh</span></div>
+                                    <div class="ev-stat"><span class="ev-stat-label">Planned</span><span class="ev-stat-value">${dev.slot_count || 0} slot(s) · ${planned} kWh</span></div>
+                                    <div class="ev-stat"><span class="ev-stat-label">Avg. price</span><span class="ev-stat-value">${avgPrice}</span></div>
+                                    <div class="ev-stat"><span class="ev-stat-label">Planning power</span><span class="ev-stat-value">${power}</span></div>
+                                    <div class="ev-stat"><span class="ev-stat-label">Charger load</span><span class="ev-stat-value ${charging ? 'charging' : ''}">${chargeKw || '--'}</span></div>
+                                </div>
+                                ${planNote}
+                                ${slotsHtml}
+                            </div>`;
+                    });
+                    html += '</div>';
+
+                    if (data.updated_at) {
+                        const date = new Date(data.updated_at);
+                        html += `<div class="threshold-timestamp">Last recalculated: ${date.toLocaleString()}</div>`;
+                    }
+                    container.innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Error fetching EV deadline plan:', error);
+                    document.getElementById('evDeadlineContent').innerHTML =
+                        '<div class="no-limits">Error loading EV charging plan</div>';
+                });
+        }
+
         function updateBatteryThresholds() {
             fetch('api/battery_thresholds')
                 .then(response => response.json())
@@ -239,6 +394,8 @@
                         // Hide thresholds, show solar-only banner
                         thresholdsBlock.style.display = 'none';
                         solarOnlyBanner.classList.add('active');
+
+                        document.getElementById('solarOnlyEvaluation').innerHTML = formatSolarOnlyEvaluation(data.solar_only_evaluation);
 
                         // Populate the last-evaluated timestamp
                         const lastRecalc = data.last_soc_recalc || data.updated_at || '';
@@ -288,6 +445,11 @@
                         </div>
                     `;
                     
+                    const evaluation = formatSolarOnlyEvaluation(data.solar_only_evaluation);
+                    if (evaluation) {
+                        html += `<div class="threshold-info">${evaluation}</div>`;
+                    }
+
                     if (data.updated_at) {
                         const date = new Date(data.updated_at);
                         html += `<div class="threshold-timestamp">Last updated: ${date.toLocaleString()}</div>`;
@@ -424,12 +586,14 @@
         updatePeak();
         updateDeviceLimits();
         updateBatteryThresholds();
+        updateEvDeadline();
         updateChart();
         
         // Update peak and device limits every 30 seconds, chart every minute
         setInterval(updatePeak, 30000);
         setInterval(updateDeviceLimits, 30000);
         setInterval(updateBatteryThresholds, 60000);
+        setInterval(updateEvDeadline, 60000);
         setInterval(updateChart, 60000);
     </script>
 </body>

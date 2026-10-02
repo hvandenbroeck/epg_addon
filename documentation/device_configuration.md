@@ -80,9 +80,9 @@ logged at optimization time).
 | `ev_max_current_limit` | number (A) | `16.0` | Maximum EV charging current |
 | `ev_voltage_entity_l1` / `_l2` / `_l3` | string | `null` | Entity for phase voltage (V); defaults to 230 V if unset |
 | `ev_single_phase_line` | string | `"l1"` | Physical phase used in single-phase mode: `"l1"`, `"l2"`, or `"l3"` |
-| `ev_ready_to_charge_condition` | ConditionGroup | `null` | "EV is ready to charge" (e.g. charger connected and below target SOC). When true it overrides price-based grid-export blocking, force-unblocking export. Formerly `grid_export_unblock_condition`, which still works. |
+| `ev_ready_to_charge_condition` | ConditionGroup | `null` | "EV is ready to charge" (e.g. charger connected and below target SOC). When true it overrides price-based grid-export blocking, force-unblocking export. With `ev_deadline_charge_enabled` it also gates the deadline plan: the plan is only scheduled while the EV is ready, otherwise it is computed and shown but held back (see [EV Deadline Charging](ev_deadline_charging.md#only-scheduled-when-the-car-is-ready)). Unknown/unavailable entities count as not ready. Formerly `grid_export_unblock_condition`, which still works. |
 | `block_battery_discharge_while_charging` | boolean | `false` | Keep the house battery out of the charging session: block battery discharge while this EV is charging, restore it when the session ends. See [Battery-discharge guard](#battery-discharge-guard) below. |
-| `ev_charging_condition` | ConditionGroup | `null` | How to tell this EV is actively charging, for the guard above. Optional — charging is otherwise detected from `load_management.instantaneous_load_entity`. |
+| `ev_charging_condition` | ConditionGroup | `null` | How to tell this EV is actively charging. Optional — charging is otherwise detected from `load_management.instantaneous_load_entity` rising above the load watcher's `load_watcher_threshold_power`. Drives both the [battery-discharge guard](#battery-discharge-guard) above and the "charging now" status in the web UI and the Home Assistant card (see [Charging now vs. ready to charge](ev_deadline_charging.md#charging-now-vs-ready-to-charge)). Unknown/unavailable entities count as not charging. |
 
 See [Expressions](expressions.md) for the `value`/`payload`/`option` expression syntax used in `apply_limit_actions`.
 
@@ -110,7 +110,9 @@ Charging is detected from `load_management.instantaneous_load_entity` (same thre
 sign convention as the load watcher). Set `ev_charging_condition` instead when the
 charger's status entity is a better signal than its power meter; an unavailable or
 unknown entity counts as *not* charging, so a dead sensor releases the battery rather
-than pinning it blocked.
+than pinning it blocked. The same detection also feeds the "charging now" status shown in
+the web UI and on the Home Assistant card — one definition, so the guard and the dashboard
+can never disagree about whether the car is charging.
 
 Restores are conservative: only a battery that was **actually discharging** when the
 block was taken is ever restored (discharge that was already off stays off), and a

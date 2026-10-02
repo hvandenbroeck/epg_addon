@@ -1,0 +1,299 @@
+# EV deadline charging — Home Assistant package shipped with the EPG add-on.
+#
+# DEPLOYED AUTOMATICALLY: the add-on copies this file to <HA config>/packages/ev_deadline.yaml
+# every time it starts (see run.sh; needs the `homeassistant_config:rw` mapping in config.yaml).
+# Home Assistant must have packages enabled in configuration.yaml:
+#
+#   homeassistant:
+#     packages: !include_dir_named packages/
+#
+# Local edits to the deployed copy are overwritten on the next add-on start — put your own
+# customisations in a separate package file. Restart Home Assistant (or reload YAML for the
+# affected domains) after the add-on deploys a new version.
+#
+# What this package provides:
+#   * The two helpers the add-on reads: input_number.ev_deadline_target_soc (target SOC) and
+#     input_datetime.ev_deadline_target_time (absolute "charge by" datetime) — point the EV
+#     device's ev_deadline_target_soc_entity / ev_deadline_target_time_entity at them.
+#   * Friendlier dashboard inputs (Today/Tomorrow + time) that an automation folds into the
+#     absolute datetime above, plus a "last recalculated" timestamp for the button tile.
+#   * rest_command + script behind the "Recalculate now!" dashboard button. When the car is not
+#     ready to charge the script tells you so (persistent notification) and makes clear the
+#     settings are saved and the charge will be planned once the car is plugged in and ready.
+#   * A REST sensor polling the add-on's /api/ev_deadline every minute, and template entities
+#     derived from it for the dashboard:
+#       - binary_sensor.ev_ready_to_charge   (mirrors the add-on's ev_ready_to_charge_condition)
+#       - binary_sensor.ev_charging_now      (mirrors the add-on's ev_charging_condition, or the
+#                                             charger's power meter when no condition is set)
+#       - sensor.ev_charging_power           (the charger's live load in W)
+#       - sensor.ev_deadline_plan_status     (one-line plan headline, details in attributes)
+#
+# If you created input_number.ev_deadline_target_soc / input_datetime.ev_deadline_target_time
+# earlier as UI helpers (Settings → Devices & Services → Helpers), delete those UI helpers so
+# the YAML definitions below can take over the same entity IDs; until then HA logs a
+# "does not generate unique IDs" warning for the YAML copy and keeps using the UI helper.
+
+input_number:
+  ev_deadline_target_soc:
+    name: EV Deadline - Target SOC
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    mode: slider
+    icon: mdi:battery-charging-70
+
+input_select:
+  ev_deadline_day:
+    name: EV Deadline - Day
+    options:
+      - Today
+      - Tomorrow
+    icon: mdi:calendar-today
+
+input_datetime:
+  # Absolute deadline read by the add-on (ev_deadline_target_time_entity). Written by the
+  # automation below from ev_deadline_day + ev_deadline_time; do not edit it directly.
+  ev_deadline_target_time:
+    name: EV Deadline - Target Time
+    has_date: true
+    has_time: true
+    icon: mdi:calendar-clock
+
+  ev_deadline_time:
+    name: EV Deadline - Time
+    has_date: false
+    has_time: true
+    icon: mdi:clock-outline
+
+  # Written only on a successful recalculation, so the dashboard can show when the
+  # plan was last refreshed (and the tile's "last changed" doubles as button feedback).
+  ev_deadline_last_recalc:
+    name: EV Deadline - Last Recalculated
+    has_date: true
+    has_time: true
+    icon: mdi:refresh
+
+# Hostname = add-on slug with underscores replaced by dashes + ".local.hass.io" (Supervisor's
+# internal DNS). Adjust if your add-on slug differs (e.g. a non-local repository).
+rest_command:
+  epg_recalculate_ev_deadline:
+    url: "http://local-epg-addon.local.hass.io:8100/trigger/ev_deadline_recalc"
+    method: POST
+    # The recalculation also re-evaluates battery solar-only mode; allow it time to finish.
+    timeout: 90
+
+rest:
+  - resource: "http://local-epg-addon.local.hass.io:8099/api/ev_deadline"
+    scan_interval: 60
+    timeout: 20
+    sensor:
+      - name: EPG EV deadline plan
+        unique_id: epg_ev_deadline_plan
+        icon: mdi:car-clock
+        value_template: "{{ value_json.primary.status }}"
+        json_attributes_path: "$.primary"
+        json_attributes:
+          - device
+          - ready
+          - ready_condition_configured
+          - charging
+          - charging_power_w
+          - charging_power_kw
+          - charging_source
+          - charging_condition_configured
+          - charging_load_entity
+          - scheduled
+          - headline
+          - plan_headline
+          - message
+          - current_soc
+          - target_soc
+          - deadline
+          - charge_power_kw
+          - energy_needed_kwh
+          - energy_planned_kwh
+          - energy_scheduled_kwh
+          - avg_price
+          - slot_count
+          - scheduled_slot_count
+          - slots
+          - first_slot_start
+          - last_slot_stop
+          - updated_at
+
+template:
+  - binary_sensor:
+      - name: EV ready to charge
+        unique_id: epg_ev_ready_to_charge
+        icon: mdi:ev-station
+        availability: "{{ has_value('sensor.epg_ev_deadline_plan') }}"
+        state: "{{ state_attr('sensor.epg_ev_deadline_plan', 'ready') == true }}"
+        attributes:
+          condition_configured: "{{ state_attr('sensor.epg_ev_deadline_plan', 'ready_condition_configured') }}"
+
+      # Mirrors the add-on's ev_charging_condition (or, when that is not configured, the
+      # charger's power meter above the load-watcher threshold). This is what the card uses
+      # to say "charging" instead of the then-misleading "ready to charge".
+      - name: EV charging now
+        unique_id: epg_ev_charging_now
+        icon: mdi:ev-plug-type2
+        device_class: battery_charging
+        availability: "{{ has_value('sensor.epg_ev_deadline_plan') }}"
+        state: "{{ state_attr('sensor.epg_ev_deadline_plan', 'charging') == true }}"
+        attributes:
+          power_w: "{{ state_attr('sensor.epg_ev_deadline_plan', 'charging_power_w') }}"
+          detected_from: "{{ state_attr('sensor.epg_ev_deadline_plan', 'charging_source') }}"
+          condition_configured: "{{ state_attr('sensor.epg_ev_deadline_plan', 'charging_condition_configured') }}"
+          load_entity: "{{ state_attr('sensor.epg_ev_deadline_plan', 'charging_load_entity') }}"
+    sensor:
+      # The charger's live load, straight from the add-on's instantaneous_load_entity reading
+      # (sign-normalised, so positive always means "drawing power to charge").
+      - name: EV charging power
+        unique_id: epg_ev_charging_power
+        icon: mdi:flash
+        device_class: power
+        state_class: measurement
+        unit_of_measurement: W
+        availability: >-
+          {{ has_value('sensor.epg_ev_deadline_plan')
+             and state_attr('sensor.epg_ev_deadline_plan', 'charging_power_w') is not none }}
+        state: "{{ state_attr('sensor.epg_ev_deadline_plan', 'charging_power_w') | float(0) | round(0) }}"
+
+      - name: EV deadline plan status
+        unique_id: epg_ev_deadline_plan_status
+        icon: mdi:calendar-check
+        availability: "{{ has_value('sensor.epg_ev_deadline_plan') }}"
+        state: "{{ state_attr('sensor.epg_ev_deadline_plan', 'headline') or 'Unknown' }}"
+        attributes:
+          message: "{{ state_attr('sensor.epg_ev_deadline_plan', 'message') }}"
+          charging: "{{ state_attr('sensor.epg_ev_deadline_plan', 'charging') }}"
+          charging_power_w: "{{ state_attr('sensor.epg_ev_deadline_plan', 'charging_power_w') }}"
+          scheduled: "{{ state_attr('sensor.epg_ev_deadline_plan', 'scheduled') }}"
+          slot_count: "{{ state_attr('sensor.epg_ev_deadline_plan', 'slot_count') }}"
+          energy_planned_kwh: "{{ state_attr('sensor.epg_ev_deadline_plan', 'energy_planned_kwh') }}"
+          first_slot_start: "{{ state_attr('sensor.epg_ev_deadline_plan', 'first_slot_start') }}"
+          last_slot_stop: "{{ state_attr('sensor.epg_ev_deadline_plan', 'last_slot_stop') }}"
+
+script:
+  ev_deadline_recalculate:
+    alias: EV deadline - recalculate now
+    icon: mdi:refresh
+    mode: restart
+    sequence:
+      # continue_on_error so a connection failure (add-on down) still reaches the
+      # error branch below instead of aborting the script silently.
+      - action: rest_command.epg_recalculate_ev_deadline
+        response_variable: result
+        continue_on_error: true
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ result is defined and result.status == 200 }}"
+            sequence:
+              - action: input_datetime.set_datetime
+                target:
+                  entity_id: input_datetime.ev_deadline_last_recalc
+                data:
+                  datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+              - action: persistent_notification.dismiss
+                data:
+                  notification_id: epg_ev_recalc_error
+              # Refresh the dashboard entities right away instead of waiting for the next poll.
+              - action: homeassistant.update_entity
+                target:
+                  entity_id: sensor.epg_ev_deadline_plan
+                continue_on_error: true
+              - choose:
+                  # The add-on answers with the plan summary. ready == false means the car is not
+                  # ready to charge (ev_ready_to_charge_condition not met), so nothing was
+                  # scheduled yet — say so, and make clear the settings were still applied.
+                  # A car that is already charging never gets this notification, whatever the
+                  # readiness condition says.
+                  - conditions:
+                      - condition: template
+                        value_template: >-
+                          {{ result.content.primary.ready is defined
+                             and result.content.primary.ready == false
+                             and result.content.primary.charging != true }}
+                    sequence:
+                      - action: persistent_notification.create
+                        data:
+                          notification_id: epg_ev_not_ready
+                          title: EV charging not scheduled yet – car not ready
+                          message: >-
+                            {%- set p = result.content.primary -%}
+                            Your charging settings were saved and applied, but no charging slots
+                            are scheduled yet because the car is not ready to charge (not plugged
+                            in, or its ready condition is not met). The cheapest slots will be
+                            planned automatically as soon as the car is plugged in and ready.
+                            {%- if p.target_soc is not none and p.deadline %}
+                            Target: {{ p.target_soc | int }}% by {{ as_datetime(p.deadline).strftime('%a %d %b %H:%M') }}.
+                            {%- endif %}
+                            {%- if p.slot_count %}
+                            Right now that would be {{ p.slot_count }} slot(s), about
+                            {{ p.energy_planned_kwh | round(1) }} kWh.
+                            {%- endif %}
+                            Checked at {{ now().strftime('%H:%M:%S') }}.
+                default:
+                  - action: persistent_notification.dismiss
+                    data:
+                      notification_id: epg_ev_not_ready
+        default:
+          - action: persistent_notification.create
+            data:
+              notification_id: epg_ev_recalc_error
+              title: EV charging plan not recalculated
+              message: >-
+                The EPG add-on did not accept the request
+                {%- if result is defined %} (HTTP {{ result.status }}){% else %} (no response - add-on unreachable){% endif %}.
+                Checked at {{ now().strftime('%H:%M:%S') }}.
+
+automation:
+  - id: ev_deadline_sync_target_time
+    alias: EV deadline - sync day/time into target datetime
+    description: >-
+      Combines input_select.ev_deadline_day and input_datetime.ev_deadline_time into the
+      absolute datetime the EPG add-on reads, then asks the add-on to re-plan immediately.
+    # restart (not single): changing the day and then the time in quick succession must
+    # recompute from the latest values - with 'single' the second change is dropped.
+    mode: restart
+    triggers:
+      - trigger: state
+        id: user_change
+        entity_id:
+          - input_select.ev_deadline_day
+          - input_datetime.ev_deadline_time
+      - trigger: time
+        id: daily_resync
+        at: "00:00:01"
+      - trigger: homeassistant
+        id: daily_resync
+        event: start
+    conditions:
+      # The midnight/startup resync only exists to roll a *recurring* "Today" deadline
+      # (e.g. "always by 07:00") forward onto the new day. A "Tomorrow" pick is a one-off:
+      # it gets baked into an absolute date by the user_change trigger above and must be
+      # left alone afterwards, otherwise "Tomorrow" keeps re-evaluating relative to the
+      # new "now" every midnight and the deadline drifts forward forever.
+      - condition: or
+        conditions:
+          - condition: trigger
+            id: user_change
+          - condition: state
+            entity_id: input_select.ev_deadline_day
+            state: "Today"
+    actions:
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.ev_deadline_target_time
+        data:
+          datetime: >-
+            {%- set raw = states('input_datetime.ev_deadline_time') -%}
+            {%- set t = raw if raw not in ['unknown', 'unavailable'] else '07:00:00' -%}
+            {%- set days = 0 if is_state('input_select.ev_deadline_day', 'Today') else 1 -%}
+            {{ (now().date() + timedelta(days=days)) ~ ' ' ~ t }}
+      # via the script (not the rest_command directly) so automatic recalculations
+      # update the same "last recalculated" timestamp the button feeds.
+      - action: script.ev_deadline_recalculate
+        continue_on_error: true

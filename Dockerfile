@@ -23,6 +23,7 @@ COPY web /app/web
 COPY optimization_plan.py /app/optimization_plan.py
 COPY config.json /app/config.json
 COPY run.sh /app/run.sh
+COPY homeassistant /app/homeassistant
 
 # Make the entrypoint script executable
 RUN chmod +x /app/run.sh

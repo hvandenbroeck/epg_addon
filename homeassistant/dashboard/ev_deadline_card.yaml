@@ -1,0 +1,110 @@
+# Lovelace card for EV deadline charging. Paste into a dashboard (Edit → Add card → Manual).
+# Requires the entities from packages/ev_deadline.yaml (deployed by the add-on) and the EV's
+# own SOC sensor (replace sensor.id_7_tourer_pro_accu with yours).
+#
+# binary_sensor.ev_charging_now / sensor.ev_charging_power come from the add-on's
+# ev_charging_condition (or, when that is not configured, the charger's power meter), and
+# take precedence over binary_sensor.ev_ready_to_charge everywhere on this card.
+type: vertical-stack
+cards:
+  - type: heading
+    heading: EV Charging Deadline
+    heading_style: title
+    icon: mdi:car-electric
+    badges:
+      # Charging first: while the car is actually charging, "ready to charge" is the wrong
+      # thing to read at a glance (that was the confusing bit).
+      - type: entity
+        entity: binary_sensor.ev_charging_now
+        name: Charging
+        visibility:
+          - condition: state
+            entity: binary_sensor.ev_charging_now
+            state: "on"
+      - type: entity
+        entity: sensor.ev_charging_power
+        name: Charger load
+        visibility:
+          - condition: state
+            entity: binary_sensor.ev_charging_now
+            state: "on"
+      - type: entity
+        entity: binary_sensor.ev_ready_to_charge
+        name: Car
+        visibility:
+          - condition: state
+            entity: binary_sensor.ev_charging_now
+            state_not: "on"
+      - type: entity
+        entity: input_datetime.ev_deadline_target_time
+        name: Planned for
+  # What the car is doing, then what the add-on will do about it. Charging takes the first
+  # branch, so a car that is already charging is never announced as merely "ready to charge".
+  - type: markdown
+    content: >-
+      {% set plan = 'sensor.epg_ev_deadline_plan' %}
+      {% if not has_value(plan) %}
+      ⚠️ **EPG add-on not reachable** – charging plan status unknown.
+      {% elif is_state('binary_sensor.ev_charging_now', 'on') %}
+      ⚡ **Car is charging now**
+      {%- set w = state_attr(plan, 'charging_power_w') %}
+      {%- if w is not none %} at **{{ (w | float(0) / 1000) | round(1) }} kW**{% endif %}.<br>
+      {{ state_attr(plan, 'plan_headline') or state_attr(plan, 'headline') }}<br>
+      {{ state_attr(plan, 'message') }}
+      {% elif is_state('binary_sensor.ev_ready_to_charge', 'on') %}
+      ✅ **Car is ready to charge.** {{ state_attr(plan, 'headline') }}<br>
+      {{ state_attr(plan, 'message') }}
+      {% else %}
+      🔌 **Car is not ready to charge.** Charging is planned automatically as soon as the car is
+      plugged in and ready. Your target SOC and deadline are saved and already taken into account
+      {%- if state_attr(plan, 'slot_count') %} – right now that would be
+      {{ state_attr(plan, 'slot_count') }} slot(s), about
+      {{ state_attr(plan, 'energy_planned_kwh') | round(1) }} kWh
+      {%- endif %}.
+      {% endif %}
+  - type: grid
+    columns: 2
+    square: false
+    cards:
+      - type: tile
+        entity: sensor.id_7_tourer_pro_accu
+        name: Current
+        icon: mdi:car-battery
+        color: blue
+      - type: tile
+        entity: input_number.ev_deadline_target_soc
+        name: Target
+        icon: mdi:battery-charging-70
+        color: green
+        features:
+          - type: numeric-input
+            style: slider
+  - type: tile
+    entity: input_select.ev_deadline_day
+    name: Charge by
+    icon: mdi:calendar-clock
+    color: orange
+    features:
+      - type: select-options
+  - type: entities
+    entities:
+      - entity: input_datetime.ev_deadline_time
+        name: At
+        icon: mdi:clock-outline
+      - entity: binary_sensor.ev_charging_now
+        name: Charging now
+      - entity: sensor.ev_charging_power
+        name: Charger load
+      - entity: binary_sensor.ev_ready_to_charge
+        name: Car ready to charge
+      - entity: sensor.ev_deadline_plan_status
+        name: Charging plan
+  - type: tile
+    entity: input_datetime.ev_deadline_last_recalc
+    name: Recalculate now!
+    icon: mdi:refresh
+    color: purple
+    state_content: last-changed
+    tap_action:
+      action: perform-action
+      perform_action: script.ev_deadline_recalculate

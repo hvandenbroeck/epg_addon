@@ -135,8 +135,20 @@ async def main():
     )
     logger.info("Daily optimization scheduled for 16:05 Europe/Brussels")
 
-    # Schedule battery SOC recalculation every 15 minutes
+    # Schedule the 15-minute recalculation. EV deadline plans are recalculated FIRST, then
+    # battery limits: the energy of a scheduled (EV-ready) deadline plan is added to the usage
+    # prediction that decides solar-only mode, so the two must run in this order rather than
+    # as two independent cron jobs racing each other on the same minute marks.
+    has_ev_deadline = any(d.ev_deadline_charge_enabled for d in ev_devices)
+
     async def scheduled_battery_recalc():
+        if has_ev_deadline:
+            logger.info("🚗 Running scheduled EV deadline-charging plan recalculation (gating only, no re-selection)...")
+            try:
+                await optimizer.recalculate_ev_deadline_plans(full_replan=False)
+                logger.info("✅ EV deadline-charging plan recalculation completed successfully")
+            except Exception as e:
+                logger.error(f"❌ Error during EV deadline-charging plan recalculation: {e}", exc_info=True)
         logger.info("🔋 Running scheduled battery SOC recalculation...")
         try:
             await optimizer.recalculate_battery_limits()
@@ -154,40 +166,30 @@ async def main():
         misfire_grace_time=60,
         id='battery_soc_recalc'
     )
-    logger.info("Battery SOC recalculation scheduled every 15 minutes (Europe/Brussels)")
+    logger.info(
+        "Battery SOC recalculation scheduled every 15 minutes (Europe/Brussels)"
+        + (", preceded by the EV deadline-charging plan recalculation" if has_ev_deadline else "")
+    )
 
-    # Schedule EV deadline-charging plan recalculation every 15 minutes (same cadence as battery)
     trigger_runner = None
-    if any(d.ev_deadline_charge_enabled for d in ev_devices):
-        async def scheduled_ev_deadline_recalc():
-            logger.info("🚗 Running scheduled EV deadline-charging plan recalculation...")
-            try:
-                await optimizer.recalculate_ev_deadline_plans()
-                logger.info("✅ EV deadline-charging plan recalculation completed successfully")
-            except Exception as e:
-                logger.error(f"❌ Error during EV deadline-charging plan recalculation: {e}", exc_info=True)
-
-        scheduler.add_job(
-            scheduled_ev_deadline_recalc,
-            'cron',
-            minute='10,25,40,55',
-            timezone='Europe/Brussels',
-            coalesce=True,
-            max_instances=1,
-            misfire_grace_time=60,
-            id='ev_deadline_recalc'
-        )
-        logger.info("EV deadline-charging plan recalculation scheduled every 15 minutes (Europe/Brussels)")
-
+    if has_ev_deadline:
         # Lightweight HTTP endpoint so a Home Assistant dashboard button can trigger an instant
         # recalculation, instead of waiting for the next 15-minute cron tick. Runs on the same
-        # asyncio loop as the scheduler, so it calls recalculate_ev_deadline_plans() directly.
+        # asyncio loop as the scheduler, so it calls the optimizer directly. The response carries
+        # the plan summary (readiness, scheduled/held slots, energy) so the HA script that calls
+        # it can tell the user when the car is not ready and nothing was scheduled yet.
         async def handle_ev_deadline_recalc_trigger(request):
             logger.info("🚗 Manual EV deadline-charging recalculation requested via HA dashboard...")
             try:
-                await optimizer.recalculate_ev_deadline_plans()
+                summary = await optimizer.recalculate_ev_deadline_plans()
+                # Re-evaluate solar-only mode straight away so the battery decision reflects
+                # the (possibly changed) scheduled EV energy.
+                await optimizer.recalculate_battery_limits()
                 logger.info("✅ Manual EV deadline-charging recalculation completed successfully")
-                return web.json_response({'status': 'ok'})
+                payload = {'status': 'ok', 'devices': {}, 'primary': None}
+                if summary:
+                    payload.update(summary)
+                return web.json_response(payload)
             except Exception as e:
                 logger.error(f"❌ Error during manual EV deadline-charging recalculation: {e}", exc_info=True)
                 return web.json_response({'status': 'error', 'message': str(e)}, status=500)
@@ -247,6 +249,31 @@ async def main():
         )
     else:
         logger.info("EV solar charge controller not scheduled (not enabled in config or no EV devices configured)")
+
+    # Refresh the EV charging state on the control-cycle interval. The full deadline plan is
+    # only recalculated every 15 minutes, which is too slow for the "car is charging now"
+    # badge on the web UI and the HA card - this rewrites just those fields.
+    if has_ev_deadline:
+        async def scheduled_ev_charging_state():
+            try:
+                await optimizer.refresh_ev_charging_state()
+            except Exception as e:
+                logger.error(f"❌ Error refreshing EV charging state: {e}", exc_info=True)
+
+        await scheduled_ev_charging_state()
+        scheduler.add_job(
+            scheduled_ev_charging_state,
+            'cron',
+            minute=f'*/{load_watcher_interval}',
+            timezone='Europe/Brussels',
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=60,
+            id='ev_charging_state',
+        )
+        logger.info(
+            f"EV charging-state refresh scheduled every {load_watcher_interval} minutes (Europe/Brussels)"
+        )
 
     # Sweep the battery-discharge guard on the control-cycle interval. This covers the EV
     # devices the solar controller does NOT drive (deadline, price-based, or a session

@@ -1,6 +1,6 @@
 name: "EPG Add-on"
 description: "Energy Plan Generator"
-version: "1.0.5"
+version: "1.0.6"
 slug: "epg_addon"
 init: false
 homeassistant_api: true
@@ -23,5 +23,9 @@ panel_icon: "mdi:chart-timeline"
 panel_title: "Energy Optimizer"
 volumes:
   - /data/logs:/data/logs
+# Home Assistant config dir (mounted at /homeassistant) so run.sh can deploy the
+# packages/ev_deadline.yaml package shipped in homeassistant/packages/.
+map:
+  - homeassistant_config:rw
 options:
   ha_url: "http://supervisor/core"

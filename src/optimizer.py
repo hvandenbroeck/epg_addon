@@ -21,6 +21,8 @@ from .device_state_manager import DeviceStateManager
 from .devices import Devices
 from .scheduler import Scheduler
 from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, limit_battery_cycles, plan_ev_deadline_charge, read_ev_deadline_inputs
+from .conditions import evaluate_condition_group
+from .ev_charging_state import get_ev_charging_state
 from .utils import slot_to_time, slots_to_iso_ranges, merge_sequential_timeslots, time_to_slot
 from .config import CONFIG
 from .price_fetcher import EntsoeePriceFetcher
@@ -35,6 +37,20 @@ from .forecasting.ev_soc_prediction import predict_ev_soc
 from .runtime_calculator import RuntimeCalculator
 
 logger = logging.getLogger(__name__)
+
+
+def _compose_ev_headline(plan_headline, charging, charging_power_w):
+    """One headline for the EV deadline card: charging state first, plan status second.
+
+    An actively charging car takes the front of the line — "waiting for the car to be ready"
+    or "scheduled" next to a charger that is already delivering power is exactly what read
+    as confusing before.
+    """
+    if not charging:
+        return plan_headline
+    label = f" – {charging_power_w / 1000:.1f} kW" if charging_power_w is not None else ""
+    charging_headline = f"Charging now{label}"
+    return f"{charging_headline} · {plan_headline}" if plan_headline else charging_headline
 
 
 class HeatpumpOptimizer:
@@ -434,11 +450,13 @@ class HeatpumpOptimizer:
         # Calculate and cache production & consumption predictions (full ML run)
         await self._calculate_and_cache_predictions()
         
+        # Run initial EV deadline-charging plan based on current SOC/target/deadline.
+        # This runs BEFORE battery limiting: the scheduled EV energy is added to the usage
+        # prediction that decides whether solar-only mode is enabled.
+        await self.recalculate_ev_deadline_plans()
+
         # Run initial battery cycle limiting based on current SOC
         await self.recalculate_battery_limits()
-
-        # Run initial EV deadline-charging plan based on current SOC/target/deadline
-        await self.recalculate_ev_deadline_plans()
 
         # Schedule actions from database
         await self.scheduler_instance.schedule_actions()
@@ -484,12 +502,21 @@ class HeatpumpOptimizer:
         predicted_solar = Prediction.get_cached_solar(slot_minutes)
 
         solar_only_mode = False
+        solar_only_evaluation = None
         if predicted_solar and predicted_usage:
             total_solar_kwh = sum(p['predicted_kwh'] for p in predicted_solar)
-            total_usage_kwh = sum(p['predicted_kwh'] for p in predicted_usage)
+            base_usage_kwh = sum(p['predicted_kwh'] for p in predicted_usage)
+            # An EV that is ready to charge and has deadline slots scheduled is a real,
+            # known load on top of the ML usage prediction — count it, otherwise a sunny
+            # day could switch the battery to solar-only while the car quietly eats the
+            # surplus. Provisional (on-hold) plans are NOT counted.
+            ev_deadline_kwh = self._scheduled_ev_deadline_kwh()
+            total_usage_kwh = base_usage_kwh + ev_deadline_kwh
             logger.info(
                 f"☀️ Solar prediction: {total_solar_kwh:.2f} kWh | "
-                f"Usage prediction: {total_usage_kwh:.2f} kWh"
+                f"Usage prediction: {base_usage_kwh:.2f} kWh"
+                + (f" + scheduled EV charge {ev_deadline_kwh:.2f} kWh = {total_usage_kwh:.2f} kWh"
+                   if ev_deadline_kwh else "")
             )
             if total_solar_kwh > total_usage_kwh:
                 solar_only_mode = True
@@ -500,6 +527,14 @@ class HeatpumpOptimizer:
                 )
             else:
                 logger.info("☀️ Solar-only mode not active – proceeding with normal battery optimization")
+            solar_only_evaluation = {
+                'solar_kwh': round(total_solar_kwh, 3),
+                'usage_kwh': round(base_usage_kwh, 3),
+                'ev_deadline_kwh': round(ev_deadline_kwh, 3),
+                'total_usage_kwh': round(total_usage_kwh, 3),
+                'solar_only_mode': solar_only_mode,
+                'evaluated_at': datetime.now().isoformat(),
+            }
         else:
             logger.info("☀️ Insufficient solar/usage predictions – proceeding with normal battery optimization")
         
@@ -603,6 +638,7 @@ class HeatpumpOptimizer:
         schedule_doc['schedule'] = new_schedule
         schedule_doc['last_soc_recalc'] = datetime.now().isoformat()
         schedule_doc['solar_only_mode'] = solar_only_mode
+        schedule_doc['solar_only_evaluation'] = solar_only_evaluation
         
         with TinyDB('db.json') as db:
             db.upsert(schedule_doc, Query().id == "schedule")
@@ -623,18 +659,33 @@ class HeatpumpOptimizer:
         logger.info(f"✅ Battery limits recalculated ({len(new_schedule)} entries)")
         await self.scheduler_instance.schedule_actions()
 
-    async def recalculate_ev_deadline_plans(self):
+    async def recalculate_ev_deadline_plans(self, full_replan: bool = True):
         """Recalculate EV deadline-charging plans based on current SOC, target, and deadline.
 
-        Called after optimization and every 15 minutes (mirrors recalculate_battery_limits)
-        so the plan reacts to actual SOC changes and to the user adjusting the target-SOC /
-        deadline dashboard helpers mid-day.
+        Called after the daily optimization, on the dashboard "Recalculate now" button (both
+        ``full_replan=True``, the only two things that actually pick new charge slots), and
+        every 15 minutes in the background (``full_replan=False``, mirrors
+        recalculate_battery_limits) purely to re-apply the EV-readiness gate below — a car that
+        is charging slower than predicted must NOT cause more slots to be added outside of an
+        explicit re-plan, so the background cycle carries the previously committed plan forward
+        unchanged (see ``lock_plan`` in optimization/ev_deadline.py) instead of re-running slot
+        selection against the live SOC.
+
+        The plan is always *computed* (so the UI can show what would be charged), but it is
+        only *scheduled* when the EV is ready to charge according to its
+        ``ev_ready_to_charge_condition`` (e.g. plugged in). When the EV is not ready, only the
+        slot currently in progress (if any) stays in the live schedule so its stop action still
+        fires; everything else is held back until the car is ready. Devices without a
+        readiness condition are scheduled unconditionally, as before.
+
+        Returns the summary written to the ``ev_deadline`` TinyDB doc (or None when skipped),
+        so the manual-trigger endpoint can report readiness back to the dashboard.
         """
         ev_deadline_devices = [
             d for d in devices_config.get_devices_by_type('ev') if d.ev_deadline_charge_enabled
         ]
         if not ev_deadline_devices:
-            return
+            return None
 
         logger.info("🚗 Recalculating EV deadline-charging plans...")
 
@@ -643,14 +694,14 @@ class HeatpumpOptimizer:
 
         if not schedule_doc or not schedule_doc.get('horizon_start') or not schedule_doc.get('prices'):
             logger.warning("⚠️ No valid schedule found, skipping EV deadline recalculation")
-            return
+            return None
 
         horizon_start = datetime.fromisoformat(schedule_doc['horizon_start'])
         horizon_end = datetime.fromisoformat(schedule_doc['horizon_end'])
 
         if datetime.now() >= horizon_end:
             logger.info("📅 Horizon expired, skipping EV deadline recalculation")
-            return
+            return None
 
         prices = schedule_doc['prices']
         slot_minutes = schedule_doc.get('slot_minutes', 15)
@@ -664,13 +715,25 @@ class HeatpumpOptimizer:
         ]
 
         ev_soc_predictions = {}
+        device_summaries = {}
 
         for ev_device in ev_deadline_devices:
             previous_charge_times = self._extract_times(current_schedule, ev_device.name, horizon_start, slot_minutes)
 
+            # Observed charging state (ev_charging_condition, else the charger's power meter).
+            # Independent of readiness: a car that is already charging must not still be
+            # announced as merely "ready to charge" in the UI/dashboard.
+            charging_state = await get_ev_charging_state(self.get_state, ev_device)
+
             if not ev_device.ev_battery_capacity_kwh:
                 logger.warning(f"⚠️ {ev_device.name}: ev_battery_capacity_kwh not configured, skipping deadline planning")
                 new_schedule.extend(self._times_to_schedule(previous_charge_times, ev_device.name, horizon_start, slot_minutes))
+                device_summaries[ev_device.name] = self._ev_deadline_summary(
+                    ev_device, ready=True, ready_configured=False, scheduled=bool(previous_charge_times),
+                    status='not_configured',
+                    message='ev_battery_capacity_kwh is not configured for this device; deadline planning is skipped.',
+                    charging_state=charging_state,
+                )
                 continue
 
             current_soc, target_soc, deadline = await read_ev_deadline_inputs(self.get_state, ev_device, now)
@@ -683,7 +746,7 @@ class HeatpumpOptimizer:
                     f"{charge_power_kw:.2f} kW from ev_max_current_limit at 230V"
                 )
 
-            charge_times = plan_ev_deadline_charge(
+            plan = plan_ev_deadline_charge(
                 prices=prices,
                 slot_minutes=slot_minutes,
                 horizon_start=horizon_start,
@@ -694,14 +757,49 @@ class HeatpumpOptimizer:
                 charge_power_kw=charge_power_kw,
                 device_name=ev_device.name,
                 previous_charge_times=previous_charge_times,
+                lock_plan=not full_replan,
             )
 
-            new_schedule.extend(self._times_to_schedule(charge_times, ev_device.name, horizon_start, slot_minutes))
+            # Readiness gate: None = no condition configured (always schedule), otherwise
+            # the condition must be certainly TRUE (unknown/unavailable counts as not ready,
+            # see conditions.evaluate_condition_group).
+            ready = await self._ev_ready_state(ev_device)
+            ready_configured = ready is not None
+            if ready is False:
+                scheduled_times = plan.in_progress_times
+                held = [t for t in plan.charge_times if t not in plan.in_progress_times]
+                logger.info(
+                    f"🔌 {ev_device.name}: EV not ready to charge (ev_ready_to_charge_condition is not "
+                    f"satisfied) — {len(held)} planned slot(s) held back until the car is ready"
+                    + (f"; keeping the in-progress slot {plan.in_progress_times}" if plan.in_progress_times else "")
+                )
+            else:
+                scheduled_times = plan.charge_times
+
+            new_schedule.extend(self._times_to_schedule(scheduled_times, ev_device.name, horizon_start, slot_minutes))
+
+            device_summaries[ev_device.name] = self._ev_deadline_summary(
+                ev_device,
+                ready=ready if ready_configured else True,
+                ready_configured=ready_configured,
+                scheduled=bool(scheduled_times),
+                status=plan.status,
+                message=plan.message,
+                plan=plan,
+                scheduled_times=scheduled_times,
+                current_soc=current_soc,
+                target_soc=target_soc,
+                deadline=deadline,
+                charge_power_kw=charge_power_kw,
+                horizon_start=horizon_start,
+                slot_minutes=slot_minutes,
+                charging_state=charging_state,
+            )
 
             if current_soc is not None:
                 try:
                     ev_soc_predictions[ev_device.name] = predict_ev_soc(
-                        charge_times=charge_times,
+                        charge_times=scheduled_times,
                         slot_minutes=slot_minutes,
                         horizon_start=horizon_start,
                         horizon_end=horizon_end,
@@ -730,8 +828,204 @@ class HeatpumpOptimizer:
                 })
                 db.upsert(existing, Query().id == 'predictions')
 
+        # Persist the plan summaries (scheduled AND held-back plans) for the web UI info box,
+        # the /api/ev_deadline endpoint polled by the HA package, and the solar-only decision.
+        first_name = next(iter(device_summaries), None)
+        ev_deadline_doc = {
+            'id': 'ev_deadline',
+            'updated_at': datetime.now().isoformat(),
+            'devices': device_summaries,
+            'primary': device_summaries[first_name] if first_name else None,
+        }
+        with TinyDB('db.json') as db:
+            db.upsert(ev_deadline_doc, Query().id == 'ev_deadline')
+
         logger.info(f"✅ EV deadline plans recalculated ({len(new_schedule)} entries)")
         await self.scheduler_instance.schedule_actions()
+        return {k: v for k, v in ev_deadline_doc.items() if k != 'id'}
+
+    async def _ev_ready_state(self, ev_device):
+        """True/False from ``ev_ready_to_charge_condition``; None when no condition is configured."""
+        cond = getattr(ev_device, 'ev_ready_to_charge_condition', None)
+        if not cond or not cond.conditions:
+            return None
+        return await evaluate_condition_group(cond, self.get_state)
+
+    async def refresh_ev_charging_state(self):
+        """Re-read each deadline EV's live charging state into the ``ev_deadline`` doc.
+
+        The full plan is only recalculated every 15 minutes, which is far too slow for a
+        "is the car charging right now?" badge — so this runs on the load-watcher interval
+        and rewrites just the charging fields (and the charging half of the headline) of the
+        summaries already stored. It never touches the plan or the schedule.
+
+        No-op until recalculate_ev_deadline_plans() has written the doc at least once.
+        """
+        ev_deadline_devices = [
+            d for d in devices_config.get_devices_by_type('ev') if d.ev_deadline_charge_enabled
+        ]
+        if not ev_deadline_devices:
+            return None
+
+        with TinyDB('db.json') as db:
+            doc = db.get(Query().id == 'ev_deadline')
+        if not doc or not doc.get('devices'):
+            return None
+
+        summaries = doc['devices']
+        changed = False
+        for ev_device in ev_deadline_devices:
+            summary = summaries.get(ev_device.name)
+            if summary is None:
+                continue
+            state = await get_ev_charging_state(self.get_state, ev_device)
+            charging = state['charging'] is True
+            power_w = state['power_w']
+            # A doc written before plan_headline existed only has the combined headline; adopt
+            # it as the plan half once, so the next refresh doesn't prefix "Charging now" twice.
+            plan_headline = summary.get('plan_headline') or summary.get('headline')
+            updated = {
+                'plan_headline': plan_headline,
+                'charging': charging,
+                'charging_power_w': round(power_w, 1) if power_w is not None else None,
+                'charging_power_kw': round(power_w / 1000, 3) if power_w is not None else None,
+                'charging_source': state['source'],
+                'charging_condition_configured': state['condition_configured'],
+                'charging_load_entity': state['load_entity'],
+                'headline': _compose_ev_headline(plan_headline, charging, power_w),
+            }
+            if any(summary.get(k) != v for k, v in updated.items()):
+                if summary.get('charging') != charging:
+                    logger.info(
+                        f"🚗 {ev_device.name}: charging state -> {'charging' if charging else 'not charging'}"
+                        + (f" ({power_w / 1000:.2f} kW)" if power_w is not None else '')
+                    )
+                summary.update(updated)
+                changed = True
+
+        if not changed:
+            return doc.get('devices')
+
+        first_name = next(iter(summaries), None)
+        doc['devices'] = summaries
+        doc['primary'] = summaries[first_name] if first_name else None
+        doc['charging_updated_at'] = datetime.now().isoformat()
+        with TinyDB('db.json') as db:
+            db.upsert(doc, Query().id == 'ev_deadline')
+        return summaries
+
+    def _ev_deadline_summary(self, ev_device, ready, ready_configured, scheduled, status, message,
+                             plan=None, scheduled_times=None, current_soc=None, target_soc=None,
+                             deadline=None, charge_power_kw=None, horizon_start=None, slot_minutes=15,
+                             charging_state=None):
+        """Build the per-device dict stored in the ``ev_deadline`` TinyDB doc.
+
+        ``slots`` is the full computed plan (merged ISO ranges) even when it is on hold, so the
+        UI can show what will be charged once the EV is ready; ``scheduled`` says whether that
+        plan is currently in the live schedule.
+
+        ``charging_state`` is the live observation from
+        :func:`src.ev_charging_state.get_ev_charging_state`; when it says the car is drawing
+        power that wins the headline, because "ready to charge" reads as "not charging yet"
+        to anyone looking at a car that is already charging.
+        """
+        def _ranges(times):
+            if not times or horizon_start is None:
+                return []
+            merged = merge_sequential_timeslots([
+                self._times_to_schedule(times, ev_device.name, horizon_start, slot_minutes)
+            ])
+            return [{'start': e['start'], 'stop': e['stop']} for e in merged]
+
+        planned_slots = _ranges(plan.charge_times if plan else [])
+        scheduled_slots = _ranges(scheduled_times or [])
+
+        charging_state = charging_state or {}
+        charging = charging_state.get('charging') is True
+        charging_power_w = charging_state.get('power_w')
+
+        if status == 'not_configured':
+            headline = 'Device not configured for deadline charging'
+        elif not ready:
+            headline = 'Waiting for the car to be ready'
+            if plan and plan.charge_times:
+                headline = f"On hold: {len(plan.charge_times)} slot(s) ready to schedule"
+        elif status == 'planned':
+            headline = f"Scheduled: {len(scheduled_times or [])} slot(s), ~{plan.energy_planned_kwh:.1f} kWh"
+        elif status == 'locked':
+            headline = f"Scheduled (fixed): {len(scheduled_times or [])} slot(s), ~{plan.energy_planned_kwh:.1f} kWh"
+        elif status == 'infeasible':
+            headline = 'Scheduled: every remaining slot (deadline too close)'
+        elif status == 'partial_horizon':
+            headline = f"Scheduled: {len(scheduled_times or [])} slot(s) so far (more prices pending)"
+        elif status == 'target_reached':
+            headline = 'Target SOC reached'
+        elif status == 'missing_inputs':
+            headline = 'Inputs unavailable'
+        elif status == 'no_slots':
+            headline = 'No slots left before the deadline'
+        else:
+            headline = status.replace('_', ' ').capitalize()
+
+        # An actively charging car takes the headline: "waiting for the car to be ready" or
+        # "scheduled" next to a charger that is already delivering power is what confused
+        # people in the first place. The plan headline is kept as the second half.
+        plan_headline = headline
+        headline = _compose_ev_headline(plan_headline, charging, charging_power_w)
+
+        return {
+            'device': ev_device.name,
+            'ready': ready,
+            'ready_condition_configured': ready_configured,
+            'charging': charging,
+            'charging_power_w': round(charging_power_w, 1) if charging_power_w is not None else None,
+            'charging_power_kw': round(charging_power_w / 1000, 3) if charging_power_w is not None else None,
+            'charging_source': charging_state.get('source'),
+            'charging_condition_configured': charging_state.get('condition_configured', False),
+            'charging_load_entity': charging_state.get('load_entity'),
+            'scheduled': scheduled,
+            'status': status,
+            'headline': headline,
+            # The plan half of the headline on its own, so refresh_ev_charging_state() can
+            # rebuild the combined headline without re-planning.
+            'plan_headline': plan_headline,
+            'message': message,
+            'current_soc': current_soc,
+            'target_soc': target_soc,
+            'deadline': deadline.isoformat() if deadline else None,
+            'charge_power_kw': charge_power_kw,
+            'energy_needed_kwh': round(plan.energy_needed_kwh, 3) if plan else 0.0,
+            'energy_planned_kwh': round(plan.energy_planned_kwh, 3) if plan else 0.0,
+            'energy_scheduled_kwh': round(len(scheduled_times or []) * (charge_power_kw or 0) * slot_minutes / 60, 3),
+            'avg_price': round(plan.avg_price, 4) if plan and plan.avg_price is not None else None,
+            'slot_count': len(plan.charge_times) if plan else 0,
+            'scheduled_slot_count': len(scheduled_times or []),
+            'slots': planned_slots,
+            'scheduled_slots': scheduled_slots,
+            'first_slot_start': planned_slots[0]['start'] if planned_slots else None,
+            'last_slot_stop': planned_slots[-1]['stop'] if planned_slots else None,
+            'updated_at': datetime.now().isoformat(),
+        }
+
+    def _scheduled_ev_deadline_kwh(self) -> float:
+        """Energy (kWh) of EV deadline slots that are actually in the live schedule.
+
+        Read from the ``ev_deadline`` doc written by recalculate_ev_deadline_plans(); only
+        devices whose plan is scheduled (EV ready) count. Provisional plans are ignored.
+        """
+        try:
+            with TinyDB('db.json') as db:
+                doc = db.get(Query().id == 'ev_deadline')
+        except Exception as e:
+            logger.warning(f"⚠️ Could not read EV deadline plans: {e}")
+            return 0.0
+        if not doc:
+            return 0.0
+        total = 0.0
+        for name, info in (doc.get('devices') or {}).items():
+            if info.get('scheduled'):
+                total += float(info.get('energy_scheduled_kwh') or 0.0)
+        return total
 
     async def _get_battery_soc(self, bat_device):
         """Get current battery SOC, return 50% as fallback."""

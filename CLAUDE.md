@@ -18,8 +18,12 @@ or pytest config) — dependencies are installed straight into the Dockerfile vi
 verification is manual (run the addon, watch `/data/logs/epg_addon.log`, check the web UI).
 
 - **Docker (real deployment path):** `Dockerfile` + `run.sh`. Entrypoint reads `SUPERVISOR_TOKEN`
-  and `config.json`, starts the Flask UI in the background, then execs
-  `optimization_plan.py --token <token>`.
+  and `config.json`, deploys the HA package (`homeassistant/packages/ev_deadline.yaml` →
+  `/homeassistant/packages/`, mounted via `map: homeassistant_config:rw` in `config.yaml`), starts
+  the Flask UI in the background, then execs `optimization_plan.py --token <token>`. Everything
+  Home Assistant needs for a feature (helpers, scripts, REST/template sensors, dashboard card)
+  lives under [homeassistant/](homeassistant/) and is shipped with the image — don't tell users
+  to hand-create helpers that belong in that package.
 - **Local run:** `python3 optimization_plan.py --token <HA_long_lived_token>` — requires
   `config.json` (HA URL, ENTSO-E token, tuning options) at the repo root and `/data/options.json`
   (per-device config, see `DEVICES_CONFIG_EXAMPLE.json`) to exist on disk, since both are read from
@@ -34,9 +38,12 @@ verification is manual (run the addon, watch `/data/logs/epg_addon.log`, check t
 ## Architecture
 
 **Entrypoint:** [optimization_plan.py](optimization_plan.py) wires everything together and owns
-all APScheduler cron jobs: daily optimization (16:05 Europe/Brussels), battery SOC recalc
-(every 15 min), load watcher + EV solar charge controller (every `load_watcher_interval_minutes`),
-and periodic device verification (every 5 min). Read this file first when tracing what runs when.
+all APScheduler cron jobs: daily optimization (16:05 Europe/Brussels), the 15-minute recalc
+(EV deadline plans *then* battery SOC limits, in that order, in one job), load watcher + EV solar
+charge controller (every `load_watcher_interval_minutes`), the EV charging-state refresh (same interval), and
+periodic device verification (every 5 min). It also serves the manual EV-deadline trigger on port 8100 (POST
+`/trigger/ev_deadline_recalc`, answers with the plan summary). Read this file first when
+tracing what runs when.
 
 **Two-tier configuration**, both pydantic/JSON-backed, loaded once at import time as module-level
 globals (not re-read per request — restart the process to pick up changes):
@@ -58,13 +65,29 @@ globals (not re-read per request — restart the process to pick up changes):
      locked slots already committed within `lock_hours`, and optional expected-daily-runtime from
      `runtime_calculator.py`).
    - `battery.py` — percentile/threshold-based charge & discharge slot selection.
-   - `ev.py` — simple price-threshold selection (only for EVs *not* `solar_charge_only`).
+   - `ev_deadline.py` — pure cheapest-slot planner for `ev_deadline_charge_enabled` EVs,
+     returning an `EvDeadlinePlan` (full plan + in-progress slot + energy/status). Slot
+     *selection* only happens from `recalculate_ev_deadline_plans(full_replan=True)` — the daily
+     16:05 optimization and the dashboard "Recalculate now" button (`/trigger/ev_deadline_recalc`)
+     — so the plan is fixed once you press the button, rather than drifting every cycle as actual
+     SOC falls behind (or ahead of) the prediction. The 15-minute background job calls it with
+     `full_replan=False`, which skips `plan_ev_deadline_charge`'s slot search (`lock_plan=True`)
+     and only re-*gates* the already-committed plan on `ev_ready_to_charge_condition`: not ready →
+     only the in-progress slot stays scheduled, the rest is held back but still written to the
+     `"ev_deadline"` TinyDB doc so the UI/HA can show it. Scheduled (EV-ready) plan energy is
+     added to predicted usage in the battery solar-only decision (`_scheduled_ev_deadline_kwh`).
+     The absolute deadline itself (`input_datetime.ev_deadline_target_time`) is written by the
+     `ev_deadline_sync_target_time` automation in
+     [homeassistant/packages/ev_deadline.yaml](homeassistant/packages/ev_deadline.yaml); its
+     midnight/startup resync only re-fires for a recurring "Today" deadline, never for a one-off
+     "Tomorrow" pick, otherwise a "Tomorrow" deadline would re-evaluate relative to "now" every
+     night and drift forward a day at a time.
    - `battery_limiter.py` — post-hoc SOC-aware cycle limiting, reconciling planned schedule against
      real current SOC (called again every 15 min by `recalculate_battery_limits`, independent of
      the once-daily full optimization).
 4. Persist the merged schedule to **TinyDB** (`db.json`, at repo root) under doc id `"schedule"` —
    this file is the handoff point between optimization and scheduling/UI; also stores
-   `"predictions"`, `"load_watcher"`, `"device_limitations"` docs.
+   `"predictions"`, `"load_watcher"`, `"device_limitations"`, `"ev_deadline"` docs.
 5. [src/scheduler.py](src/scheduler.py) reads the TinyDB schedule and creates APScheduler
    `DateTrigger` jobs per start/stop event, resolving battery entries by suffix
    (`_charge`/`_discharge`/`_solar_only`/`_block_grid_export`) back to the right `ActionSet` on the
@@ -81,13 +104,22 @@ Every executed start/stop action registers with
 schedule (6 checks over 3 minutes) and retries on mismatch, plus runs an independent periodic
 sweep of all devices.
 
+**EV charging state:** [src/ev_charging_state.py](src/ev_charging_state.py) is the single
+definition of "is this EV charging right now?" — `ev_charging_condition` when configured, else
+`load_management.instantaneous_load_entity` above the load watcher's threshold (device's own
+`charge_sign`), unreadable always meaning *not* charging. Both the battery-discharge guard and
+the UI/dashboard status read it, so they can't disagree. `HeatpumpOptimizer.refresh_ev_charging_state()`
+rewrites just the charging fields (and the charging half of `headline`; `plan_headline` keeps the
+plan half) of the `"ev_deadline"` doc on the load-watcher interval, so the badge doesn't wait for
+the 15-minute plan recalculation.
+
 **Conditional gating:** [src/conditions.py](src/conditions.py) evaluates user-configured
 `ConditionGroup`/`EntityCondition` trees against live HA state with an "unknown counts as false"
 safety rule (`evaluate_condition_group`). Used for EV-readiness overrides of price-based
 grid-export blocking (`ev_ready_to_charge_condition` on a `Device`) — both the scheduler's
 grid-export-block start job and `Devices.execute_grid_export_block_start` consult `any_ev_ready()`
 before blocking export, so an EV that needs the sun always wins over the price signal — and for
-the optional `ev_charging_condition` read by the battery-discharge guard.
+the optional `ev_charging_condition` read via `src/ev_charging_state.py`.
 
 **Battery-discharge guard** ([src/devices/battery_discharge_guard.py](src/devices/battery_discharge_guard.py))
 blocks house-battery discharge while an EV charges (`block_battery_discharge_while_charging` on
@@ -123,7 +155,9 @@ every 15-minute SOC recalculation.
 **Web UI** ([web/server.py](web/server.py), Flask + Plotly, port 8099) reads only from TinyDB —
 it has no write path back into optimization state. `/api/gantt` server-renders a Plotly figure
 (schedule Gantt + price histogram + usage/solar/SOC predictions on shared x-axis) as an HTML
-fragment consumed by [web/templates/index.html](web/templates/index.html).
+fragment consumed by [web/templates/index.html](web/templates/index.html). `/api/ev_deadline`
+is also polled by the HA package's REST sensor, so its shape (`devices`, always-present
+`primary`) is an external contract — keep it stable.
 
 ## Conventions worth knowing
 

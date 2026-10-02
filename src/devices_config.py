@@ -131,10 +131,12 @@ class Device(BaseModel):
     ev_ready_to_charge_condition: Optional[ConditionGroup] = Field(
         default=None,
         description="When this condition is TRUE the EV counts as ready to charge (e.g. the charger is "
-                    "connected and the car is below its target SOC), which overrides price-based grid-export "
-                    "blocking: export is force-unblocked so the inverter runs at full production for the EV. "
-                    "Evaluated with certainty only: if any referenced entity is unavailable/unknown, the EV "
-                    "counts as not-ready and normal price-based blocking stays in effect. None disables it.",
+                    "connected and the car is below its target SOC). Two effects: (1) it overrides price-based "
+                    "grid-export blocking: export is force-unblocked so the inverter runs at full production "
+                    "for the EV; (2) with ev_deadline_charge_enabled, the deadline plan is only scheduled while "
+                    "the EV is ready — otherwise it is computed and shown, but held back. Evaluated with "
+                    "certainty only: if any referenced entity is unavailable/unknown, the EV counts as "
+                    "not-ready. None disables both (deadline plans are then always scheduled).",
     )
     grid_export_unblock_condition: Optional[ConditionGroup] = Field(
         default=None,
@@ -420,6 +422,15 @@ def load_default_config() -> DevicesConfig:
                 conditions=[
                     EntityCondition(entity_id="sensor.id_7_tourer_pro_accu", operator="<", value=79),
                     EntityCondition(entity_id="sensor.peblar_ev_charger_status", operator="in", value=["charging", "suspended"]),
+                ],
+            ),
+            # The car is *actually* charging right now (as opposed to merely ready to). Drives
+            # the "charging now" status in the web UI / HA card and the battery-discharge guard.
+            # Optional: without it, charging is inferred from the power meter in
+            # load_management.instantaneous_load_entity below.
+            ev_charging_condition=ConditionGroup(
+                conditions=[
+                    EntityCondition(entity_id="sensor.peblar_ev_charger_status", operator="==", value="charging"),
                 ],
             ),
             load_management=LoadManagement(
