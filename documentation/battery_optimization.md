@@ -1,205 +1,113 @@
-# Battery Optimization Features
+# Battery Optimization
 
-This document describes the battery optimization features that use historical price percentiles to determine optimal charge and discharge thresholds.
+The battery is scheduled by a single **linear program (LP)** solved over the whole price horizon
+(the same PuLP/GLPK solver used for heat-pump scheduling). One global optimization decides what the
+battery does in every 15-minute slot — grid-charge, discharge to cover household load, or hold
+(reserve) — so the plan is optimal across the entire horizon rather than assembled from per-slot
+rules of thumb.
 
-## Features Implemented
+> This replaces the previous approach (historical price percentiles + a price-difference arbitrage
+> rule + a greedy SOC "cycle limiter" with charge/discharge buffers). Those heuristics could not see
+> the whole day at once, so they would, for example, spend cheap stored energy on a cheap afternoon
+> and arrive at the evening peak with an empty battery. The LP reserves energy for the dearest hours
+> by construction.
 
-### 1. Historical Percentile-Based Thresholds
+## What the LP optimizes
 
-The optimizer analyzes historical electricity prices to determine smart thresholds for battery operations:
+For each slot `t` the solver chooses how much to grid-charge, store from solar surplus, and
+discharge, to **minimize total energy cost over the horizon**:
 
-- **Maximum Charge Price**: Derived from the Xth percentile of historical prices (default: 30th percentile)
-- **Minimum Discharge Price**: Derived from the Yth percentile of historical prices (default: 70th percentile)
-
-**How it works:**
-- At each optimization run (typically daily at 16:00), the system fetches price history from the cache
-- Calculates the configured percentiles from the last N days of data (default: 14 days)
-- Uses these thresholds to filter which time slots are eligible for charging/discharging
-- Only charges when current prices are below the max charge threshold
-- Only discharges when current prices are above the min discharge threshold
-
-### 2. Adaptive Thresholds
-
-The percentile-based approach automatically adapts to market conditions:
-- During periods of high volatility, thresholds adjust accordingly
-- During stable periods, thresholds become tighter
-- No manual tuning required for different seasons or market conditions
-
-### 3. Price Difference Arbitrage
-
-The optimizer also identifies arbitrage opportunities based on absolute price differences:
-
-- **Charge Arbitrage**: Mark any slot as eligible for charging if there's a future slot that's more expensive by at least the configured threshold (default: 0.10 EUR/kWh)
-- **Discharge Arbitrage**: Mark any slot as eligible for discharging if it's more expensive than any past slot by at least the configured threshold
-
-**How it works:**
-- This logic runs **in addition to** the percentile-based filtering
-- Identifies profitable arbitrage opportunities across the optimization horizon
-- Expands the pool of eligible slots beyond just percentile thresholds
-- The final slot selection still respects the time percentage limits
-
-## Configuration Parameters
-
-Add these parameters to your `config.json` under the `options` section:
-
-```json
-{
-  "options": {
-    "battery_charge_time_percentage": 0.25,
-    "battery_discharge_time_percentage": 0.25,
-    "battery_price_history_days": 14,
-    "battery_charge_percentile": 30,
-    "battery_discharge_percentile": 70,
-    "battery_price_difference_threshold": 0.10
-  }
-}
+```
+minimize  Σ ( import_price[t]·grid_import[t] − export_price[t]·grid_export[t]
+              + wear·battery_throughput[t] )  −  terminal_value·stored_energy_at_end
 ```
 
-### Parameter Descriptions
+subject to the physics of the battery:
 
-| Parameter | Description | Default | Example Values |
-|-----------|-------------|---------|----------------|
-| `battery_charge_time_percentage` | Percentage of horizon time to use for charging (0.0-1.0) | 0.25 | 0.15-0.35 |
-| `battery_discharge_time_percentage` | Percentage of horizon time to use for discharging (0.0-1.0) | 0.25 | 0.15-0.35 |
-| `battery_price_history_days` | Number of days of price history to analyze | 14 | 7-30 |
-| `battery_charge_percentile` | Percentile threshold for max charge price (lower = more selective) | 30 | 20-40 |
-| `battery_discharge_percentile` | Percentile threshold for min discharge price (higher = more selective) | 70 | 60-80 |
-| `battery_price_difference_threshold` | Minimum price difference (EUR/kWh) to trigger arbitrage opportunities | 0.10 | 0.05-0.20 |
+- **SOC dynamics** with round-trip efficiency (the loss is charged to the import side, so delivered
+  energy is counted 1:1 — a cycle needs a price spread bigger than the losses to be worth it).
+- **SOC stays within** `battery_min_soc_percent … battery_max_soc_percent`.
+- **Charge/discharge rate** capped by `battery_charge_speed_kw`.
+- **Discharge only covers household load** (the battery is never sold back to the grid), and **solar
+  surplus can charge the battery** instead of being exported.
+- **Terminal value** on energy left at the horizon end, so the plan doesn't myopically dump the
+  battery in the last cheap slots. It defaults to `efficiency × 25th-percentile horizon price` —
+  roughly what the energy cost to store, which keeps retained energy without inviting grid-charging
+  purely to hoard.
 
-### Understanding Percentiles
+The LP's per-slot decision is mapped back onto the existing inverter modes: a slot it grid-charges
+becomes a `_charge` entry, a slot it discharges becomes a `_discharge` entry, and every other slot
+is left in the inverter's hold state (which still passively absorbs solar surplus). Grid-export
+blocking is unchanged and handled separately (see `price_based_solar_grid_export` /
+`grid_export_block_threshold`).
 
-- **30th percentile** means only 30% of historical prices were lower - you're charging in the cheapest 30% of times
-- **70th percentile** means only 30% of historical prices were higher - you're discharging in the most expensive 30% of times
+## When it runs
 
-## How It Works
+The LP runs inside `recalculate_battery_limits`:
 
-### Percentile Calculation
+- **Once at the end of the daily optimization** (and at start-up), which also records the plan as
+  the dashboard's "planned" reference.
+- **Every 15 minutes**, re-solving from the **latest measured SOC** so the plan adapts as real SOC
+  drifts from the prediction. Slots already in the past are preserved unchanged.
 
-At each optimization run:
-1. Fetches price data from the last N days (uses local cache first)
-2. Calculates the configured percentiles
-3. These become the thresholds for charge/discharge decisions
+## Seasons: no switch needed
 
-**Example with 14 days of data:**
-- Historical prices range from 0.05 to 0.35 EUR/kWh
-- 30th percentile = 0.12 EUR/kWh → max_charge_price
-- 70th percentile = 0.25 EUR/kWh → min_discharge_price
-- Result: Only charge below 0.12, only discharge above 0.25
+Seasonal behaviour is emergent, not coded:
 
-### Slot Selection
+- **Summer** (lots of solar, low load): the cheapest way to serve the evening is to store the midday
+  surplus, so the LP charges the battery from solar during the day and discharges in the evening,
+  grid-charging little or not at all.
+- **Winter** (little solar): the LP arbitrages — charging from the grid in the cheapest overnight
+  hours and discharging through the expensive evening peak.
 
-**Charge Optimization:**
-1. Filter slots where `price <= max_charge_price` (30th percentile)
-2. **Additionally**, mark slots as eligible if any future slot is `>= current_price + price_difference_threshold`
-3. From all eligible slots, select the cheapest `n_slots_to_use`
-4. `n_slots_to_use = total_horizon_slots × charge_time_percentage`
+There is no longer a whole-day "solar-only mode" flag; the per-slot optimization covers it.
 
-**Discharge Optimization:**
-1. Filter slots where `price >= min_discharge_price` (70th percentile)
-2. **Additionally**, mark slots as eligible if they are `>= any_past_price + price_difference_threshold`
-3. From all eligible slots, select the most expensive `n_slots_to_use`
-4. `n_slots_to_use = total_horizon_slots × discharge_time_percentage`
+## Configuration
 
-**Example:** With `price_difference_threshold = 0.10` EUR/kWh:
-- A slot at 0.15 EUR/kWh becomes a charge candidate if any future slot is ≥ 0.25 EUR/kWh
-- A slot at 0.30 EUR/kWh becomes a discharge candidate if any past slot was ≤ 0.20 EUR/kWh
+The only battery tuning parameters are the two physical/economic ones:
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `battery_round_trip_efficiency` | Fraction of energy surviving a charge/discharge cycle. Sets the price spread a cycle must beat to be profitable (e.g. 0.9 → ~11%). | 0.9 |
+| `battery_cycle_cost_per_kwh` | Battery-wear hurdle (€/kWh) added to each kWh charged, to discourage cycling for tiny spreads. | 0.01 |
+
+Per-device battery physicals live in the device config (`/data/options.json`):
+`battery_capacity_kwh`, `battery_charge_speed_kw`, `battery_min_soc_percent`,
+`battery_max_soc_percent`, and `battery_soc_entity` (the live SOC sensor the 15-minute re-solve
+reads). Exported solar is valued at the day-ahead price, zeroed in slots where
+`grid_export_block_threshold` blocks export.
+
+> **Removed settings.** `battery_charge_percentile`, `battery_discharge_percentile`,
+> `battery_price_history_days`, `battery_price_difference_threshold`,
+> `battery_charge_time_percentage`, `battery_discharge_time_percentage`,
+> `battery_charge_buffer_percent`, and `battery_discharge_buffer_percent` no longer do anything and
+> can be deleted from `config.json`.
 
 ## Logging
 
-The optimizer logs detailed information about price thresholds:
+Each solve logs a one-line summary, e.g.:
 
 ```
-📊 Calculating price percentiles from last 14 days (charge=30th, discharge=70th)
-📈 Price statistics (last 14 days): min=0.0450, max=0.3500, mean=0.1850, median=0.1750 EUR/kWh
-🔋 Battery thresholds: max_charge_price=0.1200 EUR/kWh (30th percentile), min_discharge_price=0.2500 EUR/kWh (70th percentile)
-🔋 Battery charge: selected 48 slots (avg=0.0850, range=0.0450-0.1200 EUR/kWh)
-🔋 Battery discharge: selected 48 slots (avg=0.2900, range=0.2500-0.3500 EUR/kWh)
+🔋 battery: LP plan — charge 5 slots (6.63 kWh grid @ 0.2313), discharge 24 slots (7.28 kWh @ 0.3542),
+   stored 0.00 kWh solar, end SOC 10.0%, peak(≥0.40) covered 2.21 kWh, net +0.81 EUR
 ```
 
-## Tuning Recommendations
-
-### Conservative (Less Cycling, Higher Margins)
-```json
-{
-  "battery_charge_percentile": 20,
-  "battery_discharge_percentile": 80,
-  "battery_charge_time_percentage": 0.15,
-  "battery_discharge_time_percentage": 0.15,
-  "battery_price_difference_threshold": 0.15
-}
-```
-- Only charges in the cheapest 20% of historical prices
-- Only discharges in the most expensive 20%
-- Higher price difference threshold (15 cents) for more selective arbitrage
-- Fewer cycles but with better margins
-
-### Aggressive (More Cycling)
-```json
-{
-  "battery_charge_percentile": 40,
-  "battery_discharge_percentile": 60,
-  "battery_charge_time_percentage": 0.35,
-  "battery_discharge_time_percentage": 0.35,
-  "battery_price_difference_threshold": 0.05
-}
-```
-- Charges whenever prices are below median-ish (40th percentile)
-- Discharges whenever prices are above median-ish (60th percentile)
-- Lower price difference threshold (5 cents) captures more arbitrage opportunities
-- More frequent cycling
-
-### Balanced (Recommended)
-```json
-{
-  "battery_charge_percentile": 30,
-  "battery_discharge_percentile": 70,
-  "battery_charge_time_percentage": 0.25,
-  "battery_discharge_time_percentage": 0.25,
-  "battery_price_difference_threshold": 0.10
-}
-```
-- Good balance between usage and selectivity
-- 40% price spread between charge and discharge thresholds
-- 10 cent price difference threshold for arbitrage opportunities
-- Sustainable cycling pattern
-
-## Fallback Behavior
-
-If historical price data is unavailable:
-- The optimizer falls back to using the current horizon's 30th and 70th percentile
-- A warning is logged but optimization continues
-- This ensures the system remains operational even without full history
+The dashboard's **Battery Plan** panel shows the same figures per device (grid-charged kWh and its
+average price, discharged kWh and its average price, solar stored, net benefit, and projected end
+SOC), and the schedule Gantt shows the planned vs. live charge/discharge slots alongside the
+projected SOC curve.
 
 ## Troubleshooting
 
-### Battery Never Charges
-- Check if `battery_charge_percentile` is too low
-- Verify price history data exists (check logs for "Retrieved X hourly price records")
-- Current prices may be unusually high compared to history
+### Battery never charges or discharges
+- On a genuinely flat-price day, a cycle can't clear the round-trip loss + wear hurdle, so the LP
+  may legitimately do nothing — the per-slot summary in the log says so.
+- Check `battery_capacity_kwh` and `battery_charge_speed_kw` are set for the device; without them
+  the LP is skipped for that device (a warning is logged).
+- Check the SOC sensor (`battery_soc_entity`) is readable — the 15-minute re-solve needs it.
 
-### Battery Never Discharges
-- Check if `battery_discharge_percentile` is too high
-- Current prices may be unusually low compared to history
-- Consider increasing `battery_discharge_time_percentage`
-
-### Want More/Less Cycling
-- Adjust percentiles: lower charge / higher discharge = more selective
-- Adjust time percentages: higher = more slots selected from eligible pool
-
-## Price History Cache
-
-Historical prices are stored in `/data/price_history.json`:
-- Automatically fetched from ENTSO-E API when missing
-- Cache is checked before each API call to minimize requests
-- Old data (>400 days) is automatically cleaned up
-- Data is stored hourly regardless of original resolution
-
-## Future Enhancements
-
-Potential improvements for future versions:
-
-1. **Dynamic SOC Management**: Adjust charge/discharge limits based on price forecasts
-2. **Multi-Day Optimization**: Look ahead 48-72 hours for better decisions
-3. **Seasonal Adjustments**: Different strategies for summer (solar) vs winter
-4. **State of Health Tracking**: Adjust cycle costs based on actual battery degradation
-5. **Risk Management**: Conservative buffers when forecast confidence is low
+### Want more or less cycling
+- Lower `battery_cycle_cost_per_kwh` toward 0 to cycle for smaller spreads; raise it (e.g. 0.03–0.05)
+  to only cycle for large spreads.
+- `battery_round_trip_efficiency` toward 1.0 makes cycling easier to justify (less loss modelled);
+  lower it to be stricter.

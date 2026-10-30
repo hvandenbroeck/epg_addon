@@ -143,6 +143,27 @@ See [EV Deadline Charging](ev_deadline_charging.md) for the full guide, includin
 
 See [Heat Pump Runtime](heat_pump_runtime.md) for details.
 
+### Optional – Heat Pump Thermal Pre-Heating
+
+Opt-in setpoint LP that pre-heats the floor slab in cheap/solar hours and coasts through price
+peaks. When `wp_preheat_enabled` is true it replaces the block scheduler above for that device.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `wp_preheat_enabled` | bool | `false` | Use the thermal setpoint LP instead of the block scheduler |
+| `preheat_max_setpoint` | number | `22.0` | Highest commanded room setpoint when pre-heating (°C) |
+| `preheat_comfort_default_min_temp` | number | `19.5` | Floor temperature when no comfort window matches (°C) |
+| `preheat_comfort_windows` | list | `[]` | Time/day windows raising the minimum room temperature |
+| `preheat_setpoint_resolution` | number | `0.5` | Commanded-setpoint rounding step (°C) |
+| `preheat_penalty_per_c` | number | `0.0` | Cost per °C above the floor per slot (€); raise to smooth the setpoint |
+| `thermal_heat_loss_kw_per_c` | number | `0.024` | Heat-loss coefficient UA (kW/°C) |
+| `thermal_heat_capacity_kwh_per_c` | number | `1.5` | Slab heat capacity (kWh/°C) |
+| `thermal_max_heat_kw` | number | `5.0` | Maximum useful heat delivery (kW) |
+| `thermal_cop_ref` / `thermal_cop_slope` / `thermal_cop_tout_ref` | number | `3.5` / `0.08` / `7.0` | Outside-temperature COP model |
+
+Requires `inside_temp_sensor`, and the device's `start` action must set the zone to `{setpoint}`.
+See [Heat Pump Pre-Heating](heat_pump_preheat.md) for the full reference.
+
 ## Action Sets
 
 An `ActionSet` has two optional lists:

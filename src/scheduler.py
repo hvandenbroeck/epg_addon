@@ -1,6 +1,6 @@
 import logging
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
 from tinydb import TinyDB, Query
 from apscheduler.triggers.date import DateTrigger
@@ -109,6 +109,28 @@ class Scheduler:
 
             if end_time <= now:
                 logger.info(f"⏩ Skipping past event {device} ({start_time})")
+                continue
+
+            # Pre-heating heat pump: a range carries a planned room `setpoint` instead of a plain
+            # on/off. Set it via the device's `start` action ({setpoint} in the payload); there is
+            # no stop — the next range's setpoint overrides it and the device verifier holds it in
+            # between. The range covering "now" is (re)applied immediately so a fresh plan takes
+            # effect without waiting for a future boundary.
+            setpoint = entry.get('setpoint')
+            if (setpoint is not None and action_type is None
+                    and getattr(cfg, 'type', None) == 'wp'
+                    and getattr(cfg, 'wp_preheat_enabled', False)):
+                if self.scheduler:
+                    run_at = start_time if start_time > now else now + timedelta(seconds=5)
+                    self.scheduler.add_job(
+                        self.devices.execute_device_action,
+                        trigger=DateTrigger(run_date=run_at),
+                        args=[base_device_name, start_actions, "setpoint", run_at, {"setpoint": setpoint}],
+                        id=f"{device}_setpoint_device_{start_time.isoformat()}",
+                        replace_existing=True,
+                    )
+                    scheduled_count += 1
+                    logger.info(f"📅 Scheduled {device.upper()} SETPOINT {setpoint}°C at {run_at.strftime('%Y-%m-%d %H:%M')}")
                 continue
 
             # Schedule start action if in the future

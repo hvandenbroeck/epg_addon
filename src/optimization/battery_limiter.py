@@ -8,10 +8,25 @@ This module implements SOC-aware battery cycle limiting that:
 """
 import logging
 from datetime import datetime, timedelta
+from typing import NamedTuple
 
 from ..config import CONFIG
 
 logger = logging.getLogger(__name__)
+
+
+class SimResult(NamedTuple):
+    """Outcome of simulating one candidate charge/discharge slot selection."""
+    final_soc: float | None
+    feasible: bool
+    charged_kwh: float
+    discharged_kwh: float
+    grid_charged_kwh: float
+    grid_charge_cost: float
+    discharge_revenue: float
+
+
+INFEASIBLE = SimResult(None, False, 0.0, 0.0, 0.0, 0.0, 0.0)
 
 
 def limit_battery_cycles(
@@ -114,12 +129,16 @@ def limit_battery_cycles(
     charge_slots = future_charge_slots
     discharge_slots = future_discharge_slots
     
-    # Resolve conflicts - this shouldn't happen, but just in case
+    # A slot can legitimately be a candidate for both: the price-difference rules mark it
+    # chargeable (a much dearer slot follows) and dischargeable (it's well above the day's
+    # minimum) at once. Don't settle that up front - stripping it from the charge side here
+    # used to leave no charge candidates at all ahead of an evening peak. The greedy selection
+    # below assigns each slot to at most one side, so the SOC simulation decides instead.
     conflicts = charge_slots & discharge_slots
     if conflicts:
-        logger.warning(f"⚠️ {device_name}: {len(conflicts)} slots have both charge and discharge, prioritizing discharge")
-        charge_slots -= conflicts
-    
+        logger.info(f"🔋 {device_name}: {len(conflicts)} slots are both charge and discharge candidates, "
+                    f"resolved by SOC simulation")
+
     if not charge_slots and not discharge_slots:
         # No future slots to process - return past slots unchanged
         limited_charge_times = sorted([slot_idx_to_time(s) for s in past_charge_slots])
@@ -130,7 +149,21 @@ def limit_battery_cycles(
     # Energy per slot when charging at full speed
     slot_hours = slot_minutes / 60
     charge_energy_per_slot = battery_charge_speed_kw * slot_hours
-    
+
+    # Round-trip losses are charged entirely to the import side: reaching a given SOC gain
+    # costs more grid energy than the gain itself. Discharge revenue is then counted 1:1,
+    # so the loss is applied once per cycle rather than double-counted on both legs.
+    round_trip_efficiency = CONFIG['options'].get('battery_round_trip_efficiency', 0.9)
+    if not 0 < round_trip_efficiency <= 1:
+        logger.warning(f"⚠️ {device_name}: invalid battery_round_trip_efficiency "
+                       f"{round_trip_efficiency}, falling back to 1.0 (no losses modelled)")
+        round_trip_efficiency = 1.0
+    cycle_cost_per_kwh = CONFIG['options'].get('battery_cycle_cost_per_kwh', 0.0)
+
+    def _price_at(slot_idx):
+        """Price for a slot, or None when no price series was supplied."""
+        return prices[slot_idx] if prices and slot_idx < len(prices) else None
+
     # Build predicted usage lookup (slot_idx -> kWh usage per slot)
     # Apply discharge buffer to reduce predicted usage
     usage_by_slot = {}
@@ -179,21 +212,28 @@ def limit_battery_cycles(
     
     def simulate_soc(selected_charge, selected_discharge):
 
-        """Simulate SOC over time and return final SOC, feasibility, and energy statistics."""
-        
+        """Simulate SOC over time and return final SOC, feasibility, energy and cash flows."""
+
         all_slots = sorted(selected_charge | selected_discharge)  # Sort over time
         soc = current_soc
         total_charged_kwh = 0
         total_discharged_kwh = 0
-        
+        grid_charged_kwh = 0
+        grid_charge_cost = 0
+        discharge_revenue = 0
+
         for slot_idx in all_slots:
+            price = _price_at(slot_idx)
             if slot_idx in selected_charge:
                 headroom = battery_capacity_kwh * (max_soc_percent - soc) / 100
                 if headroom < charge_energy_per_slot * 0.1:
-                    return None, False, 0, 0  # Can't charge - battery full
+                    return INFEASIBLE  # Can't charge - battery full
                 energy = min(charge_energy_per_slot, headroom)
                 soc += (energy / battery_capacity_kwh) * 100
                 total_charged_kwh += energy
+                grid_charged_kwh += energy
+                if price is not None:
+                    grid_charge_cost += price * energy / round_trip_efficiency
             elif slot_idx in selected_discharge:
                 available = battery_capacity_kwh * (soc - min_soc_percent) / 100
                 # Net demand = predicted usage minus solar production in this slot.
@@ -202,39 +242,72 @@ def limit_battery_cycles(
                 solar_offset = solar_by_slot.get(slot_idx, 0)
                 net_usage = gross_usage - solar_offset
                 if net_usage < 0:
-                    # Excess solar: charge the battery during a discharge slot
+                    # Excess solar: charge the battery during a discharge slot.
+                    # This energy is free, so it adds no grid cost - only wear.
                     headroom = battery_capacity_kwh * (max_soc_percent - soc) / 100
                     charge_energy = min(-net_usage, max(0.0, headroom), charge_energy_per_slot)
                     soc += (charge_energy / battery_capacity_kwh) * 100
                     total_charged_kwh += charge_energy
                 else:
                     if available < charge_energy_per_slot * 0.1:
-                        return None, False, 0, 0  # Can't discharge - battery empty
+                        return INFEASIBLE  # Can't discharge - battery empty
                     discharge_energy = min(net_usage, available)
                     soc -= (discharge_energy / battery_capacity_kwh) * 100
                     total_discharged_kwh += discharge_energy
-        
-        return soc, True, total_charged_kwh, total_discharged_kwh
-    
-    # Greedy selection: add slots in price order if they keep the schedule feasible
+                    # Discharging serves household load, so the "revenue" is avoided import.
+                    if price is not None:
+                        discharge_revenue += price * discharge_energy
+
+        return SimResult(soc, True, total_charged_kwh, total_discharged_kwh,
+                         grid_charged_kwh, grid_charge_cost, discharge_revenue)
+
+    def net_profit(sim):
+        """Avoided import cost minus grid charge cost and battery wear, in EUR."""
+        return (sim.discharge_revenue
+                - sim.grid_charge_cost
+                - cycle_cost_per_kwh * sim.charged_kwh)
+
+    def discharge_pays(sim, baseline):
+        """Whether a discharge slot that keeps the schedule feasible is also worth taking.
+
+        Feasibility alone is not enough: discharge is modelled as partial (a slot takes what
+        is left), so a cheap early slot stays "feasible" while draining the energy a dearer
+        later slot was counting on - which is how a 0.24 morning used to empty the battery
+        before a 0.47 evening peak. Accept the slot only if avoided import goes up, or - for a
+        slot with solar surplus, which charges for free - at least doesn't go down.
+        """
+        if not sim.feasible:
+            return False
+        if not prices:
+            return True
+        eps = 1e-9
+        if sim.discharge_revenue > baseline.discharge_revenue + eps:
+            return True
+        return (sim.discharge_revenue >= baseline.discharge_revenue - eps
+                and sim.charged_kwh > baseline.charged_kwh + eps)
+
+    # Greedy selection: add slots in price order if they keep the schedule feasible and pay
     selected_charge = set()
     selected_discharge = set()
-    
+
     logger.info(f"🔋 {device_name}: Starting SOC limiting - current_soc={current_soc:.1f}%, "
                 f"{len(charge_slots)} charge candidates, {len(discharge_slots)} discharge candidates")
-    
+
     # First add discharge slots (most expensive first)
     logger.debug(f"🔋 {device_name}: Phase 1 - Adding discharge slots (most expensive first)")
     for slot_idx in discharge_by_price:
         candidate = selected_discharge | {slot_idx}
-        slot_price = prices[slot_idx] if prices and slot_idx < len(prices) else None
-        final_soc, feasible, charged_kwh, discharged_kwh = simulate_soc(selected_charge, candidate)
-        if feasible:
+        slot_price = _price_at(slot_idx)
+        price_str = f", price={slot_price:.4f}" if slot_price is not None else ""
+        baseline = simulate_soc(selected_charge, selected_discharge)
+        sim = simulate_soc(selected_charge, candidate)
+        if discharge_pays(sim, baseline):
             selected_discharge = candidate
-            price_str = f", price={slot_price:.4f}" if slot_price is not None else ""
-            logger.debug(f"🔋 {device_name}: ✓ Added discharge slot {slot_idx}, final_soc={final_soc:.1f}%{price_str}")
+            logger.debug(f"🔋 {device_name}: ✓ Added discharge slot {slot_idx}, final_soc={sim.final_soc:.1f}%{price_str}")
+        elif sim.feasible:
+            logger.debug(f"🔋 {device_name}: ✗ Rejected discharge slot {slot_idx} "
+                         f"(would take energy from dearer slots{price_str})")
         else:
-            price_str = f", price={slot_price:.4f}" if slot_price is not None else ""
             logger.debug(f"🔋 {device_name}: ✗ Rejected discharge slot {slot_idx} (SOC constraint violated{price_str})")
     
     # Get charge buffer percentage from config (default 20%)
@@ -243,45 +316,94 @@ def limit_battery_cycles(
     logger.debug(f"🔋 {device_name}: Phase 2 - Adding charge slots (cheapest first, buffer={charge_buffer_percent}%)")
     logger.debug(f"🔋 {device_name}: Initial state: {len(selected_discharge)} discharge slots selected")
     
+    def expand_discharge(charge_set, discharge_set, min_price=None):
+        """Add every discharge slot the given charge set makes feasible and worthwhile, most
+        expensive first.
+
+        min_price is the break-even for energy bought by the charge slot being judged: a slot
+        below it would only turn that grid energy into a loss, so it isn't offered at all.
+        Otherwise the charge slot's spread check would see a blend - some energy to the peak,
+        some to slots that don't cover the round-trip losses - and pass it anyway.
+        """
+        expanded = set(discharge_set)
+        for d_slot in discharge_by_price:
+            if d_slot in expanded or d_slot in charge_set:
+                continue
+            d_price = _price_at(d_slot)
+            if min_price is not None and d_price is not None and d_price < min_price:
+                break  # discharge_by_price is most expensive first, so the rest are cheaper still
+            d_candidate = expanded | {d_slot}
+            if discharge_pays(simulate_soc(charge_set, d_candidate), simulate_soc(charge_set, expanded)):
+                expanded = d_candidate
+        return expanded
+
     # Then add charge slots (cheapest first) - but only if economically viable
     for slot_idx in charge_by_price:
         candidate = selected_charge | {slot_idx}
-        slot_price = prices[slot_idx] if prices and slot_idx < len(prices) else None
-        final_soc, feasible, charged_kwh, discharged_kwh = simulate_soc(candidate, selected_discharge)
-        
-        if not feasible:
-            price_str = f", price={slot_price:.4f}" if slot_price is not None else ""
+        slot_price = _price_at(slot_idx)
+        price_str = f", price={slot_price:.4f}" if slot_price is not None else ""
+
+        if slot_idx in selected_discharge:
+            logger.debug(f"🔋 {device_name}: ✗ Rejected charge slot {slot_idx} (already a discharge slot{price_str})")
+            continue
+
+        if not simulate_soc(candidate, selected_discharge).feasible:
             logger.debug(f"🔋 {device_name}: ✗ Rejected charge slot {slot_idx} (SOC constraint violated{price_str})")
             continue
-        
+
+        # Charging raises SOC, which unlocks discharge slots that were previously infeasible.
+        # Those have to be folded in before judging the slot, because they are precisely what
+        # repays it - scoring against the un-expanded set would reject even a very wide spread.
+        break_even = (slot_price / round_trip_efficiency + cycle_cost_per_kwh
+                      if slot_price is not None else None)
+        candidate_discharge = expand_discharge(candidate, selected_discharge, break_even)
+        sim = simulate_soc(candidate, candidate_discharge)
+        baseline = simulate_soc(selected_charge, selected_discharge)
+
         # Check if adding this charge slot is economically viable
         # Only add charge if we haven't exceeded discharge needs by more than the buffer
-        if discharged_kwh > 0:  # Only check if there are discharge slots
-            max_charge_allowed = discharged_kwh * (1 + charge_buffer_percent / 100)
-            if charged_kwh > max_charge_allowed:
-                price_str = f", price={slot_price:.4f}" if slot_price is not None else ""
+        if sim.discharged_kwh > 0:  # Only check if there are discharge slots
+            max_charge_allowed = sim.discharged_kwh * (1 + charge_buffer_percent / 100)
+            if sim.charged_kwh > max_charge_allowed:
                 logger.debug(f"🔋 {device_name}: ✗ Rejected charge slot {slot_idx} "
-                           f"(charged {charged_kwh:.2f} kWh would exceed discharge needs "
-                           f"{discharged_kwh:.2f} kWh + {charge_buffer_percent}% buffer = {max_charge_allowed:.2f} kWh{price_str})")
+                           f"(charged {sim.charged_kwh:.2f} kWh would exceed discharge needs "
+                           f"{sim.discharged_kwh:.2f} kWh + {charge_buffer_percent}% buffer = {max_charge_allowed:.2f} kWh{price_str})")
                 continue
-        
+
+        # Price sanity only: when this slot both buys and delivers energy, what it delivers
+        # must be worth more than it cost. Compared as energy-weighted *rates* rather than
+        # totals, because charging runs at a fixed rate while discharge only trickles out at
+        # household demand - so one charge slot is repaid across several thinner discharge
+        # slots, and comparing totals would let the extra volume subsidise a spread that
+        # never covered its losses.
+        # How *much* to charge is deliberately left to charge_buffer_percent above. That
+        # buffer is the hedge against an imperfect usage prediction and the value of cheap
+        # energy carried past the horizon - neither of which is visible from inside a single
+        # horizon, so a slot that shifts no extra energy here is simply not priced.
+        spread = None
+        if prices and baseline.feasible and sim.discharged_kwh > 0:
+            extra_grid_kwh = sim.grid_charged_kwh - baseline.grid_charged_kwh
+            extra_discharge_kwh = sim.discharged_kwh - baseline.discharged_kwh
+            if extra_grid_kwh > 0 and extra_discharge_kwh > 0:
+                charge_rate = (sim.grid_charge_cost - baseline.grid_charge_cost) / extra_grid_kwh
+                discharge_rate = (sim.discharge_revenue - baseline.discharge_revenue) / extra_discharge_kwh
+                spread = discharge_rate - charge_rate - cycle_cost_per_kwh
+                if spread <= 0:
+                    logger.debug(f"🔋 {device_name}: ✗ Rejected charge slot {slot_idx} "
+                               f"(discharges at {discharge_rate:.4f} but costs {charge_rate:.4f} EUR/kWh "
+                               f"after {round_trip_efficiency:.0%} round-trip losses, "
+                               f"spread {spread:+.4f}{price_str})")
+                    continue
+
+        newly_enabled = candidate_discharge - selected_discharge
         selected_charge = candidate
-        price_str = f", price={slot_price:.4f}" if slot_price is not None else ""
-        energy_balance = charged_kwh - discharged_kwh
+        selected_discharge = candidate_discharge
+        energy_balance = sim.charged_kwh - sim.discharged_kwh
         logger.debug(f"🔋 {device_name}: ✓ Added charge slot {slot_idx}, "
-                    f"charged={charged_kwh:.2f} kWh, discharged={discharged_kwh:.2f} kWh, "
-                    f"balance={energy_balance:+.2f} kWh, final_soc={final_soc:.1f}%{price_str}")
-        
-        # Re-check if we can add more discharge slots now that we have more charge
-        for d_slot in discharge_by_price:
-            if d_slot not in selected_discharge:
-                d_candidate = selected_discharge | {d_slot}
-                d_final_soc, d_feasible, d_charged_kwh, d_discharged_kwh = simulate_soc(selected_charge, d_candidate)
-                if d_feasible:
-                    selected_discharge = d_candidate
-                    d_slot_price = prices[d_slot] if prices and d_slot < len(prices) else None
-                    price_str = f", price={d_slot_price:.4f}" if d_slot_price is not None else ""
-                    logger.debug(f"🔋 {device_name}: ✓ Re-added discharge slot {d_slot} (now feasible with more charge, final_soc={d_final_soc:.1f}%{price_str})")
+                    f"charged={sim.charged_kwh:.2f} kWh, discharged={sim.discharged_kwh:.2f} kWh, "
+                    f"balance={energy_balance:+.2f} kWh, final_soc={sim.final_soc:.1f}%{price_str}"
+                    + (f", spread {spread:+.4f} EUR/kWh" if spread is not None else "")
+                    + (f", enabled {len(newly_enabled)} more discharge slots" if newly_enabled else ""))
     
     # Combine past slots (unchanged) with limited future slots
     final_charge_slots = past_charge_slots | selected_charge
@@ -295,15 +417,32 @@ def limit_battery_cycles(
     limited_discharge_times = sorted([slot_idx_to_time(s) for s in final_discharge_slots])
     
     # Log results with price info if available
-    final_soc, _, total_charged, total_discharged = simulate_soc(selected_charge, selected_discharge)
+    final_sim = simulate_soc(selected_charge, selected_discharge)
+    total_charged = final_sim.charged_kwh
+    total_discharged = final_sim.discharged_kwh
+    final_soc = final_sim.final_soc
     energy_balance = total_charged - total_discharged
-    
+
+    # Averages are energy-weighted: a charge slot moves a full charge_energy_per_slot while a
+    # discharge slot only moves what the house drew, so per-slot means are not comparable.
     if prices and selected_charge:
-        avg_charge_price = sum(prices[s] for s in selected_charge if s < len(prices)) / len(selected_charge)
+        avg_charge_price = (final_sim.grid_charge_cost * round_trip_efficiency / final_sim.grid_charged_kwh
+                            if final_sim.grid_charged_kwh else 0)
         logger.info(f"🔋 {device_name}: Selected {len(selected_charge)} charge slots (avg price: {avg_charge_price:.4f}, total: {total_charged:.2f} kWh)")
     if prices and selected_discharge:
-        avg_discharge_price = sum(prices[s] for s in selected_discharge if s < len(prices)) / len(selected_discharge)
+        avg_discharge_price = (final_sim.discharge_revenue / total_discharged
+                               if total_discharged else 0)
         logger.info(f"🔋 {device_name}: Selected {len(selected_discharge)} discharge slots (avg price: {avg_discharge_price:.4f}, total: {total_discharged:.2f} kWh)")
+    if prices:
+        logger.info(f"🔋 {device_name}: Cycle economics: cost {final_sim.grid_charge_cost:.2f} EUR, "
+                    f"avoided import {final_sim.discharge_revenue:.2f} EUR, "
+                    f"net {net_profit(final_sim):+.2f} EUR "
+                    f"(round-trip efficiency {round_trip_efficiency:.0%}, "
+                    f"wear {cycle_cost_per_kwh:.4f} EUR/kWh)")
+    if prices and not selected_charge and charge_slots:
+        logger.info(f"🔋 {device_name}: No charge slots selected out of {len(charge_slots)} candidates - "
+                    f"either the price spread did not cover {round_trip_efficiency:.0%} round-trip losses "
+                    f"or SOC limits left no room (enable debug logging for the per-slot reason)")
     
     logger.info(f"🔋 {device_name}: Final - {len(limited_charge_times)} charge, {len(limited_discharge_times)} discharge slots")
     logger.info(f"🔋 {device_name}: Energy balance: {energy_balance:+.2f} kWh, final_soc: {final_soc:.1f}% (started at {current_soc:.1f}%)")

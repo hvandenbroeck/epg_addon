@@ -33,40 +33,31 @@ def get_results():
 
 @app.route('/api/battery_thresholds')
 def get_battery_thresholds():
-    """Return battery price thresholds"""
+    """Return the battery LP plan summary (per-device economics for the current horizon)."""
+    empty = {
+        'method': None,
+        'round_trip_efficiency': None,
+        'cycle_cost_per_kwh': None,
+        'export_pricing': None,
+        'devices': {},
+        'updated_at': '',
+        'last_soc_recalc': '',
+    }
     with TinyDB('db.json') as db:
         schedule_docs = db.search(Query().id == 'schedule')
-    
-    if schedule_docs and 'battery_price_thresholds' in schedule_docs[0]:
-        thresholds = schedule_docs[0]['battery_price_thresholds']
-        updated_at = schedule_docs[0].get('updated_at', '')
-        solar_only_mode = schedule_docs[0].get('solar_only_mode', False)
-        last_soc_recalc = schedule_docs[0].get('last_soc_recalc', '')
-        solar_only_evaluation = schedule_docs[0].get('solar_only_evaluation')
+
+    if schedule_docs and schedule_docs[0].get('battery_plan_summary'):
+        summary = schedule_docs[0]['battery_plan_summary']
         return jsonify({
-            'max_charge_price': thresholds.get('max_charge_price'),
-            'min_discharge_price': thresholds.get('min_discharge_price'),
-            'price_history_days': thresholds.get('price_history_days'),
-            'charge_percentile': thresholds.get('charge_percentile'),
-            'discharge_percentile': thresholds.get('discharge_percentile'),
-            'price_diff_threshold': thresholds.get('price_diff_threshold'),
-            'updated_at': updated_at,
-            'solar_only_mode': solar_only_mode,
-            'solar_only_evaluation': solar_only_evaluation,
-            'last_soc_recalc': last_soc_recalc
+            'method': summary.get('method', 'lp'),
+            'round_trip_efficiency': summary.get('round_trip_efficiency'),
+            'cycle_cost_per_kwh': summary.get('cycle_cost_per_kwh'),
+            'export_pricing': summary.get('export_pricing'),
+            'devices': summary.get('devices', {}),
+            'updated_at': schedule_docs[0].get('updated_at', ''),
+            'last_soc_recalc': schedule_docs[0].get('last_soc_recalc', ''),
         })
-    return jsonify({
-        'max_charge_price': None,
-        'min_discharge_price': None,
-        'price_history_days': None,
-        'charge_percentile': None,
-        'discharge_percentile': None,
-        'price_diff_threshold': None,
-        'updated_at': '',
-        'solar_only_mode': False,
-        'solar_only_evaluation': None,
-        'last_soc_recalc': ''
-    })
+    return jsonify(empty)
 
 
 _EV_DEADLINE_EMPTY_PRIMARY = {
@@ -221,6 +212,8 @@ def get_gantt():
     solar_data = predictions.get('solar', [])
     battery_soc = predictions.get('battery_soc', {})
     ev_soc = predictions.get('ev_soc', {})
+    thermal_temp = predictions.get('thermal_temp', {})  # {device: [{timestamp, temp}]} from the pre-heat LP
+    thermal_temp_actual = predictions.get('thermal_temp_actual', {})  # {device: [{timestamp, temp}]} measured
 
     # Device labels and colors
     device_labels = {
@@ -270,6 +263,12 @@ def get_gantt():
         device = entry.get('device')
         start = entry.get('start')
         stop = entry.get('stop')
+
+        # Pre-heat heat-pump ranges carry a 'setpoint' and cover every slot, so as a Gantt bar they
+        # are just an uninformative solid block. They are shown in the dedicated Heat Pump row
+        # (commanded setpoint + predicted temperature) instead.
+        if entry.get('setpoint') is not None:
+            continue
 
         if device and start and stop:
             task_name = device_labels.get(device, device)
@@ -321,14 +320,31 @@ def get_gantt():
         hovertemplate="<b>%{y}</b><br>Start: %{base|%Y-%m-%d %H:%M}<br>End: %{x|%Y-%m-%d %H:%M}<br>Type: %{customdata[0]}<extra></extra>"
     )
 
-    # Create subplots: Gantt (row 1), Prices (row 2), Predictions (row 3)
+    # Layout rows: Gantt, Prices, (Heat Pump setpoint+temp — only when there is a pre-heat plan),
+    # Predictions. The heat-pump row gets its own °C graph so it is clear both what setpoint is
+    # commanded and how the room temperature responds.
+    has_thermal = bool(thermal_temp) or any(e.get('setpoint') is not None for e in schedule)
+    n_rows = 4 if has_thermal else 3
+    hp_row = 3 if has_thermal else None
+    pred_row = 4 if has_thermal else 3
+
+    if has_thermal:
+        row_heights = [0.30, 0.15, 0.22, 0.33]
+        subplot_titles = ("Energy Optimization Schedule", "Electricity Prices (€/kWh)",
+                          "Heat Pump — setpoint command, predicted & measured room temp (°C)", pred_title)
+        specs = [[{}], [{}], [{}], [{'secondary_y': True}]]
+    else:
+        row_heights = [0.35, 0.20, 0.45]
+        subplot_titles = ("Energy Optimization Schedule", "Electricity Prices (€/kWh)", pred_title)
+        specs = [[{}], [{}], [{'secondary_y': True}]]
+
     fig = make_subplots(
-        rows=3, cols=1,
-        row_heights=[0.35, 0.20, 0.45],
+        rows=n_rows, cols=1,
+        row_heights=row_heights,
         shared_xaxes=True,
-        vertical_spacing=0.06,
-        subplot_titles=("Energy Optimization Schedule", "Electricity Prices (€/kWh)", pred_title),
-        specs=[[{}], [{}], [{'secondary_y': True}]]
+        vertical_spacing=0.05,
+        subplot_titles=subplot_titles,
+        specs=specs
     )
 
     # Add Gantt traces to row 1
@@ -349,7 +365,7 @@ def get_gantt():
 
     # Add "Now" line
     now = datetime.now()
-    for row in [1, 2, 3]:
+    for row in range(1, n_rows + 1):
         fig.add_vline(
             x=now.timestamp() * 1000,
             line=dict(color="red", width=2, dash="dash"),
@@ -397,7 +413,79 @@ def get_gantt():
             row=2, col=1
         )
 
-    # Add power prediction traces (row 3)
+    # Heat-pump row: the commanded quick-veto setpoint (exactly what the addon writes to the heat
+    # pump, drawn as a step so every change is visible) and the resulting predicted room
+    # temperature, both in °C on the same axis.
+    if has_thermal:
+        # Commanded setpoint per device, reconstructed from the schedule entries that carry a
+        # 'setpoint'. Each range contributes a flat segment at its setpoint value; the step shape
+        # draws the jump to the next range.
+        sp_by_device = {}
+        for entry in schedule:
+            if entry.get('setpoint') is None:
+                continue
+            sp_by_device.setdefault(entry['device'], []).append(entry)
+        setpoint_colors = ['#3949AB', '#283593', '#1A237E']
+        for i, (name, entries) in enumerate(sorted(sp_by_device.items())):
+            entries = sorted(entries, key=lambda e: e['start'])
+            xs, ys = [], []
+            for e in entries:
+                xs.append(pd.to_datetime(e['start'])); ys.append(e['setpoint'])
+                xs.append(pd.to_datetime(e['stop'])); ys.append(e['setpoint'])
+            label = f"HP setpoint command{' ' + name if len(sp_by_device) > 1 else ''} (°C)"
+            fig.add_trace(
+                go.Scatter(
+                    x=xs, y=ys, name=label, mode='lines',
+                    line=dict(color=setpoint_colors[i % len(setpoint_colors)], width=2.5, shape='hv'),
+                    hovertemplate='Set to <b>%{y:.1f} °C</b><extra>' + label + '</extra>',
+                    showlegend=True
+                ),
+                row=hp_row, col=1
+            )
+        # Predicted room temperature per device.
+        temp_colors = ['#D81B60', '#AD1457', '#880E4F']
+        for i, (name, temp_entries) in enumerate(thermal_temp.items()):
+            if not temp_entries:
+                continue
+            label = f"Predicted room temp{' ' + name if len(thermal_temp) > 1 else ''} (°C)"
+            fig.add_trace(
+                go.Scatter(
+                    x=[r['timestamp'] for r in temp_entries],
+                    y=[r['temp'] for r in temp_entries],
+                    name=label,
+                    mode='lines',
+                    line=dict(color=temp_colors[i % len(temp_colors)], width=2, shape='spline'),
+                    hovertemplate='%{y:.1f} °C<extra>' + label + '</extra>',
+                    showlegend=True
+                ),
+                row=hp_row, col=1
+            )
+        # Measured room temperature per device (actual, from HA history + live readings), so the
+        # predicted trajectory can be checked against what the house actually did.
+        actual_colors = ['#00695C', '#004D40', '#26A69A']
+        for i, (name, temp_entries) in enumerate(thermal_temp_actual.items()):
+            if not temp_entries:
+                continue
+            label = f"Measured room temp{' ' + name if len(thermal_temp_actual) > 1 else ''} (°C)"
+            color = actual_colors[i % len(actual_colors)]
+            fig.add_trace(
+                go.Scatter(
+                    x=[r['timestamp'] for r in temp_entries],
+                    y=[r['temp'] for r in temp_entries],
+                    name=label,
+                    # lines+markers so the current/measured temperature is visible even when only a
+                    # point or two exist (e.g. just after a restart, early in the horizon).
+                    mode='lines+markers',
+                    line=dict(color=color, width=2.5),
+                    marker=dict(color=color, size=6),
+                    hovertemplate='%{y:.2f} °C<extra>' + label + '</extra>',
+                    showlegend=True
+                ),
+                row=hp_row, col=1
+            )
+        fig.update_yaxes(title_text='°C', row=hp_row, col=1)
+
+    # Add power prediction traces (predictions row)
     soc_colors = ['#45B7D1', '#2E86AB', '#1B5E7B']
 
     if usage_data:
@@ -411,7 +499,7 @@ def get_gantt():
                 hovertemplate='%{y:.3f} kWh<extra>Predicted Usage</extra>',
                 showlegend=True
             ),
-            row=3, col=1, secondary_y=False
+            row=pred_row, col=1, secondary_y=False
         )
 
     if solar_data:
@@ -425,7 +513,7 @@ def get_gantt():
                 hovertemplate='%{y:.3f} kWh<extra>Predicted Solar</extra>',
                 showlegend=True
             ),
-            row=3, col=1, secondary_y=False
+            row=pred_row, col=1, secondary_y=False
         )
 
     for i, (name, soc_entries) in enumerate(battery_soc.items()):
@@ -442,7 +530,7 @@ def get_gantt():
                 hovertemplate='%{y:.1f}%<extra>' + label + '</extra>',
                 showlegend=True
             ),
-            row=3, col=1, secondary_y=True
+            row=pred_row, col=1, secondary_y=True
         )
 
     ev_soc_colors = ['#9B59B6', '#6C3483', '#C39BD3']
@@ -460,16 +548,16 @@ def get_gantt():
                 hovertemplate='%{y:.1f}%<extra>' + label + '</extra>',
                 showlegend=True
             ),
-            row=3, col=1, secondary_y=True
+            row=pred_row, col=1, secondary_y=True
         )
 
     # Configure y-axes for prediction subplot
-    fig.update_yaxes(title_text='kWh', rangemode='tozero', row=3, col=1, secondary_y=False)
-    fig.update_yaxes(title_text='SOC (%)', range=[0, 100], showgrid=False, row=3, col=1, secondary_y=True)
+    fig.update_yaxes(title_text='kWh', rangemode='tozero', row=pred_row, col=1, secondary_y=False)
+    fig.update_yaxes(title_text='SOC (%)', range=[0, 100], showgrid=False, row=pred_row, col=1, secondary_y=True)
 
     # Update layout
     fig.update_layout(
-        height=950,
+        height=1150 if has_thermal else 950,
         showlegend=True,
         legend=dict(
             orientation='h',
@@ -502,7 +590,7 @@ def get_gantt():
     )
 
     # Add title to bottom x-axis (row 3)
-    fig.update_xaxes(title_text="Time", row=3, col=1)
+    fig.update_xaxes(title_text="Time", row=pred_row, col=1)
 
     # Update y-axis for price histogram
     fig.update_yaxes(title_text="€ct/kWh", row=2, col=1)

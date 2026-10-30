@@ -20,6 +20,7 @@ Welcome to the EPG Addon documentation. The EPG (Energy Price Guidance) Addon op
 | Guide | Description |
 |-------|-------------|
 | [Expressions](expressions.md) | Use mathematical expressions in `value` and `payload` fields |
+| [Heat Pump Pre-Heating](heat_pump_preheat.md) | Pre-heat the floor slab in cheap/solar hours and coast through price peaks (thermal setpoint LP) |
 | [Battery Optimization](battery_optimization.md) | How battery charge/discharge thresholds are calculated from price history |
 | [EV Deadline Charging](ev_deadline_charging.md) | Charge an EV to a target SOC by a deadline, in the cheapest available price slots |
 | [Heat Pump Runtime](heat_pump_runtime.md) | Automatic daily runtime calculation from historical sensor data |
@@ -29,7 +30,7 @@ Welcome to the EPG Addon documentation. The EPG (Energy Price Guidance) Addon op
 
 The addon integrates with Home Assistant via its REST API and MQTT. Each day at 16:05 it:
 1. Fetches upcoming electricity prices from ENTSO-E
-2. Runs optimization algorithms (MILP for thermal devices, percentile-based for batteries)
+2. Runs optimization algorithms (MILP for thermal devices, a whole-horizon LP for batteries)
 3. Schedules device start/stop actions through the Home Assistant scheduler
 
 Supported device types:

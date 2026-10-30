@@ -123,3 +123,42 @@ class HomeAssistantClient:
         except Exception as e:
             logger.error(f"Error fetching 48h average temperature for {entity_id}: {e}")
             return None
+
+    async def get_history_series(self, entity_id: str, hours_back: float = 30.0) -> list[tuple[datetime, float]]:
+        """Fetch a numeric sensor's recent history as (local-naive datetime, value) points.
+
+        Passes an explicit ``end_time`` — without it the history endpoint caps the response at ~24h
+        from the start. Timestamps are converted from UTC to local naive time to match the rest of
+        the codebase (schedule/prediction timestamps are all naive local). Returns [] on error.
+        """
+        now = datetime.now(timezone.utc)
+        start_str = (now - timedelta(hours=hours_back)).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+        end_str = now.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+        url = (
+            f"{self.ha_url}/api/history/period/{start_str}"
+            f"?filter_entity_id={entity_id}&end_time={end_str}&minimal_response"
+        )
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=self.headers) as response:
+                    if response.status != 200:
+                        logger.error(f"Failed to fetch history for {entity_id}: HTTP {response.status}")
+                        return []
+                    data = await response.json()
+            if not data or not data[0]:
+                return []
+            out = []
+            for st in data[0]:
+                raw = st.get('state')
+                if not raw or raw in ('unknown', 'unavailable', 'None'):
+                    continue
+                try:
+                    val = float(raw)
+                except (ValueError, TypeError):
+                    continue
+                t = datetime.fromisoformat(st['last_changed'].replace('Z', '+00:00'))
+                out.append((t.astimezone().replace(tzinfo=None), val))  # UTC → local naive
+            return out
+        except Exception as e:
+            logger.error(f"Error fetching history for {entity_id}: {e}")
+            return []

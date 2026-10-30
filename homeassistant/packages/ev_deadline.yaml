@@ -80,7 +80,7 @@ rest_command:
   epg_recalculate_ev_deadline:
     url: "http://local-epg-addon.local.hass.io:8100/trigger/ev_deadline_recalc"
     method: POST
-    # The recalculation also re-evaluates battery solar-only mode; allow it time to finish.
+    # The recalculation also re-solves the battery LP plan; allow it time to finish.
     timeout: 90
 
 rest:
@@ -181,6 +181,19 @@ script:
     icon: mdi:refresh
     mode: restart
     sequence:
+      # Rebuild the absolute deadline from the dashboard's day/time first. Pressing the button
+      # with "Tomorrow" already selected changes no state, so the sync automation never fires;
+      # without this a one-off "Tomorrow" deadline from days ago would be planned against
+      # (and rejected as passed) even though the dashboard still says "Tomorrow".
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.ev_deadline_target_time
+        data:
+          datetime: >-
+            {%- set raw = states('input_datetime.ev_deadline_time') -%}
+            {%- set t = raw if raw not in ['unknown', 'unavailable'] else '07:00:00' -%}
+            {%- set days = 0 if is_state('input_select.ev_deadline_day', 'Today') else 1 -%}
+            {{ (now().date() + timedelta(days=days)) ~ ' ' ~ t }}
       # continue_on_error so a connection failure (add-on down) still reaches the
       # error branch below instead of aborting the script silently.
       - action: rest_command.epg_recalculate_ev_deadline
@@ -284,16 +297,7 @@ automation:
             entity_id: input_select.ev_deadline_day
             state: "Today"
     actions:
-      - action: input_datetime.set_datetime
-        target:
-          entity_id: input_datetime.ev_deadline_target_time
-        data:
-          datetime: >-
-            {%- set raw = states('input_datetime.ev_deadline_time') -%}
-            {%- set t = raw if raw not in ['unknown', 'unavailable'] else '07:00:00' -%}
-            {%- set days = 0 if is_state('input_select.ev_deadline_day', 'Today') else 1 -%}
-            {{ (now().date() + timedelta(days=days)) ~ ' ' ~ t }}
-      # via the script (not the rest_command directly) so automatic recalculations
-      # update the same "last recalculated" timestamp the button feeds.
+      # The script folds day/time into the absolute datetime itself before re-planning (so the
+      # dashboard button does too), and updates the same "last recalculated" timestamp.
       - action: script.ev_deadline_recalculate
         continue_on_error: true

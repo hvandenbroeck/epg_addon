@@ -58,6 +58,20 @@ class ConditionGroup(BaseModel):
     conditions: List[EntityCondition] = Field(default_factory=list, description="Leaf conditions to evaluate")
 
 
+class ComfortWindow(BaseModel):
+    """A time-of-day window raising the minimum comfort temperature (used by WP pre-heating).
+
+    ``start``/``end`` are local ``HH:MM`` strings; a window may wrap past midnight (``end`` <=
+    ``start``, e.g. a sleep window 23:00–06:30). ``days`` restricts it to certain weekdays
+    (``mon``..``sun``); empty means every day. Slots matched by several windows take the highest
+    ``min_temp``.
+    """
+    start: str = Field(..., description="Window start time HH:MM (local)")
+    end: str = Field(..., description="Window end time HH:MM (local); may wrap past midnight")
+    min_temp: float = Field(..., description="Minimum room temperature within this window (°C)")
+    days: List[str] = Field(default_factory=list, description="Weekdays (mon..sun) this applies to; empty = every day")
+
+
 class LoadManagementActions(BaseModel):
     """Load management specific actions."""
     switch_to_single_phase: Optional[ActionSet] = None
@@ -120,6 +134,26 @@ class Device(BaseModel):
     heatpump_status_sensor: Optional[str] = Field(default=None, description="Heat pump on/off status sensor entity ID")
     # WP temperature-based optimization disable threshold (only used when type='wp')
     disable_optimization_above_avg_temp: Optional[float] = Field(default=None, description="Disable WP optimization when 48h average outside temperature exceeds this value (°C). None means always optimize.")
+    # WP thermal pre-heating (setpoint LP) — opt-in alternative to the block/min-gap/max-gap MILP.
+    # When enabled, the heat pump is planned by optimization/thermal_preheat.py: a whole-horizon LP
+    # chooses a room-temperature setpoint per slot that pre-charges the slab in cheap/solar hours
+    # and coasts through price peaks down to the comfort floor, re-solved every 15 min against the
+    # measured room temperature (inside_temp_sensor). Requires inside_temp_sensor; the device's
+    # `start` action must set the zone to the planned value via the `{setpoint}` expression (e.g.
+    # a quick-veto temperature). See documentation/heat_pump_preheat.md.
+    wp_preheat_enabled: bool = Field(default=False, description="Use the thermal-mass setpoint LP instead of the block scheduler for this heat pump")
+    preheat_max_setpoint: float = Field(default=22.0, description="Highest room setpoint the planner may command when pre-heating (°C)")
+    preheat_comfort_default_min_temp: float = Field(default=19.5, description="Minimum room temperature when no comfort window matches (°C) — the 'away'/default floor")
+    preheat_comfort_windows: List[ComfortWindow] = Field(default_factory=list, description="Occupancy windows raising the minimum room temperature at certain times/days")
+    preheat_setpoint_resolution: float = Field(default=0.5, description="Rounding step for the commanded setpoint (°C)")
+    preheat_penalty_per_c: float = Field(default=0.0, description="Extra cost per °C above the comfort floor per slot (EUR) — a linear stand-in for the lower COP of carrying the slab hotter; 0 disables")
+    # Thermal (first-order RC) model parameters — defaults seeded from a 10-day energy-balance fit; tune per house.
+    thermal_heat_loss_kw_per_c: float = Field(default=0.024, description="Steady-state heat-loss coefficient UA (kW per °C inside/outside difference)")
+    thermal_heat_capacity_kwh_per_c: float = Field(default=1.5, description="Effective slab heat capacity (kWh per °C) — energy to raise the house 1 °C")
+    thermal_max_heat_kw: float = Field(default=5.0, description="Maximum useful heat the system can deliver (kW) — caps the pre-charge rate")
+    thermal_cop_ref: float = Field(default=3.5, description="Reference heating COP at thermal_cop_tout_ref outside temperature")
+    thermal_cop_slope: float = Field(default=0.08, description="COP change per °C of outside temperature (higher when milder)")
+    thermal_cop_tout_ref: float = Field(default=7.0, description="Outside temperature (°C) at which COP equals thermal_cop_ref")
     # EV-specific options (only used when type='ev')
     solar_charge_only: bool = Field(default=False, description="When True, the EV charger is controlled by solar surplus only (bypasses the load watcher). Mutually exclusive with ev_deadline_charge_enabled — an EV device must set exactly one of the two to be scheduled at all.")
     ev_min_current_limit: float = Field(default=6.0, description="Minimum EV charging current in Amps")
@@ -199,6 +233,34 @@ class Device(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _check_wp_preheat_contract(self):
+        """Fail fast on a pre-heating heat pump that can't actually be controlled.
+
+        The planner steers the zone by writing a per-slot setpoint through the device's ``start``
+        action via the ``{setpoint}`` expression, and re-solves against ``inside_temp_sensor``. A
+        constant start payload would silently override the plan with a fixed temperature, and a
+        missing room sensor leaves nothing to track — both are misconfigurations, not quiet
+        degradations, so reject them at load time.
+        """
+        if not self.wp_preheat_enabled:
+            return self
+        if not self.inside_temp_sensor:
+            raise ValueError(
+                f"Device '{self.name}': wp_preheat_enabled requires inside_temp_sensor (the room "
+                f"temperature the plan tracks)"
+            )
+        payloads = [str(m.payload) for m in self.start.mqtt]
+        values = [str(e.value) for e in self.start.entity if e.value is not None]
+        values += [str(e.option) for e in self.start.entity if e.option is not None]
+        if not any('{setpoint}' in s for s in payloads + values):
+            raise ValueError(
+                f"Device '{self.name}': wp_preheat_enabled requires the start action to set the "
+                f"zone from the planned value — include '{{setpoint}}' in a start MQTT payload or "
+                f"entity value (e.g. a quick-veto temperature)"
+            )
+        return self
+
 
 class DevicesConfig(BaseSettings):
     """Main devices configuration."""
@@ -259,14 +321,25 @@ def load_default_config() -> DevicesConfig:
         Device(
             name="wp",
             type="wp",
-            #inside_temp_sensor="sensor.ebusd_700_z2roomtemp",
+            inside_temp_sensor="sensor.ebusd_700_z2roomtemp",
             outside_temp_sensor="sensor.ebusd_700_displayedoutsidetemp",
-            disable_optimization_above_avg_temp=10.0,
             #heatpump_status_sensor="sensor.ebusd_700_hc2pumpstatus_2",
             enable_load_management=False,
+            # Thermal pre-heating: the LP drives the zone 2 quick-veto setpoint per slot
+            # ({setpoint} below), pre-charging the slab in cheap/solar hours and coasting through
+            # price peaks to the comfort floor. See documentation/heat_pump_preheat.md.
+            wp_preheat_enabled=True,
+            preheat_max_setpoint=22.0,
+            preheat_comfort_default_min_temp=19.5,
+            preheat_comfort_windows=[
+                ComfortWindow(start="23:00", end="06:30", min_temp=19.5),                    # asleep
+                ComfortWindow(start="06:30", end="08:30", min_temp=20.5),                    # home morning
+                ComfortWindow(start="17:00", end="23:00", min_temp=20.5),                    # home evening
+                ComfortWindow(start="08:30", end="17:00", min_temp=20.5, days=["sat", "sun"]),  # home weekends
+            ],
             start=ActionSet(mqtt=[
                 MQTTAction(topic="ebusd/700/z2sfmode/set", topic_get="ebusd/700/z2sfmode/get", payload="veto"),
-                MQTTAction(topic="ebusd/700/z2quickvetotemp/set", topic_get="ebusd/700/z2quickvetotemp/get", payload="21")
+                MQTTAction(topic="ebusd/700/z2quickvetotemp/set", topic_get="ebusd/700/z2quickvetotemp/get", payload="{setpoint}")
             ]),
             stop=ActionSet(mqtt=[
                 MQTTAction(topic="ebusd/700/z2sfmode/set", topic_get="ebusd/700/z2sfmode/get", payload="auto"),

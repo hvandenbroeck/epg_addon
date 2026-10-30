@@ -408,29 +408,34 @@ class DeviceVerifier:
         # A device should be "start" if ANY of its slots is currently active.
         # Battery entries appear as "<name>_charge" / "<name>_discharge" in the schedule.
         device_states: Dict[str, str] = {}  # device -> expected action ("start" or "stop")
-        
+        # Per-device context for expression evaluation (e.g. a heat-pump pre-heat range carries a
+        # 'setpoint'); without it the verifier would compare and re-publish the literal "{setpoint}".
+        device_contexts: Dict[str, Dict] = {}
+
         for entry in schedule_doc["schedule"]:
             device = entry.get("device")
             start_str = entry.get("start")
             stop_str = entry.get("stop")
-            
+
             if not device or not start_str or not stop_str:
                 continue
-            
+
             # Skip entries for devices not present in the current config
             if not self._is_known_device(device):
                 continue
-            
+
             try:
                 start_time = datetime.fromisoformat(start_str)
                 end_time = datetime.fromisoformat(stop_str)
             except Exception as e:
                 logger.error(f"Invalid datetime in schedule entry: {e}")
                 continue
-            
+
             # Active slot takes priority over any previously recorded "stop"
             if start_time <= now < end_time:
                 device_states[device] = "start"
+                if entry.get("setpoint") is not None:
+                    device_contexts[device] = {"setpoint": entry["setpoint"]}
             elif device not in device_states:
                 # No active slot for this device yet — it should be off
                 device_states[device] = "stop"
@@ -461,8 +466,9 @@ class DeviceVerifier:
 
         # Verify each device's expected state and re-apply the action when needed
         for device, expected_action in device_states.items():
-            is_correct = await self.verify_device_action(device, expected_action)
-            
+            context = device_contexts.get(device)
+            is_correct = await self.verify_device_action(device, expected_action, context)
+
             if not is_correct:
                 logger.warning(f"⚠️ Device {device} not in expected {expected_action} state during periodic check, executing action...")
                 action_set = self._get_action_set(device, expected_action)
@@ -471,8 +477,8 @@ class DeviceVerifier:
                     continue
                 action_config = action_set.model_dump(exclude_none=True)
                 exec_device_name = self._get_base_device_name(device)
-                await self.devices.execute_device_action(exec_device_name, action_config, expected_action)
-                self.register_action(device, expected_action)
+                await self.devices.execute_device_action(exec_device_name, action_config, expected_action, context=context)
+                self.register_action(device, expected_action, context)
             else:
                 logger.debug(f"✅ Device {device} verified in correct {expected_action} state")
 

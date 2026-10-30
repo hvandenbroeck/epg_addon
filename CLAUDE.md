@@ -58,13 +58,45 @@ globals (not re-read per request — restart the process to pick up changes):
 **Orchestration flow** (`HeatpumpOptimizer.run_optimization` in
 [src/optimizer.py](src/optimizer.py), the largest and most central module):
 1. Fetch ENTSO-E prices for a rolling horizon ([src/price_fetcher.py](src/price_fetcher.py)).
-2. Compute battery charge/discharge price percentile thresholds from history
-   ([src/forecasting/price_history.py](src/forecasting/price_history.py)).
-3. Per device type, delegate to [src/optimization/](src/optimization/):
+2. Per device type, delegate to [src/optimization/](src/optimization/):
    - `thermal.py` — MILP via PuLP/GLPK for `wp`/`hw` block scheduling (respects min/max gap,
      locked slots already committed within `lock_hours`, and optional expected-daily-runtime from
-     `runtime_calculator.py`).
-   - `battery.py` — percentile/threshold-based charge & discharge slot selection.
+     `runtime_calculator.py`). Used for `hw` always, and for `wp` only when `wp_preheat_enabled`
+     is **off**.
+   - `thermal_preheat.py` — **whole-horizon LP** (PuLP/GLPK) for `wp` devices with
+     `wp_preheat_enabled=True`, the thermal twin of `battery_lp.py`: the floor slab is a heat
+     battery. A first-order RC model (`C·ΔT = q − UA·(T−Tout)·Δt`) lets one LP choose a room
+     setpoint per slot that pre-charges the slab in cheap/solar hours and coasts through price
+     peaks down to a time-of-day comfort floor (`build_comfort_floor` expands occupancy windows),
+     with a soft slack so comfort can never make it infeasible. Electricity `q/COP` is split into
+     grid/solar parts exactly like the battery's charge split; `COP` comes from the forecast
+     outside temp. It runs in `HeatpumpOptimizer.recalculate_thermal_setpoints` (**not** in
+     `run_optimization`, like the battery LP): `is_daily=True` at the end of the daily run and
+     `is_daily=False` every 15 min, re-solving against the *measured* room temperature
+     (`inside_temp_sensor`) — the thermal analogue of the battery re-solving against measured SOC.
+     It runs *before* the battery recalc in both sequences so that recalc's trailing
+     `schedule_actions()` schedules the heat-pump entries too. Output is a setpoint per slot,
+     grouped into schedule-doc ranges carrying a `setpoint` value; `scheduler.py` writes it via the
+     device's `start` action with `{setpoint}` in the payload (no per-range stop — the next range
+     overrides and the device verifier holds it between). Outside-temp forecast is fetched once
+     (daily) via `forecasting/weather.py` and cached in the schedule doc as `outside_temp_forecast`.
+     See [documentation/heat_pump_preheat.md](documentation/heat_pump_preheat.md).
+   - `battery_lp.py` — **whole-horizon linear program** (PuLP/GLPK) that decides each slot's
+     battery mode in one global optimization: grid-charge, discharge-to-load, or hold. It honours
+     SOC dynamics, round-trip efficiency, charge/discharge rate, predicted load/solar, and prices,
+     with a terminal value on leftover SOC so it doesn't dump the battery at horizon end. This
+     replaced the old percentile-threshold selection (`battery.py`) **and** the greedy SOC limiter
+     (`battery_limiter.py`) — both files are now dead and unimported. Slot selection and
+     SOC-awareness are the *same* step: there is no separate "limiting" pass and no whole-day
+     solar-only switch (seasonal behaviour — store midday solar in summer, arbitrage from the grid
+     in winter — falls out of the per-slot inputs). The LP runs in
+     `HeatpumpOptimizer.recalculate_battery_limits` (not in `run_optimization`, which precedes the
+     prediction cache the LP needs): `is_daily=True` at the end of the daily run (also records the
+     `original_battery_schedule` plan reference for the dashboard) and `is_daily=False` every 15
+     min to re-solve against the latest measured SOC. Exported solar is valued at the day-ahead
+     price (zeroed where `grid_export_block_threshold` blocks export); tuning is just
+     `battery_round_trip_efficiency` and `battery_cycle_cost_per_kwh` — the percentile / time-%
+     / price-difference / buffer knobs are gone.
    - `ev_deadline.py` — pure cheapest-slot planner for `ev_deadline_charge_enabled` EVs,
      returning an `EvDeadlinePlan` (full plan + in-progress slot + energy/status). Slot
      *selection* only happens from `recalculate_ev_deadline_plans(full_replan=True)` — the daily
@@ -82,13 +114,10 @@ globals (not re-read per request — restart the process to pick up changes):
      midnight/startup resync only re-fires for a recurring "Today" deadline, never for a one-off
      "Tomorrow" pick, otherwise a "Tomorrow" deadline would re-evaluate relative to "now" every
      night and drift forward a day at a time.
-   - `battery_limiter.py` — post-hoc SOC-aware cycle limiting, reconciling planned schedule against
-     real current SOC (called again every 15 min by `recalculate_battery_limits`, independent of
-     the once-daily full optimization).
-4. Persist the merged schedule to **TinyDB** (`db.json`, at repo root) under doc id `"schedule"` —
+3. Persist the merged schedule to **TinyDB** (`db.json`, at repo root) under doc id `"schedule"` —
    this file is the handoff point between optimization and scheduling/UI; also stores
    `"predictions"`, `"load_watcher"`, `"device_limitations"`, `"ev_deadline"` docs.
-5. [src/scheduler.py](src/scheduler.py) reads the TinyDB schedule and creates APScheduler
+4. [src/scheduler.py](src/scheduler.py) reads the TinyDB schedule and creates APScheduler
    `DateTrigger` jobs per start/stop event, resolving battery entries by suffix
    (`_charge`/`_discharge`/`_solar_only`/`_block_grid_export`) back to the right `ActionSet` on the
    `Device` config.
@@ -147,10 +176,11 @@ by each device's `load_management.load_priority`.
 consumed by battery SOC limiting and the UI: `statistics_loader.py`/`weather.py` gather HA history
 and weather, `prediction.py` runs the LightGBM models, `curtailment_history.py` excludes hours
 where grid export was blocked from solar training (so curtailment doesn't get misread as low
-production), `price_history.py` derives the battery percentile thresholds, `battery_soc_prediction.py`
-projects SOC forward from the finalized schedule. Predictions are cached in TinyDB by
-`_calculate_and_cache_predictions()` (run once at optimization time) rather than recomputed on
-every 15-minute SOC recalculation.
+production), `battery_soc_prediction.py` projects SOC forward from the finalized schedule.
+(`price_history.py` still caches ENTSO-E history and exposes `get_price_percentiles`, but the
+battery LP no longer uses percentile thresholds, so nothing in the optimizer calls it now.)
+Predictions are cached in TinyDB by `_calculate_and_cache_predictions()` (run once at optimization
+time) rather than recomputed on every 15-minute SOC recalculation — the battery LP reads this cache.
 
 **Web UI** ([web/server.py](web/server.py), Flask + Plotly, port 8099) reads only from TinyDB —
 it has no write path back into optimization state. `/api/gantt` server-renders a Plotly figure

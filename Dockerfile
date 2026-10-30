@@ -12,7 +12,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y jq glpk-utils && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-RUN pip install homeassistant requests apscheduler pulp flask flask-cors tinydb pandas lightgbm numpy scikit-learn websockets plotly entsoe-py pydantic pydantic-settings aiohttp
+RUN pip install homeassistant requests apscheduler "pulp<4" flask flask-cors tinydb pandas lightgbm numpy scikit-learn websockets plotly entsoe-py pydantic pydantic-settings aiohttp
 
 # Explicitly uninstall aiodns and pycares if they were installed as sub-dependencies
 RUN pip uninstall -y aiodns pycares || true

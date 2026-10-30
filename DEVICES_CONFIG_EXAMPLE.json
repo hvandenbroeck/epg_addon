@@ -7,6 +7,23 @@
       "inside_temp_sensor": "sensor.ebusd_700_z2roomtemp",
       "outside_temp_sensor": "sensor.ebusd_700_displayedoutsidetemp",
       "heatpump_status_sensor": "sensor.ebusd_700_hc2pumpstatus_2",
+      "wp_preheat_enabled": true,
+      "preheat_max_setpoint": 22.0,
+      "preheat_comfort_default_min_temp": 19.5,
+      "preheat_comfort_windows": [
+        { "start": "23:00", "end": "06:30", "min_temp": 19.5 },
+        { "start": "06:30", "end": "08:30", "min_temp": 20.5 },
+        { "start": "17:00", "end": "23:00", "min_temp": 20.5 },
+        { "start": "08:30", "end": "17:00", "min_temp": 20.5, "days": ["sat", "sun"] }
+      ],
+      "preheat_setpoint_resolution": 0.5,
+      "preheat_penalty_per_c": 0.0,
+      "thermal_heat_loss_kw_per_c": 0.024,
+      "thermal_heat_capacity_kwh_per_c": 1.5,
+      "thermal_max_heat_kw": 5.0,
+      "thermal_cop_ref": 3.5,
+      "thermal_cop_slope": 0.08,
+      "thermal_cop_tout_ref": 7.0,
       "start": {
         "mqtt": [
           {
@@ -17,7 +34,7 @@
           {
             "topic": "ebusd/700/z2quickvetotemp/set",
             "topic_get": "ebusd/700/z2quickvetotemp/get",
-            "payload": "22"
+            "payload": "{setpoint}"
           }
         ]
       },

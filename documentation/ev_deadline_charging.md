@@ -94,16 +94,18 @@ starts between plan runs. It is stored in the same `ev_deadline` doc as the plan
 `charging_load_entity`. `headline` carries the combined line ("Charging now – 7.2 kW · On hold:
 6 slot(s) ready to schedule"); `plan_headline` is the plan half on its own.
 
-## Interaction With Battery Solar-Only Mode
+## Interaction With Battery Optimization
 
-The battery's solar-only decision compares predicted solar production with predicted usage.
-When an EV deadline plan is scheduled (car ready), its energy is added to the predicted usage,
-so a large planned charge stops the battery from switching to solar-only on a day the car will
-eat the surplus. Provisional (held-back) plans are not counted. The numbers used are shown in
-the web UI ("Solar-only check: solar … vs usage … + scheduled EV charge …") and logged at every
-recalculation. The EV plan is always re-evaluated *before* the battery limits — on the daily
-optimization, on the manual trigger, and on every 15-minute cycle (readiness gating only, see
-above) — so the decision always sees the current plan.
+The EV deadline plan is always re-evaluated *before* the battery LP — on the daily optimization,
+on the manual trigger, and on every 15-minute cycle (readiness gating only, see above) — so the
+battery plan always sees the current EV plan. The battery LP discharges only to cover household
+load (never the EV), so a scheduled EV charge is served from the grid/solar and does not drain the
+house battery; the battery still reserves its energy for the household's own expensive hours.
+
+> Earlier versions had a whole-day "solar-only mode" that suspended battery charge/discharge on
+> sunny days, and added the scheduled EV energy to its solar-vs-usage comparison. That mode no
+> longer exists — the per-slot LP handles sunny days directly — so there is nothing for the EV plan
+> to tip here any more.
 
 ## Configuration
 
@@ -212,7 +214,9 @@ A ready-made Lovelace card is in
 - rows for **Charging now**, **Charger load**, **Car ready to charge** and the plan status;
 - current/target SOC, Charge-by day and time, and the **Recalculate now!** tile.
 
-Pressing **Recalculate now!** always applies your settings. When the car is ready, the plan is
+Pressing **Recalculate now!** always applies your settings: it first rebuilds the absolute
+deadline from the Charge-by day/time (so "Tomorrow" always means tomorrow relative to the moment
+you press it, even if "Tomorrow" was already selected days ago), then re-plans. When the car is ready, the plan is
 scheduled immediately. When it isn't, the "last recalculated" timestamp still updates and a
 persistent notification explains that no slots are scheduled yet, that your settings were saved
 and applied, and that charging will be planned as soon as the car is plugged in and ready. A car
@@ -241,5 +245,5 @@ planning decisions (slot selection, warnings) in real time.
 | `binary_sensor.ev_ready_to_charge` is unavailable | `sensor.epg_ev_deadline_plan` cannot reach the add-on on port 8099, or no deadline plan has been computed yet — check the add-on is running and the hostname in the package |
 | Plan doesn't update after changing the target/deadline | Slots are only re-selected at 16:05 or on demand — the 15-minute background cycle deliberately does not reselect (see [How It Works](#how-it-works)). Press the "Recalculate now" dashboard button (see [Triggering an Instant Recalculation](#triggering-an-instant-recalculation)), or trigger a full optimization run |
 | "Cannot reach target% by deadline" warning | Not enough time remains before the deadline to deliver the required energy at `ev_deadline_charge_power_kw` — every remaining slot is used regardless of price, but the deadline may still be missed. Raise `ev_deadline_charge_power_kw` (if the charger can actually deliver more) or move the deadline out. |
-| Deadline stopped triggering charging after it passed | Expected for a one-off (`has_date: true`) deadline that wasn't updated — set a new one, or switch to a time-only (`has_date: false`) recurring helper |
+| Web UI shows "Deadline passed" | The one-off (`has_date: true`) deadline in `ev_deadline_target_time_entity` is in the past (shown under "Charge by"). Expected after a "Tomorrow" deadline has gone by — the midnight resync deliberately leaves "Tomorrow" alone. Press "Recalculate now" (which re-applies the day/time relative to now), or switch to a time-only (`has_date: false`) recurring helper |
 | Config fails to load with a validation error mentioning both fields | `ev_deadline_charge_enabled` and `solar_charge_only` cannot both be `true` on the same device — use two separate EV devices if you need both modes |

@@ -238,14 +238,21 @@ def slots_to_iso_ranges(times, device, target_date, horizon_start=None, block_mi
 from datetime import datetime
 from collections import defaultdict
 
+def _slot_extras(slot):
+    """Payload keys carried on a schedule entry beyond device/start/stop (e.g. 'setpoint')."""
+    return {k: v for k, v in slot.items() if k not in ('device', 'start', 'stop')}
+
+
 def merge_sequential_timeslots(timeslot_lists):
     # Step 1: Group all timeslots by device (for merging only)
     device_slots = defaultdict(list)
     for timeslots in timeslot_lists:
         for slot in timeslots:
             device_slots[slot['device']].append(slot)
-    
-    # Step 2: For each device, merge sequential timeslots
+
+    # Step 2: For each device, merge sequential timeslots. Entries only merge when they are
+    # contiguous AND carry identical extra payload keys, so e.g. two adjacent heat-pump ranges with
+    # different setpoints stay separate, and the 'setpoint' value is preserved through the merge.
     merged = []
     for device, slots in device_slots.items():
         # Sort slots by start time
@@ -253,9 +260,14 @@ def merge_sequential_timeslots(timeslot_lists):
         for slot in sorted_slots:
             start = datetime.fromisoformat(slot['start'])
             stop = datetime.fromisoformat(slot['stop'])
-            if not merged or merged[-1]['device'] != device or start != datetime.fromisoformat(merged[-1]['stop']):
-                merged.append({'device': device, 'start': slot['start'], 'stop': slot['stop']})
+            extras = _slot_extras(slot)
+            if (not merged or merged[-1]['device'] != device
+                    or start != datetime.fromisoformat(merged[-1]['stop'])
+                    or _slot_extras(merged[-1]) != extras):
+                entry = {'device': device, 'start': slot['start'], 'stop': slot['stop']}
+                entry.update(extras)
+                merged.append(entry)
             else:
-                # Merge if sequential and same device
+                # Merge if sequential, same device, and same extra payload
                 merged[-1]['stop'] = slot['stop']
     return merged

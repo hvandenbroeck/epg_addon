@@ -24,7 +24,9 @@ async def read_ev_deadline_inputs(get_state, ev_device, now: datetime) -> tuple[
     """Read current SOC, target SOC, and deadline datetime from HA entities.
 
     Returns (current_soc, target_soc, deadline_datetime). Any element is None if its
-    backing entity is missing, unavailable, or unparseable this cycle.
+    backing entity is missing, unavailable, or unparseable this cycle. A one-off date+time
+    deadline that has already passed is still returned; the planner reports it as
+    ``deadline_passed``.
     """
     current_soc = await _read_percent(get_state, ev_device.ev_soc_entity, "current SOC", ev_device.name)
     target_soc = await _read_percent(get_state, ev_device.ev_deadline_target_soc_entity, "target SOC", ev_device.name)
@@ -77,12 +79,13 @@ async def _read_deadline(get_state, entity_id, now: datetime, device_name) -> Op
         except ValueError:
             logger.warning(f"⚠️ {device_name}: could not parse date+time deadline '{raw}'")
             return None
+        # A passed deadline is returned as-is (not None) so the planner can report it as
+        # "deadline_passed" — showing the stale date — instead of "inputs unavailable".
         if deadline <= now:
             logger.warning(
                 f"⚠️ {device_name}: EV deadline {deadline} has passed; no further deadline-based "
                 f"charging will be scheduled until the input_datetime is updated"
             )
-            return None
         return deadline
 
     # "YYYY-MM-DD" date-only -> unsupported, no time component to target.
@@ -101,7 +104,7 @@ class EvDeadlinePlan:
     """
     charge_times: list[str] = field(default_factory=list)
     in_progress_times: list[str] = field(default_factory=list)
-    status: str = "planned"  # planned | target_reached | missing_inputs | no_slots | infeasible | partial_horizon
+    status: str = "planned"  # planned | target_reached | missing_inputs | deadline_passed | no_slots | infeasible | partial_horizon
     message: str = ""
     energy_needed_kwh: float = 0.0
     energy_planned_kwh: float = 0.0
@@ -169,6 +172,15 @@ def plan_ev_deadline_charge(
             message=message,
             energy_needed_kwh=0.0,
             energy_planned_kwh=len(in_progress_slots) * energy_per_slot,
+        )
+
+    # Checked before lock_plan: once the deadline is gone the committed plan has nothing left
+    # to do (bar the slot in progress), and "plan fixed" would hide why nothing is scheduled.
+    if deadline is not None and deadline <= now:
+        return _hold(
+            "deadline_passed",
+            f"The deadline ({deadline:%a %d %b %H:%M}) has already passed; pick a new day/time "
+            "and press \"Recalculate now\".",
         )
 
     if lock_plan:

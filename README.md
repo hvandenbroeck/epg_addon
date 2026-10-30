@@ -5,7 +5,7 @@ A Home Assistant addon that optimizes the energy usage of heat pumps, hot water 
 ## Features
 
 - **Price-based scheduling** – Fetches upcoming electricity prices from ENTSO-E and schedules device start/stop actions in the cheapest available slots.
-- **Battery arbitrage** – Charges batteries during low-price slots and discharges during high-price slots using historical percentile thresholds.
+- **Battery arbitrage** – Charges batteries during low-price slots and discharges during high-price slots using a whole-horizon linear program over predicted load, solar, and prices.
 - **Heat pump runtime** – Calculates expected daily runtime from sensor history and adjusts the schedule accordingly.
 - **Load management** – Dynamically limits device power draw to avoid grid overload.
 - **Expressions** – Use mathematical expressions (e.g. watt-to-amp conversion) directly in device configuration values.
@@ -22,7 +22,7 @@ See the **[documentation/](documentation/index.md)** folder for all guides:
 | [Device Configuration](documentation/device_configuration.md) | Full reference for `/data/options.json` |
 | [Configuration Examples](documentation/configuration_examples.md) | Real-world configuration patterns |
 | [Expressions](documentation/expressions.md) | Mathematical expressions in `value`/`payload` fields |
-| [Battery Optimization](documentation/battery_optimization.md) | Percentile-based charge/discharge strategy |
+| [Battery Optimization](documentation/battery_optimization.md) | Whole-horizon LP charge/discharge strategy |
 | [Heat Pump Runtime](documentation/heat_pump_runtime.md) | Sensor-based daily runtime calculation |
 | [EV Deadline Charging](documentation/ev_deadline_charging.md) | Charge an EV to a target SOC by a deadline, in the cheapest available price slots |
 | [Debug Logs](documentation/debug_logs.md) | Web-based log viewer |

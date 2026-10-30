@@ -23,23 +23,10 @@
         <div class="peak-timestamp" id="peakTimestamp">Loading...</div>
     </div>
     <div class="battery-thresholds" id="batteryThresholdsBlock">
-        <h2>Battery Price Thresholds</h2>
+        <h2>Battery Plan</h2>
         <div id="batteryThresholdsContent">
-            <div class="loading">Loading thresholds...</div>
+            <div class="loading">Loading battery plan...</div>
         </div>
-    </div>
-    <div class="solar-only-banner" id="solarOnlyBanner">
-        <div class="solar-only-icon">☀️</div>
-        <div class="solar-only-title">Solar-Powered Battery Mode</div>
-        <div class="solar-only-description">
-            Plenty of solar energy is expected today. Your battery will charge naturally
-            from surplus solar production throughout the day, and discharge automatically
-            when additional power is needed beyond what the panels can provide.
-            Grid charging and forced discharge are suspended.
-        </div>
-        <div class="solar-only-badge">⚡ Grid charging &amp; forced discharge suspended</div>
-        <div class="solar-only-evaluation" id="solarOnlyEvaluation"></div>
-        <div class="solar-only-timestamp" id="solarOnlyTimestamp"></div>
     </div>
     <div class="ev-deadline" id="evDeadlineBlock" style="display: none;">
         <h2>EV Deadline Charging</h2>
@@ -234,21 +221,6 @@
                 });
         }
 
-        function formatSolarOnlyEvaluation(ev) {
-            // One line explaining the solar-only decision: solar vs usage (+ scheduled EV charge)
-            if (!ev) return '';
-            const solar = (ev.solar_kwh || 0).toFixed(1);
-            const usage = (ev.usage_kwh || 0).toFixed(1);
-            const evKwh = ev.ev_deadline_kwh || 0;
-            const total = (ev.total_usage_kwh || 0).toFixed(1);
-            let text = `Solar-only check: solar <strong>${solar} kWh</strong> vs usage <strong>${usage} kWh</strong>`;
-            if (evKwh > 0) {
-                text += ` + scheduled EV charge <strong>${evKwh.toFixed(1)} kWh</strong> = <strong>${total} kWh</strong>`;
-            }
-            text += ev.solar_only_mode ? ' → solar covers it' : ' → solar does not cover it';
-            return text;
-        }
-
         function escapeHtml(value) {
             return String(value === null || value === undefined ? '' : value)
                 .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -386,81 +358,63 @@
             fetch('api/battery_thresholds')
                 .then(response => response.json())
                 .then(data => {
-                    const solarOnlyMode = data.solar_only_mode || false;
-                    const thresholdsBlock = document.getElementById('batteryThresholdsBlock');
-                    const solarOnlyBanner = document.getElementById('solarOnlyBanner');
-
-                    if (solarOnlyMode) {
-                        // Hide thresholds, show solar-only banner
-                        thresholdsBlock.style.display = 'none';
-                        solarOnlyBanner.classList.add('active');
-
-                        document.getElementById('solarOnlyEvaluation').innerHTML = formatSolarOnlyEvaluation(data.solar_only_evaluation);
-
-                        // Populate the last-evaluated timestamp
-                        const lastRecalc = data.last_soc_recalc || data.updated_at || '';
-                        const tsEl = document.getElementById('solarOnlyTimestamp');
-                        if (lastRecalc) {
-                            const date = new Date(lastRecalc);
-                            tsEl.textContent = 'Last evaluated: ' + date.toLocaleString();
-                        } else {
-                            tsEl.textContent = '';
-                        }
-                        return;
-                    }
-
-                    // Normal mode: show thresholds, hide banner
-                    thresholdsBlock.style.display = '';
-                    solarOnlyBanner.classList.remove('active');
-
                     const container = document.getElementById('batteryThresholdsContent');
-                    
-                    if (!data.max_charge_price && !data.min_discharge_price) {
-                        container.innerHTML = '<div class="no-limits">No battery thresholds calculated yet</div>';
+                    const devices = data.devices || {};
+                    const names = Object.keys(devices);
+
+                    if (data.method !== 'lp' || names.length === 0) {
+                        container.innerHTML = '<div class="no-limits">No battery plan calculated yet</div>';
                         return;
                     }
-                    
-                    const maxCharge = data.max_charge_price !== null ? data.max_charge_price.toFixed(4) : '--';
-                    const minDischarge = data.min_discharge_price !== null ? data.min_discharge_price.toFixed(4) : '--';
-                    const historyDays = data.price_history_days || '--';
-                    const chargePercentile = data.charge_percentile || '--';
-                    const dischargePercentile = data.discharge_percentile || '--';
-                    const priceDiff = data.price_diff_threshold !== null ? data.price_diff_threshold.toFixed(4) : '--';
-                    
-                    let html = `
-                        <div class="threshold-grid">
-                            <div class="threshold-card charge">
-                                <div class="threshold-title">Max Charge Price</div>
-                                <div class="threshold-value">€${maxCharge}/kWh</div>
-                                <div class="threshold-detail">≤ ${chargePercentile}th percentile</div>
+
+                    const eur = (v) => (v === null || v === undefined) ? '--' : '€' + Number(v).toFixed(2);
+                    const price = (v) => (v === null || v === undefined) ? '--' : '€' + Number(v).toFixed(3) + '/kWh';
+                    const kwh = (v) => (v === null || v === undefined) ? '--' : Number(v).toFixed(1) + ' kWh';
+
+                    let html = '';
+                    names.forEach(name => {
+                        const e = devices[name] || {};
+                        const net = e.net_benefit_eur;
+                        const netClass = (net !== null && net !== undefined && net < 0) ? 'discharge' : 'charge';
+                        html += `
+                            <div class="threshold-grid">
+                                <div class="threshold-card charge">
+                                    <div class="threshold-title">Grid charge</div>
+                                    <div class="threshold-value">${kwh(e.grid_charge_kwh)}</div>
+                                    <div class="threshold-detail">avg ${price(e.avg_grid_charge_price)}</div>
+                                </div>
+                                <div class="threshold-card discharge">
+                                    <div class="threshold-title">Discharge to load</div>
+                                    <div class="threshold-value">${kwh(e.discharge_kwh)}</div>
+                                    <div class="threshold-detail">avg ${price(e.avg_discharge_price)}</div>
+                                </div>
+                                <div class="threshold-card ${netClass}">
+                                    <div class="threshold-title">Net benefit</div>
+                                    <div class="threshold-value">${eur(net)}</div>
+                                    <div class="threshold-detail">end SOC ${e.end_soc_percent ?? '--'}%</div>
+                                </div>
                             </div>
-                            <div class="threshold-card discharge">
-                                <div class="threshold-title">Min Discharge Price</div>
-                                <div class="threshold-value">€${minDischarge}/kWh</div>
-                                <div class="threshold-detail">≥ ${dischargePercentile}th percentile</div>
+                            <div class="threshold-info">
+                                ${names.length > 1 ? '<strong>' + name + '</strong> — ' : ''}
+                                stored ${kwh(e.solar_charge_kwh)} of solar surplus ·
+                                round-trip ${data.round_trip_efficiency !== null ? Math.round(data.round_trip_efficiency * 100) + '%' : '--'} ·
+                                wear ${price(data.cycle_cost_per_kwh)} ·
+                                export valued at day-ahead price
                             </div>
-                        </div>
-                        <div class="threshold-info">
-                            Based on ${historyDays} days of price history | Price diff threshold: €${priceDiff}/kWh
-                        </div>
-                    `;
-                    
-                    const evaluation = formatSolarOnlyEvaluation(data.solar_only_evaluation);
-                    if (evaluation) {
-                        html += `<div class="threshold-info">${evaluation}</div>`;
+                        `;
+                    });
+
+                    const ts = data.last_soc_recalc || data.updated_at;
+                    if (ts) {
+                        html += `<div class="threshold-timestamp">Optimised by LP · last updated ${new Date(ts).toLocaleString()}</div>`;
                     }
 
-                    if (data.updated_at) {
-                        const date = new Date(data.updated_at);
-                        html += `<div class="threshold-timestamp">Last updated: ${date.toLocaleString()}</div>`;
-                    }
-                    
                     container.innerHTML = html;
                 })
                 .catch(error => {
-                    console.error('Error fetching battery thresholds:', error);
-                    document.getElementById('batteryThresholdsContent').innerHTML = 
-                        '<div class="no-limits">Error loading battery thresholds</div>';
+                    console.error('Error fetching battery plan:', error);
+                    document.getElementById('batteryThresholdsContent').innerHTML =
+                        '<div class="no-limits">Error loading battery plan</div>';
                 });
         }
 

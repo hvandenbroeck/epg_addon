@@ -20,7 +20,8 @@ from .ha_client import HomeAssistantClient
 from .device_state_manager import DeviceStateManager
 from .devices import Devices
 from .scheduler import Scheduler
-from .optimization import optimize_wp, optimize_hw, optimize_battery, optimize_bat_discharge, limit_battery_cycles, plan_ev_deadline_charge, read_ev_deadline_inputs
+from .optimization import optimize_wp, optimize_hw, plan_battery_lp, plan_ev_deadline_charge, read_ev_deadline_inputs
+from .optimization import plan_thermal_setpoints, build_comfort_floor
 from .conditions import evaluate_condition_group
 from .ev_charging_state import get_ev_charging_state
 from .utils import slot_to_time, slots_to_iso_ranges, merge_sequential_timeslots, time_to_slot
@@ -142,17 +143,7 @@ class HeatpumpOptimizer:
         SLOT_MINUTES = CONFIG['options'].get('slot_minutes', 15)
         LOCK_HOURS = CONFIG['options'].get('lock_hours', 2)  # Don't reschedule actions within 2 hours
 
-        # Battery percentile configuration (for dynamic price thresholds)
-        BAT_PRICE_HISTORY_DAYS = CONFIG['options'].get('battery_price_history_days', 14)
-        BAT_CHARGE_PERCENTILE = CONFIG['options'].get('battery_charge_percentile', 30)
-        BAT_DISCHARGE_PERCENTILE = CONFIG['options'].get('battery_discharge_percentile', 70)
-        BAT_PRICE_DIFF_THRESHOLD = CONFIG['options'].get('battery_price_difference_threshold', 0.10)
-
         logger.info("🔎 Starting energy optimization using ENTSO-E prices (rolling horizon)...")
-        logger.info(f"🔋 Battery optimization settings: "
-                   f"history_days={BAT_PRICE_HISTORY_DAYS}, "
-                   f"charge_percentile={BAT_CHARGE_PERCENTILE}, discharge_percentile={BAT_DISCHARGE_PERCENTILE}, "
-                   f"price_diff_threshold={BAT_PRICE_DIFF_THRESHOLD:.4f} EUR/kWh")
 
         # Check if price fetcher is configured
         if not self.price_fetcher:
@@ -170,8 +161,6 @@ class HeatpumpOptimizer:
         horizon_start = horizon_data['horizon_start']
         horizon_end = horizon_data['horizon_end']
         lock_end_slot = horizon_data['lock_end_slot']
-        # Full day's min price for discharge threshold calculations (includes prices before current slot)
-        full_day_min_price = horizon_data.get('full_day_min_price')
         # Use SLOT_MINUTES from config (should match price_fetcher's slot_minutes)
         slot_minutes = SLOT_MINUTES
         
@@ -180,29 +169,9 @@ class HeatpumpOptimizer:
         logger.info(f"📊 Horizon: {horizon_start} to {horizon_end} ({len(prices)} slots)")
         logger.info(f"🔒 Lock window: until {lock_end_datetime} (slot {lock_end_slot})")
 
-        # ===== CALCULATE BATTERY PRICE THRESHOLDS FROM HISTORICAL DATA =====
-        max_charge_price = None
-        min_discharge_price = None
-        
-        if self.price_history_manager:
-            try:
-                percentiles = await self.price_history_manager.get_price_percentiles(
-                    days_back=BAT_PRICE_HISTORY_DAYS,
-                    charge_percentile=BAT_CHARGE_PERCENTILE,
-                    discharge_percentile=BAT_DISCHARGE_PERCENTILE
-                )
-                if percentiles:
-                    max_charge_price = percentiles['max_charge_price']
-                    min_discharge_price = percentiles['min_discharge_price']
-                    logger.info(f"✅ Using historical percentile thresholds: "
-                               f"max_charge={max_charge_price:.4f}, min_discharge={min_discharge_price:.4f} EUR/kWh")
-                else:
-                    logger.warning("⚠️ Could not calculate price percentiles, battery optimization will use fallback")
-            except Exception as e:
-                logger.error(f"❌ Error calculating price percentiles: {e}")
-        else:
-            logger.warning("⚠️ Price history manager not configured, battery optimization will use fallback")
-
+        # Battery charge/discharge slots are chosen by the whole-horizon LP in
+        # recalculate_battery_limits() (which has the SOC + usage/solar predictions it needs);
+        # the daily run here only computes the price-based grid-export block below.
         results = {}
         
         # ===== HEAT PUMP OPTIMIZATION (iterate over all WP devices) =====
@@ -211,6 +180,12 @@ class HeatpumpOptimizer:
         
         for wp_device in wp_devices:
             device_name = wp_device.name
+            # Thermal pre-heating devices are planned by the setpoint LP in
+            # recalculate_thermal_setpoints() (which has the measured room temp + predictions it
+            # needs), not by the block MILP here — exactly as battery is handled.
+            if wp_device.wp_preheat_enabled:
+                logger.info(f"🔥 {device_name}: wp_preheat_enabled=True, planned by recalculate_thermal_setpoints()")
+                continue
             # Use device-specific config with fallback defaults
             WP_BLOCK_HOURS = wp_device.block_hours if wp_device.block_hours is not None else 1.0
             WP_MIN_GAP_HOURS = wp_device.min_gap_hours if wp_device.min_gap_hours is not None else 3.0
@@ -312,47 +287,12 @@ class HeatpumpOptimizer:
                 hw_scheduled_starts = [horizon_start + timedelta(minutes=idx * slot_minutes) for idx in hw_slot_indices]
                 self._save_device_state(device_name, last_hw_end, hw_scheduled_starts)
 
-        # ===== BATTERY OPTIMIZATION (iterate over all battery devices) =====
-        # Battery devices have both charge and discharge schedules
-        # We store ORIGINAL times from price optimization (for display) and LIMITED times (for scheduling)
-        original_battery_times = {}  # Store original times before SOC limiting
-        discharge_price_context = {}  # Store price context for preserving discharge decisions
-        
+        # ===== BATTERY GRID-EXPORT BLOCKING (iterate over all battery devices) =====
+        # Charge/discharge slots are planned by the LP in recalculate_battery_limits(); the only
+        # price-based decision made here (no predictions needed) is when to block grid export.
         battery_devices = devices_config.get_devices_by_type('battery')
         for bat_device in battery_devices:
             device_name = bat_device.name
-            
-            # Optimize battery charging based on price thresholds
-            bat_charge_times = optimize_battery(
-                prices=prices,
-                slot_minutes=slot_minutes,
-                slot_to_time=slot_to_time,
-                max_charge_price=max_charge_price,
-                price_difference_threshold=BAT_PRICE_DIFF_THRESHOLD
-            )
-            
-            # Optimize battery discharging based on price thresholds
-            # Note: optimize_bat_discharge returns a tuple (times, price_context)
-            # Pass full_day_min_price to preserve discharge decisions even when low prices have passed
-            bat_discharge_times, bat_price_context = optimize_bat_discharge(
-                prices=prices,
-                slot_minutes=slot_minutes,
-                slot_to_time=slot_to_time,
-                min_discharge_price=min_discharge_price,
-                price_difference_threshold=BAT_PRICE_DIFF_THRESHOLD,
-                reference_min_price=full_day_min_price
-            )
-            
-            # Store price context for this device (used to preserve decisions on recalculation)
-            discharge_price_context[device_name] = bat_price_context
-            
-            # Store ORIGINAL times (before SOC limiting) for informative display
-            original_battery_times[f"{device_name}_charge_planned"] = list(bat_charge_times) if bat_charge_times else []
-            original_battery_times[f"{device_name}_discharge_planned"] = list(bat_discharge_times) if bat_discharge_times else []
-            
-            # Store in results (will be overwritten with limited times below)
-            results[f"{device_name}_charge"] = bat_charge_times
-            results[f"{device_name}_discharge"] = bat_discharge_times
 
             # Compute export-blocking slots for negative-price periods
             if bat_device.price_based_solar_grid_export:
@@ -412,37 +352,20 @@ class HeatpumpOptimizer:
                 ))
 
         iso_times_merged = merge_sequential_timeslots(iso_times)
-        
-        # Also convert original battery times to ISO ranges for display on Gantt chart
-        original_iso_times = []
-        for device_key, times in original_battery_times.items():
-            if times:
-                original_iso_times.append(slots_to_iso_ranges(
-                    times, device_key, horizon_start.date(), horizon_start,
-                    block_minutes=slot_minutes
-                ))
-        original_battery_iso_times_merged = merge_sequential_timeslots(original_iso_times)
 
-        # Save schedule to TinyDB (without limited times yet - will be added by recalculate)
+        # Save schedule to TinyDB. Battery charge/discharge entries (and the
+        # original_battery_schedule display reference) are added by recalculate_battery_limits(),
+        # called below once predictions are cached.
         with TinyDB('db.json') as db:
             db.upsert({
                 "id": "schedule",
-                "schedule": iso_times_merged,  # Will be updated with limited times
-                "original_battery_schedule": original_battery_iso_times_merged,  # Original price-based times for display
+                "schedule": iso_times_merged,  # grid-export blocks now; battery charge/discharge added by recalc
+                "original_battery_schedule": [],  # populated by the daily recalc (LP plan reference)
                 "horizon_start": horizon_start.isoformat(),
                 "horizon_end": horizon_end.isoformat(),
                 "prices": prices,  # Store prices for recalculation
                 "slot_minutes": slot_minutes,
                 "updated_at": datetime.now().isoformat(),
-                "battery_price_thresholds": {
-                    "max_charge_price": max_charge_price,
-                    "min_discharge_price": min_discharge_price,
-                    "price_history_days": BAT_PRICE_HISTORY_DAYS,
-                    "charge_percentile": BAT_CHARGE_PERCENTILE,
-                    "discharge_percentile": BAT_DISCHARGE_PERCENTILE,
-                    "price_diff_threshold": BAT_PRICE_DIFF_THRESHOLD
-                },
-                "discharge_price_context": discharge_price_context  # Preserve min price for discharge threshold calculations
             }, Query().id == "schedule")
         
         logger.info(f"✅ Optimization complete. Schedule saved to TinyDB.")
@@ -451,195 +374,166 @@ class HeatpumpOptimizer:
         await self._calculate_and_cache_predictions()
         
         # Run initial EV deadline-charging plan based on current SOC/target/deadline.
-        # This runs BEFORE battery limiting: the scheduled EV energy is added to the usage
-        # prediction that decides whether solar-only mode is enabled.
+        # This runs BEFORE the battery LP so any scheduled EV energy is on record.
         await self.recalculate_ev_deadline_plans()
 
-        # Run initial battery cycle limiting based on current SOC
-        await self.recalculate_battery_limits()
+        # Plan heat-pump setpoints (thermal LP) before the battery LP so the battery recalc's
+        # trailing schedule_actions() schedules the heat-pump entries too.
+        await self.recalculate_thermal_setpoints(is_daily=True)
+
+        # Run the battery LP for the first time (is_daily=True also records the plan reference).
+        await self.recalculate_battery_limits(is_daily=True)
 
         # Schedule actions from database
         await self.scheduler_instance.schedule_actions()
 
-    async def recalculate_battery_limits(self):
-        """Recalculate battery cycle limits based on current SOC.
-        
-        Called after optimization and every 15 minutes to adapt to actual SOC changes.
+    async def recalculate_battery_limits(self, is_daily: bool = False):
+        """Plan battery charge/discharge for every battery device with a whole-horizon LP.
 
-        Solar-only mode is evaluated globally: when total predicted solar production
-        exceeds total predicted power usage, battery charging and discharging are
-        disabled entirely and a solar_only schedule entry is added instead.
+        Called at the end of the daily optimization (``is_daily=True``, which additionally
+        records the plan as the dashboard's "planned" reference) and every 15 minutes
+        (``is_daily=False``) to re-solve against the latest measured SOC.
+
+        ``optimization/battery_lp.py`` is the single source of truth. One linear program over
+        the whole price horizon decides each slot's mode, so there is no separate percentile
+        selection, no greedy "cycle limiting", and no whole-day solar-only switch: the LP
+        reserves cheap and solar energy for the dearest hours by construction, and seasonal
+        behaviour (store midday solar in summer, arbitrage from the grid in winter) falls out
+        of the per-slot load/solar/price inputs. A slot the LP grid-charges becomes a
+        ``_charge`` entry, a slot it discharges to cover load becomes a ``_discharge`` entry,
+        and every other slot is left to the inverter's hold state (which still absorbs solar
+        surplus) — exactly the actuation the scheduler already drives.
         """
-        logger.info("🔋 Recalculating battery cycle limits based on current SOC...")
-        
-        # Load schedule from database
+        logger.info("🔋 Planning battery charge/discharge (whole-horizon LP)...")
+
         with TinyDB('db.json') as db:
             schedule_doc = db.get(Query().id == "schedule")
-        
-        # Validate schedule exists and has required data
+
         if not schedule_doc or not schedule_doc.get('horizon_start') or not schedule_doc.get('prices'):
             logger.warning("⚠️ No valid schedule found, skipping recalculation")
             return
-        
-        # Parse schedule parameters
+
         horizon_start = datetime.fromisoformat(schedule_doc['horizon_start'])
         horizon_end = datetime.fromisoformat(schedule_doc['horizon_end'])
-        
-        # Skip if optimization horizon has expired
+
         if datetime.now() >= horizon_end:
             logger.info("📅 Horizon expired, skipping recalculation")
             return
-        
+
         prices = schedule_doc['prices']
         slot_minutes = schedule_doc.get('slot_minutes', 15)
-        original_battery_schedule = schedule_doc.get('original_battery_schedule', [])
+        current_schedule = schedule_doc.get('schedule', [])
 
-        # ===== SOLAR-ONLY STATE EVALUATION =====
-        # Compare total predicted solar production vs total predicted power usage.
-        # When solar exceeds usage, there is enough renewable energy to cover all needs,
-        # so battery grid-charging and discharging should be suspended.
         predicted_usage = Prediction.get_cached_usage(slot_minutes)
         predicted_solar = Prediction.get_cached_solar(slot_minutes)
 
-        solar_only_mode = False
-        solar_only_evaluation = None
-        if predicted_solar and predicted_usage:
-            total_solar_kwh = sum(p['predicted_kwh'] for p in predicted_solar)
-            base_usage_kwh = sum(p['predicted_kwh'] for p in predicted_usage)
-            # An EV that is ready to charge and has deadline slots scheduled is a real,
-            # known load on top of the ML usage prediction — count it, otherwise a sunny
-            # day could switch the battery to solar-only while the car quietly eats the
-            # surplus. Provisional (on-hold) plans are NOT counted.
-            ev_deadline_kwh = self._scheduled_ev_deadline_kwh()
-            total_usage_kwh = base_usage_kwh + ev_deadline_kwh
-            logger.info(
-                f"☀️ Solar prediction: {total_solar_kwh:.2f} kWh | "
-                f"Usage prediction: {base_usage_kwh:.2f} kWh"
-                + (f" + scheduled EV charge {ev_deadline_kwh:.2f} kWh = {total_usage_kwh:.2f} kWh"
-                   if ev_deadline_kwh else "")
-            )
-            if total_solar_kwh > total_usage_kwh:
-                solar_only_mode = True
-                logger.info(
-                    f"☀️ Solar-only mode ACTIVATED "
-                    f"(solar {total_solar_kwh:.2f} kWh > usage {total_usage_kwh:.2f} kWh) – "
-                    "battery charge/discharge suspended"
-                )
-            else:
-                logger.info("☀️ Solar-only mode not active – proceeding with normal battery optimization")
-            solar_only_evaluation = {
-                'solar_kwh': round(total_solar_kwh, 3),
-                'usage_kwh': round(base_usage_kwh, 3),
-                'ev_deadline_kwh': round(ev_deadline_kwh, 3),
-                'total_usage_kwh': round(total_usage_kwh, 3),
-                'solar_only_mode': solar_only_mode,
-                'evaluated_at': datetime.now().isoformat(),
-            }
-        else:
-            logger.info("☀️ Insufficient solar/usage predictions – proceeding with normal battery optimization")
-        
-        # Keep all non-battery entries from current schedule
+        round_trip_efficiency = CONFIG['options'].get('battery_round_trip_efficiency', 0.9)
+        cycle_cost_per_kwh = CONFIG['options'].get('battery_cycle_cost_per_kwh', 0.0)
+
+        # Keep every non-battery entry (grid-export blocks, EV, thermal); the LP rebuilds only
+        # the battery charge/discharge/solar_only entries below.
         new_schedule = [
-            entry for entry in schedule_doc.get('schedule', [])
-            if not (entry.get('device', '').endswith('_charge') or 
-                   entry.get('device', '').endswith('_discharge') or
-                   entry.get('device', '').endswith('_solar_only'))
+            entry for entry in current_schedule
+            if not (entry.get('device', '').endswith('_charge') or
+                    entry.get('device', '').endswith('_discharge') or
+                    entry.get('device', '').endswith('_solar_only'))
         ]
 
-        # Accumulate SOC predictions for all battery devices
         battery_soc_predictions: dict[str, list[dict]] = {}
-        
-        # Process each battery device
-        for bat_device in devices_config.get_devices_by_type('battery'):
+        plan_summary_devices: dict[str, dict] = {}
+        planned_reference_entries: list[dict] = []  # daily-only: the Gantt "plan" rows
 
-            if solar_only_mode:
-                # Solar-only mode: skip charge/discharge entirely and add a solar_only entry
-                # spanning the full optimization horizon so the inverter can be configured
-                # to allow passive solar charging.
-                new_schedule.append({
-                    "device": f"{bat_device.name}_solar_only",
-                    "start": horizon_start.isoformat(),
-                    "stop": horizon_end.isoformat(),
-                })
-                logger.info(
-                    f"☀️ {bat_device.name}: Added solar_only entry "
-                    f"({horizon_start} → {horizon_end})"
-                )
+        for bat_device in devices_config.get_devices_by_type('battery'):
+            name = bat_device.name
+
+            if not (bat_device.battery_capacity_kwh and bat_device.battery_charge_speed_kw):
+                logger.warning(f"⚠️ {name}: battery_capacity_kwh / battery_charge_speed_kw not set — "
+                               f"skipping battery planning for this device")
                 continue
 
-            # Normal mode: apply SOC-based cycle limiting
-            # Get current SOC (or use 50% as fallback)
             current_soc = await self._get_battery_soc(bat_device)
-            
-            # Extract original times from stored schedule (already filtered for future slots)
-            original_charge = self._extract_times(original_battery_schedule, f"{bat_device.name}_charge_planned", horizon_start, slot_minutes)
-            original_discharge = self._extract_times(original_battery_schedule, f"{bat_device.name}_discharge_planned", horizon_start, slot_minutes)
 
-            # Extract previously limited times from current schedule to preserve past planned slots
-            current_schedule = schedule_doc.get('schedule', [])
-            prev_limited_charge = self._extract_times(current_schedule, f"{bat_device.name}_charge", horizon_start, slot_minutes)
-            prev_limited_discharge = self._extract_times(current_schedule, f"{bat_device.name}_discharge", horizon_start, slot_minutes)
+            # Preserve already-committed past slots; the measured SOC already reflects them.
+            prev_charge = self._extract_times(current_schedule, f"{name}_charge", horizon_start, slot_minutes)
+            prev_discharge = self._extract_times(current_schedule, f"{name}_discharge", horizon_start, slot_minutes)
 
-            if original_charge or original_discharge:
-                logger.debug(f"🕐 {bat_device.name}: Processing {len(original_charge)} charge and {len(original_discharge)} discharge future slots")
-            
-            # Apply SOC-based cycle limiting if battery config is complete
-            if bat_device.battery_capacity_kwh and bat_device.battery_charge_speed_kw:
-                limited_charge, limited_discharge = limit_battery_cycles(
-                    charge_times=original_charge,
-                    discharge_times=original_discharge,
+            # Exported solar earns the day-ahead price, except where this device blocks export
+            # (near-zero / negative injection), where it earns nothing.
+            export_block_threshold = (
+                bat_device.grid_export_block_threshold if bat_device.price_based_solar_grid_export else 0.0
+            )
+
+            plan = plan_battery_lp(
+                prices=prices,
+                slot_minutes=slot_minutes,
+                horizon_start=horizon_start,
+                current_soc=current_soc,
+                battery_capacity_kwh=bat_device.battery_capacity_kwh,
+                battery_charge_speed_kw=bat_device.battery_charge_speed_kw,
+                min_soc_percent=bat_device.battery_min_soc_percent or 20.0,
+                max_soc_percent=bat_device.battery_max_soc_percent or 80.0,
+                predicted_power_usage=predicted_usage,
+                predicted_solar=predicted_solar,
+                round_trip_efficiency=round_trip_efficiency,
+                cycle_cost_per_kwh=cycle_cost_per_kwh,
+                export_block_threshold=export_block_threshold,
+                previous_charge_times=prev_charge,
+                previous_discharge_times=prev_discharge,
+                device_name=name,
+            )
+            charge_times, discharge_times = plan['charge_times'], plan['discharge_times']
+            plan_summary_devices[name] = plan.get('economics', {})
+
+            new_schedule.extend(self._times_to_schedule(charge_times, f"{name}_charge", horizon_start, slot_minutes))
+            new_schedule.extend(self._times_to_schedule(discharge_times, f"{name}_discharge", horizon_start, slot_minutes))
+
+            if is_daily:
+                planned_reference_entries.extend(
+                    self._times_to_schedule(charge_times, f"{name}_charge_planned", horizon_start, slot_minutes))
+                planned_reference_entries.extend(
+                    self._times_to_schedule(discharge_times, f"{name}_discharge_planned", horizon_start, slot_minutes))
+
+            # Compute battery SOC prediction for this device
+            try:
+                soc_prediction = predict_battery_soc(
+                    charge_times=charge_times,
+                    discharge_times=discharge_times,
                     slot_minutes=slot_minutes,
                     horizon_start=horizon_start,
+                    horizon_end=horizon_end,
                     current_soc=current_soc,
                     battery_capacity_kwh=bat_device.battery_capacity_kwh,
                     battery_charge_speed_kw=bat_device.battery_charge_speed_kw,
                     min_soc_percent=bat_device.battery_min_soc_percent or 20.0,
                     max_soc_percent=bat_device.battery_max_soc_percent or 80.0,
-                    prices=prices,
+                    device_name=name,
                     predicted_power_usage=predicted_usage,
                     predicted_solar=predicted_solar,
-                    device_name=bat_device.name,
-                    previous_limited_charge_times=prev_limited_charge,
-                    previous_limited_discharge_times=prev_limited_discharge,
                 )
-            else:
-                # Use original times if battery not fully configured
-                logger.warning(f"⚠️ {bat_device.name}: Missing battery config, using original times")
-                limited_charge, limited_discharge = original_charge, original_discharge
-            
-            # Add limited times to schedule
-            new_schedule.extend(self._times_to_schedule(limited_charge, f"{bat_device.name}_charge", horizon_start, slot_minutes))
-            new_schedule.extend(self._times_to_schedule(limited_discharge, f"{bat_device.name}_discharge", horizon_start, slot_minutes))
-        
-            # Compute battery SOC prediction for this device
-            if bat_device.battery_capacity_kwh and bat_device.battery_charge_speed_kw:
-                try:
-                    soc_prediction = predict_battery_soc(
-                        charge_times=limited_charge,
-                        discharge_times=limited_discharge,
-                        slot_minutes=slot_minutes,
-                        horizon_start=horizon_start,
-                        horizon_end=horizon_end,
-                        current_soc=current_soc,
-                        battery_capacity_kwh=bat_device.battery_capacity_kwh,
-                        battery_charge_speed_kw=bat_device.battery_charge_speed_kw,
-                        min_soc_percent=bat_device.battery_min_soc_percent or 20.0,
-                        max_soc_percent=bat_device.battery_max_soc_percent or 80.0,
-                        device_name=bat_device.name,
-                        predicted_power_usage=predicted_usage,
-                        predicted_solar=predicted_solar,
-                    )
-                    battery_soc_predictions[bat_device.name] = soc_prediction
-                except Exception as e:
-                    logger.warning(f"⚠️ {bat_device.name}: Could not compute SOC prediction: {e}")
+                battery_soc_predictions[name] = soc_prediction
+            except Exception as e:
+                logger.warning(f"⚠️ {name}: Could not compute SOC prediction: {e}")
 
         # Merge and save updated schedule
         new_schedule = merge_sequential_timeslots([new_schedule])
         schedule_doc['schedule'] = new_schedule
         schedule_doc['last_soc_recalc'] = datetime.now().isoformat()
-        schedule_doc['solar_only_mode'] = solar_only_mode
-        schedule_doc['solar_only_evaluation'] = solar_only_evaluation
-        
+        schedule_doc['solar_only_mode'] = False  # the LP handles seasons per-slot; no whole-day flip
+        schedule_doc['battery_plan_summary'] = {
+            'method': 'lp',
+            'round_trip_efficiency': round_trip_efficiency,
+            'cycle_cost_per_kwh': cycle_cost_per_kwh,
+            'export_pricing': 'dynamic_day_ahead',
+            'devices': plan_summary_devices,
+            'evaluated_at': datetime.now().isoformat(),
+        }
+        # Drop the obsolete percentile-era keys so stale values never resurface in the UI.
+        schedule_doc.pop('battery_price_thresholds', None)
+        schedule_doc.pop('discharge_price_context', None)
+        schedule_doc.pop('solar_only_evaluation', None)
+        if is_daily:
+            schedule_doc['original_battery_schedule'] = merge_sequential_timeslots([planned_reference_entries])
+
         with TinyDB('db.json') as db:
             db.upsert(schedule_doc, Query().id == "schedule")
 
@@ -655,9 +549,271 @@ class HeatpumpOptimizer:
                 db.upsert(existing, Query().id == 'predictions')
             total_points = sum(len(v) for v in battery_soc_predictions.values())
             logger.info(f"🔋 Saved battery SOC predictions for {len(battery_soc_predictions)} device(s) ({total_points} data points)")
-        
-        logger.info(f"✅ Battery limits recalculated ({len(new_schedule)} entries)")
+
+        logger.info(f"✅ Battery plan updated ({len(new_schedule)} entries)")
         await self.scheduler_instance.schedule_actions()
+
+    async def _build_outside_temp_forecast(self, horizon_start, horizon_end, slot_minutes, n_slots, fallback_sensor=None):
+        """Return a per-slot outside-temperature forecast for the horizon (°C).
+
+        Fetches Open-Meteo hourly temperature (same source the solar forecast uses) and maps each
+        slot to its hour. On any failure falls back to a flat series read from ``fallback_sensor``
+        (the device's ``outside_temp_sensor``), or 10 °C if that is unreadable. The result is cached
+        in the schedule doc by the daily run so the 15-minute recalculation needs no API call.
+        """
+        flat = 10.0
+        if fallback_sensor:
+            st = await self.get_state(fallback_sensor)
+            if st and st.get('state') not in ('unknown', 'unavailable', None):
+                try:
+                    flat = float(st['state'])
+                except (ValueError, TypeError):
+                    pass
+        try:
+            weather = Weather(self.ha_client.get_access_token())
+            df = await weather.getUpcomingHourlyWeather()
+            # Map each forecast hour (naive local timestamp) to an outside temp.
+            by_hour = {}
+            for _, row in df.iterrows():
+                ts = row['timestamp']
+                ts = ts.to_pydatetime() if hasattr(ts, 'to_pydatetime') else ts
+                by_hour[ts.replace(minute=0, second=0, microsecond=0, tzinfo=None)] = float(row['temperature'])
+            series = []
+            for i in range(n_slots):
+                slot_dt = horizon_start + timedelta(minutes=i * slot_minutes)
+                hour_key = slot_dt.replace(minute=0, second=0, microsecond=0)
+                series.append(by_hour.get(hour_key, flat))
+            # Fill any leading/trailing gaps with the nearest known value.
+            if any(v is None for v in series):
+                series = [v if v is not None else flat for v in series]
+            logger.info(f"🌡️ Outside-temp forecast built for {n_slots} slots "
+                        f"({min(series):.1f}–{max(series):.1f} °C)")
+            return series
+        except Exception as e:
+            logger.warning(f"⚠️ Could not fetch outside-temp forecast ({e}); using flat {flat:.1f} °C")
+            return [flat] * n_slots
+
+    async def recalculate_thermal_setpoints(self, is_daily: bool = False):
+        """Plan a room-temperature setpoint trajectory for every pre-heating-enabled heat pump.
+
+        The thermal-mass counterpart of ``recalculate_battery_limits``: one whole-horizon LP
+        (``optimization/thermal_preheat.py``) decides a setpoint per slot that pre-charges the floor
+        slab in cheap/solar hours and coasts through price peaks down to the time-of-day comfort
+        floor. Called at the end of the daily optimization (``is_daily=True``) and every 15 minutes
+        to re-solve against the latest *measured* room temperature — the thermal analogue of the
+        battery re-solving against measured SOC. Runs before the battery recalc in both sequences so
+        that recalc's trailing ``schedule_actions()`` picks up the heat-pump entries too.
+        """
+        preheat_devices = [d for d in devices_config.get_devices_by_type('wp') if d.wp_preheat_enabled]
+        if not preheat_devices:
+            return
+
+        logger.info("🔥 Planning heat-pump setpoints (whole-horizon thermal LP)...")
+
+        with TinyDB('db.json') as db:
+            schedule_doc = db.get(Query().id == "schedule")
+
+        if not schedule_doc or not schedule_doc.get('horizon_start') or not schedule_doc.get('prices'):
+            logger.warning("⚠️ No valid schedule found, skipping thermal recalculation")
+            return
+
+        horizon_start = datetime.fromisoformat(schedule_doc['horizon_start'])
+        horizon_end = datetime.fromisoformat(schedule_doc['horizon_end'])
+        if datetime.now() >= horizon_end:
+            logger.info("📅 Horizon expired, skipping thermal recalculation")
+            return
+
+        prices = schedule_doc['prices']
+        slot_minutes = schedule_doc.get('slot_minutes', 15)
+        n_slots = len(prices)
+        current_schedule = schedule_doc.get('schedule', [])
+
+        predicted_usage = Prediction.get_cached_usage(slot_minutes)
+        predicted_solar = Prediction.get_cached_solar(slot_minutes)
+
+        # Outside-temp forecast: fetched & cached by the daily run, reused by the 15-min recalc.
+        outside_temp = schedule_doc.get('outside_temp_forecast')
+        if is_daily or not outside_temp or len(outside_temp) < n_slots:
+            fallback_sensor = next((d.outside_temp_sensor for d in preheat_devices if d.outside_temp_sensor), None)
+            outside_temp = await self._build_outside_temp_forecast(
+                horizon_start, horizon_end, slot_minutes, n_slots, fallback_sensor)
+            schedule_doc['outside_temp_forecast'] = outside_temp
+
+        # Rebuild only this feature's heat-pump entries; keep everything else (battery, EV, grid
+        # export, hot water) untouched.
+        preheat_names = {d.name for d in preheat_devices}
+        new_schedule = [e for e in current_schedule if e.get('device') not in preheat_names]
+
+        def _carry_forward(device_name):
+            """Keep a device's previously committed plan when it cannot be re-planned this cycle.
+
+            A transient sensor read failure must not wipe the heat pump's schedule (which would
+            cancel its already-scheduled setpoint jobs and leave the zone uncontrolled); the prior
+            ranges — still future-valid and carrying their setpoints — are preserved instead.
+            """
+            new_schedule.extend(e for e in current_schedule if e.get('device') == device_name)
+
+        thermal_summary = {}
+        thermal_temp_predictions = {}
+        thermal_temp_actual_collected = {}  # device -> (daily backfill series, current measured temp)
+        for wp_device in preheat_devices:
+            name = wp_device.name
+
+            if not wp_device.inside_temp_sensor:
+                logger.warning(f"⚠️ {name}: wp_preheat_enabled but inside_temp_sensor not set — keeping previous plan")
+                _carry_forward(name)
+                continue
+
+            current_temp = None
+            st = await self.get_state(wp_device.inside_temp_sensor)
+            if st and st.get('state') not in ('unknown', 'unavailable', None):
+                try:
+                    current_temp = float(st['state'])
+                except (ValueError, TypeError):
+                    pass
+            if current_temp is None:
+                logger.warning(f"⚠️ {name}: room temperature ({wp_device.inside_temp_sensor}) unreadable — keeping previous plan")
+                _carry_forward(name)
+                continue
+
+            comfort_floor = build_comfort_floor(
+                horizon_start, n_slots, slot_minutes,
+                [w.model_dump() for w in wp_device.preheat_comfort_windows],
+                wp_device.preheat_comfort_default_min_temp,
+            )
+
+            # Setpoint currently commanded for the slot in progress — seeds the planner's
+            # anti-chatter hysteresis so the live command stays put across 15-min re-solves.
+            now_dt = datetime.now()
+            previous_setpoint = next(
+                (e['setpoint'] for e in current_schedule
+                 if e.get('device') == name and e.get('setpoint') is not None
+                 and datetime.fromisoformat(e['start']) <= now_dt < datetime.fromisoformat(e['stop'])),
+                None,
+            )
+
+            plan = plan_thermal_setpoints(
+                prices=prices,
+                slot_minutes=slot_minutes,
+                horizon_start=horizon_start,
+                current_temp=current_temp,
+                outside_temp=outside_temp,
+                comfort_floor=comfort_floor,
+                max_setpoint=wp_device.preheat_max_setpoint,
+                ua_kw_per_c=wp_device.thermal_heat_loss_kw_per_c,
+                heat_capacity_kwh_per_c=wp_device.thermal_heat_capacity_kwh_per_c,
+                max_heat_kw=wp_device.thermal_max_heat_kw,
+                predicted_solar=predicted_solar,
+                predicted_power_usage=predicted_usage,
+                cop_ref=wp_device.thermal_cop_ref,
+                cop_slope=wp_device.thermal_cop_slope,
+                tout_ref=wp_device.thermal_cop_tout_ref,
+                preheat_penalty_per_c=wp_device.preheat_penalty_per_c,
+                setpoint_resolution=wp_device.preheat_setpoint_resolution,
+                previous_setpoint=previous_setpoint,
+                device_name=name,
+            )
+
+            new_schedule.extend(self._setpoints_to_schedule(
+                plan['setpoints'], name, horizon_start, horizon_end, slot_minutes))
+            thermal_summary[name] = plan.get('economics', {})
+            if plan.get('temps'):
+                thermal_temp_predictions[name] = [
+                    {'timestamp': (horizon_start + timedelta(minutes=i * slot_minutes)).isoformat(),
+                     'temp': t}
+                    for i, t in enumerate(plan['temps']) if t is not None
+                ]
+
+            # Measured room temperature, for actual-vs-predicted on the UI and for periodic reviews.
+            # Backfill the elapsed part of the horizon from HA history every cycle (not just daily)
+            # so the measured line fills in promptly — including right after a restart, when the
+            # horizon starts near "now" and there is no accumulated log yet. The current reading is
+            # also appended below so there is always a fresh point even between sparse sensor logs.
+            backfill = []
+            try:
+                hours_back = min(36.0, max(1.0, (datetime.now() - horizon_start).total_seconds() / 3600 + 0.5))
+                hist = await self.ha_client.get_history_series(wp_device.inside_temp_sensor, hours_back=hours_back)
+                backfill = [{'timestamp': t.isoformat(), 'temp': round(v, 3)}
+                            for t, v in hist if t >= horizon_start]
+            except Exception as e:
+                logger.warning(f"⚠️ {name}: could not backfill measured temperature history: {e}")
+            thermal_temp_actual_collected[name] = (backfill, current_temp)
+
+        schedule_doc['schedule'] = merge_sequential_timeslots([new_schedule])
+        schedule_doc['last_thermal_recalc'] = datetime.now().isoformat()
+        schedule_doc['thermal_plan_summary'] = {
+            'method': 'lp',
+            'devices': thermal_summary,
+            'evaluated_at': datetime.now().isoformat(),
+        }
+        with TinyDB('db.json') as db:
+            db.upsert(schedule_doc, Query().id == "schedule")
+
+        with TinyDB('db.json') as db:
+            existing = db.get(Query().id == 'predictions') or {}
+            existing_actual = dict(existing.get('thermal_temp_actual') or {})
+            now_iso = datetime.now().isoformat()
+            for name, (backfill, cur_temp) in thermal_temp_actual_collected.items():
+                # Merge the fresh HA backfill with the accumulated rolling log (the appends below
+                # are denser than the sparse sensor history, so keep both), deduped by timestamp.
+                merged = {p['timestamp']: p for p in existing_actual.get(name, [])}
+                for p in backfill:
+                    merged.setdefault(p['timestamp'], p)
+                log = sorted(merged.values(), key=lambda p: p['timestamp'])
+                # Append the current reading (deduped to ~1 point / 5 min).
+                if cur_temp is not None and (
+                    not log or datetime.fromisoformat(log[-1]['timestamp']) < datetime.now() - timedelta(minutes=5)
+                ):
+                    log.append({'timestamp': now_iso, 'temp': round(cur_temp, 3)})
+                # Keep only points within the current horizon.
+                existing_actual[name] = [
+                    p for p in log if datetime.fromisoformat(p['timestamp']) >= horizon_start
+                ]
+            update = {'id': 'predictions', 'thermal_temp_actual': existing_actual,
+                      'updated_at': now_iso}
+            if thermal_temp_predictions:
+                update['thermal_temp'] = thermal_temp_predictions
+            existing.update(update)
+            db.upsert(existing, Query().id == 'predictions')
+
+        logger.info(f"✅ Heat-pump setpoint plan updated for {len(thermal_summary)} device(s)")
+
+    def _setpoints_to_schedule(self, setpoints, device_key, horizon_start, horizon_end, slot_minutes):
+        """Group a per-slot setpoint array into schedule-doc ranges carrying a ``setpoint`` value.
+
+        Only future slots (end after "now") are emitted; consecutive slots with the same setpoint
+        are merged into one range. Each entry is ``{device, start, stop, setpoint}``; the scheduler
+        writes the setpoint via the device's ``start`` action with ``{setpoint}`` in the payload.
+        """
+        if not setpoints:
+            return []
+        now = datetime.now()
+        entries = []
+        run_start = None
+        run_value = None
+        n = len(setpoints)
+        for i in range(n):
+            v = setpoints[i]
+            if run_value is None:
+                run_start, run_value = i, v
+            elif v != run_value:
+                entries.append((run_start, i, run_value))
+                run_start, run_value = i, v
+        entries.append((run_start, n, run_value))
+
+        out = []
+        for start_i, stop_i, value in entries:
+            start_dt = horizon_start + timedelta(minutes=start_i * slot_minutes)
+            stop_dt = min(horizon_start + timedelta(minutes=stop_i * slot_minutes), horizon_end)
+            if stop_dt <= now:
+                continue  # wholly in the past
+            out.append({
+                'device': device_key,
+                'start': start_dt.isoformat(),
+                'stop': stop_dt.isoformat(),
+                'setpoint': value,
+            })
+        return out
 
     async def recalculate_ev_deadline_plans(self, full_replan: bool = True):
         """Recalculate EV deadline-charging plans based on current SOC, target, and deadline.
@@ -962,6 +1118,8 @@ class HeatpumpOptimizer:
             headline = 'Target SOC reached'
         elif status == 'missing_inputs':
             headline = 'Inputs unavailable'
+        elif status == 'deadline_passed':
+            headline = 'Deadline passed'
         elif status == 'no_slots':
             headline = 'No slots left before the deadline'
         else:
@@ -1046,7 +1204,8 @@ class HeatpumpOptimizer:
         """Extract time slots for a device from schedule.
         
         Expands merged blocks back into individual slot times.
-        Returns all slots (past and future) - filtering is done by limit_battery_cycles.
+        Returns all slots (past and future); the battery LP keeps the past ones and re-solves
+        the future from the current measured SOC.
         """
         times = []
         

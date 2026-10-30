@@ -149,6 +149,12 @@ async def main():
                 logger.info("✅ EV deadline-charging plan recalculation completed successfully")
             except Exception as e:
                 logger.error(f"❌ Error during EV deadline-charging plan recalculation: {e}", exc_info=True)
+        logger.info("🔥 Running scheduled heat-pump setpoint recalculation...")
+        try:
+            await optimizer.recalculate_thermal_setpoints()
+            logger.info("✅ Heat-pump setpoint recalculation completed successfully")
+        except Exception as e:
+            logger.error(f"❌ Error during heat-pump setpoint recalculation: {e}", exc_info=True)
         logger.info("🔋 Running scheduled battery SOC recalculation...")
         try:
             await optimizer.recalculate_battery_limits()
